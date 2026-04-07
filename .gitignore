@@ -1,0 +1,49 @@
+# Build directories
+build/
+dist/
+out/
+
+# Object files
+*.o
+*.obj
+
+# Binary files
+*.bin
+*.iso
+*.elf
+
+# Temporary files
+*.tmp
+*.log
+
+# Tool builds
+build/tools/
+
+# Generated assets
+*.img
+*.map
+
+# Editor files
+.vscode/
+.idea/
+
+# OS / filesystem junk
+*~
+.DS_Store
+.Trashes
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temporary swap files
+*.swp
+*.swo
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.old
+*.orig

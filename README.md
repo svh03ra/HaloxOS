@@ -1,0 +1,39 @@
+# HaloxOS
+_100% **REAL** OS, Built from **SCRATCH**, Made with **AI**:_
+<img width="640" height="480" src="https://github.com/user-attachments/assets/192f7fb1-f370-4aba-b947-256ec8b5cf0e" />
+
+_<sup>(Graphical Demonstration included)</sup>_
+
+## ❓ What's that?
+This was actually made in VS Code with Codex while I was developing my own OS.
+I’ve been handling things carefully and delicately for progress... So what’s going to be build lads?
+
+## 📦 Build Instructions
+First of all, you need to understand what you will do in order to follow the instructions such like following a plan on paper:
+
+- **Be quick reminder, this will required for any 🐧 Linux OS only!**
+#
+**1.** Get to Download Repository: `git clone https://github.com/svh03ra/HaloxOS.git` from a terminal application.
+
+**2.** In the terminal, type `cd HaloxOS` to enter the directory then run `make` to build it.
+
+**3.** Have Fun!
+
+‼️ **Keep in Mind:** Remember, if you don’t have some of the required packages by simply run `make` command for the first time may install them automatically.
+
+**Unboxing the Packages:**
+```
+- nasm
+- gcc
+- binutils
+- grub
+- xorriso
+- qemu
+- pkgconf
+- libpng
+```
+
+- **If you want to get a latest build from the development progress, you need to compile yourself.**
+
+## ⚖️ License:
+This repository is licensed under the GNU General Public License. You can view the full license here: [License Available](https://github.com/svh03ra/HaloxOS/blob/main/LICENSE)
