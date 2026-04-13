@@ -18,6 +18,7 @@ out/
 
 # Tool builds
 build/tools/
+build/isodir/
 
 # Generated assets
 *.img
