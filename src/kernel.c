@@ -1,8 +1,8 @@
 /*
-    HaloxOS - Version 1.01 Beta!
+    HaloxOS - Version 1.0 Dev!
     Copyright Svh03ra (C) 2026, All rights reserved.
     Source File: kernel.c, main core.
-    Build: 7th April 2026
+    Build: 13th April 2026
 
     Made in AI used: GPT-5.4 for Visual Code Editor at Codex.
 */
@@ -201,90 +201,6 @@ typedef struct {
     bool fifo_ready;
 } VmwareSvgaState;
 
-typedef struct {
-    char signature[8];
-    uint8_t checksum;
-    char oem_id[6];
-    uint8_t revision;
-    uint32_t rsdt_address;
-    uint32_t length;
-    uint64_t xsdt_address;
-    uint8_t extended_checksum;
-    uint8_t reserved[3];
-} __attribute__((packed)) RsdpDescriptor20;
-
-typedef struct {
-    char signature[4];
-    uint32_t length;
-    uint8_t revision;
-    uint8_t checksum;
-    char oem_id[6];
-    char oem_table_id[8];
-    uint32_t oem_revision;
-    uint32_t creator_id;
-    uint32_t creator_revision;
-} __attribute__((packed)) AcpiSdtHeader;
-
-typedef struct {
-    uint16_t pm1a_control;
-    uint16_t pm1b_control;
-    uint16_t sleep_type_a;
-    uint16_t sleep_type_b;
-    uint16_t smi_command_port;
-    uint8_t acpi_enable_value;
-    bool available;
-    bool enable_needed;
-    bool initialized;
-} AcpiPowerState;
-
-typedef struct {
-    uint16_t attributes;
-    uint8_t window_a;
-    uint8_t window_b;
-    uint16_t granularity;
-    uint16_t window_size;
-    uint16_t segment_a;
-    uint16_t segment_b;
-    uint32_t window_function_ptr;
-    uint16_t pitch;
-    uint16_t width;
-    uint16_t height;
-    uint8_t char_width;
-    uint8_t char_height;
-    uint8_t planes;
-    uint8_t bpp;
-    uint8_t banks;
-    uint8_t memory_model;
-    uint8_t bank_size;
-    uint8_t image_pages;
-    uint8_t reserved0;
-    uint8_t red_mask_size;
-    uint8_t red_field_position;
-    uint8_t green_mask_size;
-    uint8_t green_field_position;
-    uint8_t blue_mask_size;
-    uint8_t blue_field_position;
-    uint8_t reserved_mask_size;
-    uint8_t reserved_field_position;
-    uint8_t direct_color_mode_info;
-    uint32_t phys_base;
-    uint32_t offscreen_mem_offset;
-    uint16_t offscreen_mem_size;
-    uint16_t linear_pitch;
-    uint8_t banked_image_pages;
-    uint8_t linear_image_pages;
-    uint8_t lin_red_mask_size;
-    uint8_t lin_red_field_position;
-    uint8_t lin_green_mask_size;
-    uint8_t lin_green_field_position;
-    uint8_t lin_blue_mask_size;
-    uint8_t lin_blue_field_position;
-    uint8_t lin_reserved_mask_size;
-    uint8_t lin_reserved_field_position;
-    uint32_t max_pixel_clock;
-    uint8_t reserved1[190];
-} __attribute__((packed)) VbeModeInfo;
-
 static const char *app_titles[APP_COUNT] = {
     "Notepad",
     "Prompt",
@@ -354,7 +270,6 @@ static volatile uint32_t timer_ticks = 0;
 static int explorer_selected = 0;
 static VideoBackend video_backend = VIDEO_BACKEND_NONE;
 static VmwareSvgaState vmware_svga;
-static AcpiPowerState acpi_power;
 static char boot_status_text[80];
 
 static uint8_t color_black;
@@ -556,30 +471,6 @@ static bool starts_with(const char *text, const char *prefix) {
     return true;
 }
 
-static int memcmp_local(const void *lhs, const void *rhs, size_t len) {
-    const uint8_t *a = (const uint8_t *)lhs;
-    const uint8_t *b = (const uint8_t *)rhs;
-
-    for (size_t i = 0; i < len; ++i) {
-        if (a[i] != b[i]) {
-            return (int)a[i] - (int)b[i];
-        }
-    }
-
-    return 0;
-}
-
-static uint8_t checksum_bytes(const void *data, size_t len) {
-    const uint8_t *bytes = (const uint8_t *)data;
-    uint8_t sum = 0;
-
-    for (size_t i = 0; i < len; ++i) {
-        sum = (uint8_t)(sum + bytes[i]);
-    }
-
-    return sum;
-}
-
 static int clampi(int value, int min, int max) {
     if (value < min) {
         return min;
@@ -733,8 +624,6 @@ static void append_padded_uint(char *dest, size_t *len, size_t max_len, uint32_t
 #define SVGA_CMD_UPDATE 1
 
 #define VMWARE_GUEST_ID_OTHER 0x500A
-#define ACPI_PM1_SCI_EN 0x0001
-#define ACPI_PM1_SLP_EN 0x2000
 
 static void build_system_palette(void) {
     int index = 0;
@@ -1070,247 +959,6 @@ static bool detect_video_mode_switch(void) {
     return video_backend == VIDEO_BACKEND_BGA || video_backend == VIDEO_BACKEND_VMWARE_SVGA;
 }
 
-static const RsdpDescriptor20 *scan_rsdp_range(uintptr_t start, uintptr_t end) {
-    start = (start + 15u) & ~(uintptr_t)15u;
-
-    for (uintptr_t address = start; address + 20u <= end; address += 16u) {
-        const RsdpDescriptor20 *rsdp = (const RsdpDescriptor20 *)(uintptr_t)address;
-        if (memcmp_local(rsdp->signature, "RSD PTR ", 8) != 0) {
-            continue;
-        }
-        if (checksum_bytes(rsdp, 20) != 0) {
-            continue;
-        }
-        if (rsdp->revision >= 2 && rsdp->length >= 20 && checksum_bytes(rsdp, rsdp->length) != 0) {
-            continue;
-        }
-        return rsdp;
-    }
-
-    return NULL;
-}
-
-static const RsdpDescriptor20 *find_rsdp(void) {
-    uint16_t ebda_segment = *(const volatile uint16_t *)(uintptr_t)0x40E;
-    uintptr_t ebda = (uintptr_t)ebda_segment << 4;
-    const RsdpDescriptor20 *rsdp = NULL;
-
-    if (ebda != 0) {
-        rsdp = scan_rsdp_range(ebda, ebda + 1024u);
-    }
-    if (rsdp == NULL) {
-        rsdp = scan_rsdp_range(0xE0000u, 0x100000u);
-    }
-
-    return rsdp;
-}
-
-static const AcpiSdtHeader *find_acpi_table(const char *signature) {
-    const RsdpDescriptor20 *rsdp = find_rsdp();
-
-    if (rsdp == NULL) {
-        return NULL;
-    }
-
-    if (rsdp->rsdt_address != 0) {
-        const AcpiSdtHeader *rsdt = (const AcpiSdtHeader *)(uintptr_t)rsdp->rsdt_address;
-        if (memcmp_local(rsdt->signature, "RSDT", 4) == 0 && checksum_bytes(rsdt, rsdt->length) == 0) {
-            size_t entries = (rsdt->length - sizeof(AcpiSdtHeader)) / 4u;
-            const uint32_t *table_ptrs = (const uint32_t *)((const uint8_t *)rsdt + sizeof(AcpiSdtHeader));
-            for (size_t i = 0; i < entries; ++i) {
-                const AcpiSdtHeader *table = (const AcpiSdtHeader *)(uintptr_t)table_ptrs[i];
-                if (memcmp_local(table->signature, signature, 4) == 0 && checksum_bytes(table, table->length) == 0) {
-                    return table;
-                }
-            }
-        }
-    }
-
-    if (rsdp->revision >= 2 && rsdp->xsdt_address != 0 && rsdp->xsdt_address <= 0xFFFFFFFFu) {
-        const AcpiSdtHeader *xsdt = (const AcpiSdtHeader *)(uintptr_t)rsdp->xsdt_address;
-        if (memcmp_local(xsdt->signature, "XSDT", 4) == 0 && checksum_bytes(xsdt, xsdt->length) == 0) {
-            size_t entries = (xsdt->length - sizeof(AcpiSdtHeader)) / 8u;
-            const uint64_t *table_ptrs = (const uint64_t *)((const uint8_t *)xsdt + sizeof(AcpiSdtHeader));
-            for (size_t i = 0; i < entries; ++i) {
-                if (table_ptrs[i] > 0xFFFFFFFFu) {
-                    continue;
-                }
-                const AcpiSdtHeader *table = (const AcpiSdtHeader *)(uintptr_t)table_ptrs[i];
-                if (memcmp_local(table->signature, signature, 4) == 0 && checksum_bytes(table, table->length) == 0) {
-                    return table;
-                }
-            }
-        }
-    }
-
-    return NULL;
-}
-
-static bool extract_sleep_types(const uint8_t *aml, size_t len, uint16_t *sleep_type_a, uint16_t *sleep_type_b) {
-    for (size_t i = 0; i + 4 < len; ++i) {
-        const uint8_t *cursor;
-        size_t package_length_bytes;
-
-        if (memcmp_local(&aml[i], "_S5_", 4) != 0) {
-            continue;
-        }
-        if (i == 0) {
-            continue;
-        }
-        if (!(aml[i - 1] == 0x08 || (i >= 2 && aml[i - 2] == 0x08 && aml[i - 1] == '\\'))) {
-            continue;
-        }
-
-        cursor = &aml[i + 4];
-        if (cursor >= aml + len) {
-            return false;
-        }
-        if (*cursor == 0x12) {
-            ++cursor;
-        }
-        if (cursor >= aml + len) {
-            return false;
-        }
-
-        package_length_bytes = (size_t)((*cursor & 0xC0u) >> 6);
-        ++cursor;
-        if (cursor + package_length_bytes >= aml + len) {
-            return false;
-        }
-        cursor += package_length_bytes;
-
-        if (cursor < aml + len && *cursor == 0x0A) {
-            ++cursor;
-        }
-        if (cursor >= aml + len) {
-            return false;
-        }
-        *sleep_type_a = (uint16_t)(*cursor << 10);
-        ++cursor;
-
-        if (cursor < aml + len && *cursor == 0x0A) {
-            ++cursor;
-        }
-        if (cursor >= aml + len) {
-            return false;
-        }
-        *sleep_type_b = (uint16_t)(*cursor << 10);
-        return true;
-    }
-
-    return false;
-}
-
-static void init_acpi_power(void) {
-    const AcpiSdtHeader *fadt;
-    const uint8_t *fadt_bytes;
-    uint32_t dsdt_address;
-    const AcpiSdtHeader *dsdt;
-
-    if (acpi_power.initialized) {
-        return;
-    }
-
-    acpi_power.initialized = true;
-    fadt = find_acpi_table("FACP");
-    if (fadt == NULL || fadt->length < 72) {
-        return;
-    }
-
-    fadt_bytes = (const uint8_t *)fadt;
-    dsdt_address = *(const uint32_t *)(const void *)(fadt_bytes + 40);
-    if (dsdt_address == 0) {
-        return;
-    }
-
-    dsdt = (const AcpiSdtHeader *)(uintptr_t)dsdt_address;
-    if (memcmp_local(dsdt->signature, "DSDT", 4) != 0 || checksum_bytes(dsdt, dsdt->length) != 0) {
-        return;
-    }
-
-    acpi_power.pm1a_control = (uint16_t)(*(const uint32_t *)(const void *)(fadt_bytes + 64) & 0xFFFFu);
-    acpi_power.pm1b_control = (uint16_t)(*(const uint32_t *)(const void *)(fadt_bytes + 68) & 0xFFFFu);
-    acpi_power.smi_command_port = (uint16_t)(*(const uint32_t *)(const void *)(fadt_bytes + 48) & 0xFFFFu);
-    acpi_power.acpi_enable_value = *(const uint8_t *)(const void *)(fadt_bytes + 52);
-    acpi_power.enable_needed = acpi_power.smi_command_port != 0 && acpi_power.acpi_enable_value != 0;
-
-    if (acpi_power.pm1a_control == 0) {
-        return;
-    }
-
-    if (!extract_sleep_types((const uint8_t *)dsdt + sizeof(AcpiSdtHeader),
-                             dsdt->length - sizeof(AcpiSdtHeader),
-                             &acpi_power.sleep_type_a,
-                             &acpi_power.sleep_type_b)) {
-        return;
-    }
-
-    acpi_power.available = true;
-}
-
-static void attempt_acpi_poweroff(void) {
-    init_acpi_power();
-
-    if (!acpi_power.available) {
-        return;
-    }
-
-    if (acpi_power.enable_needed && (inw(acpi_power.pm1a_control) & ACPI_PM1_SCI_EN) == 0) {
-        outb(acpi_power.smi_command_port, acpi_power.acpi_enable_value);
-        for (int i = 0; i < 300000; ++i) {
-            if ((inw(acpi_power.pm1a_control) & ACPI_PM1_SCI_EN) != 0) {
-                break;
-            }
-        }
-    }
-
-    outw(acpi_power.pm1a_control, (uint16_t)(acpi_power.sleep_type_a | ACPI_PM1_SLP_EN));
-    if (acpi_power.pm1b_control != 0) {
-        outw(acpi_power.pm1b_control, (uint16_t)(acpi_power.sleep_type_b | ACPI_PM1_SLP_EN));
-    }
-}
-
-static bool init_vbe_framebuffer(const MultibootInfo *mbi) {
-    const VbeModeInfo *vbe;
-    uint32_t pitch;
-    uint8_t bpp;
-
-    if ((mbi->flags & (1u << 11)) == 0 || mbi->vbe_mode_info == 0) {
-        return false;
-    }
-
-    vbe = (const VbeModeInfo *)(uintptr_t)mbi->vbe_mode_info;
-    if ((vbe->attributes & 0x0080u) == 0 || vbe->phys_base == 0) {
-        return false;
-    }
-
-    bpp = vbe->bpp;
-    if (bpp != 8 && bpp != 15 && bpp != 16 && bpp != 24 && bpp != 32) {
-        return false;
-    }
-
-    if (vbe->width < OS_WIDTH ||
-        vbe->height < OS_HEIGHT ||
-        vbe->width > MAX_OUTPUT_WIDTH ||
-        vbe->height > MAX_OUTPUT_HEIGHT) {
-        return false;
-    }
-
-    pitch = vbe->linear_pitch != 0 ? vbe->linear_pitch : vbe->pitch;
-    if (pitch == 0) {
-        pitch = (uint32_t)vbe->width * (((uint32_t)bpp + 7u) / 8u);
-    }
-
-    fb.address = (uint8_t *)(uintptr_t)vbe->phys_base;
-    fb.width = vbe->width;
-    fb.height = vbe->height;
-    fb.pitch = pitch;
-    fb.bpp = bpp;
-    video_backend = VIDEO_BACKEND_MULTIBOOT;
-    update_present_maps();
-    return true;
-}
-
 static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t bpp) {
     uint16_t actual_bpp = bpp;
 
@@ -1399,7 +1047,7 @@ static bool set_output_mode(const SettingsState *state) {
 }
 
 static void enter_boot_text_mode(void) {
-    boot_text_mode = video_backend != VIDEO_BACKEND_MULTIBOOT;
+    boot_text_mode = true;
     if (video_backend == VIDEO_BACKEND_BGA && video_mode_switch_available) {
         bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
     } else if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
@@ -1408,16 +1056,6 @@ static void enter_boot_text_mode(void) {
 }
 
 static void enter_main_graphics_mode(void) {
-    if (video_backend == VIDEO_BACKEND_MULTIBOOT &&
-        fb.address != NULL &&
-        fb.width >= OS_WIDTH &&
-        fb.height >= OS_HEIGHT) {
-        boot_text_mode = false;
-        update_present_maps();
-        program_vga_palette();
-        return;
-    }
-
     if (!set_framebuffer_mode_raw(OS_WIDTH, OS_HEIGHT, 8)) {
         return;
     }
@@ -1572,10 +1210,6 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
         }
     }
 
-    if (init_vbe_framebuffer(mbi)) {
-        return true;
-    }
-
     if (init_vmware_svga_backend()) {
         return true;
     }
@@ -1622,15 +1256,6 @@ static void present(void) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             for (uint32_t x = 0; x < fb.width; ++x) {
                 dest[x] = src[present_x_map[x]];
-            }
-            continue;
-        }
-
-        if (fb.bpp == 15) {
-            uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = palette[src[present_x_map[x]]];
-                dest[x] = (uint16_t)(((c.r >> 3) << 10) | ((c.g >> 3) << 5) | (c.b >> 3));
             }
             continue;
         }
@@ -2371,7 +1996,6 @@ static void open_desktop(void) {
 }
 
 static void attempt_poweroff(void) {
-    attempt_acpi_poweroff();
     outw(0x604, 0x2000);
     outw(0xB004, 0x2000);
     outw(0x4004, 0x3400);
@@ -3138,35 +2762,6 @@ static void render_cursor(void) {
 }
 
 static void render_boot_terminal_text(void) {
-    if (!boot_text_mode) {
-        const int line_x = 16;
-        const int line_y = 64;
-        const int line_h = 10;
-        const int max_rows = 37;
-        const int prompt_y = OS_HEIGHT - 24;
-        int start = boot_term.line_count > max_rows ? boot_term.line_count - max_rows : 0;
-        int row_y = line_y;
-        int input_w = OS_WIDTH - 48;
-        int max_chars = input_w / 8;
-        int input_start = boot_term.input_len > max_chars ? boot_term.input_len - max_chars : 0;
-
-        clear_screen(color_black);
-        draw_text(line_x, 16, "HaloxOS Command Prompt", color_gray_light, color_black, true);
-        draw_text(line_x, 32, "Type 'boot' to start the desktop. ESC returns to boot menu.", color_gray_light, color_black, true);
-
-        for (int i = start; i < boot_term.line_count && row_y < prompt_y - line_h; ++i, row_y += line_h) {
-            draw_text_clipped(line_x, row_y, OS_WIDTH - 32, boot_term.lines[i], color_gray_light, color_black, true);
-        }
-
-        draw_text(line_x, prompt_y, "A:\\>", color_gray_light, color_black, true);
-        draw_text_clipped(line_x + 32, prompt_y, input_w, &boot_term.input[input_start], color_gray_light, color_black, true);
-        if (((timer_ticks / TERMINAL_CURSOR_BLINK_TICKS) & 1u) == 0) {
-            int visible_chars = boot_term.input_len - input_start;
-            draw_text(line_x + 32 + visible_chars * 8, prompt_y, "_", color_gray_light, color_black, true);
-        }
-        return;
-    }
-
     const int top_row = 4;
     const int max_rows = 18;
     int start = boot_term.line_count > max_rows ? boot_term.line_count - max_rows : 0;
@@ -3187,18 +2782,6 @@ static void render_boot_terminal_text(void) {
 }
 
 static void render_boot_menu(void) {
-    if (!boot_text_mode) {
-        clear_screen(color_black);
-        draw_text_center_scaled(OS_WIDTH / 2, 102, "Hello World! Greetings HaloxOS!", color_blue, color_black, true, 2);
-        draw_text_center_scaled(OS_WIDTH / 2, 126, "Select an option to choose boot:", color_blue, color_black, true, 2);
-        draw_text_center_scaled(OS_WIDTH / 2, 194, "1) Main Boot", color_gray_light, color_black, true, 2);
-        draw_text_center_scaled(OS_WIDTH / 2, 242, "2) Command Prompt", color_gray_light, color_black, true, 2);
-        if (boot_status_text[0] != '\0') {
-            draw_text_center(OS_WIDTH / 2, 384, boot_status_text, color_red, color_black, true);
-        }
-        return;
-    }
-
     vga_text_clear(VGA_TEXT_ATTR_GRAY);
     vga_text_disable_cursor();
     draw_text_mode_center(8, "Hello World! Greetings HaloxOS!", VGA_TEXT_ATTR_BLUE);

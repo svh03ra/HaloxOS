@@ -4,12 +4,8 @@
 section .multiboot
 align 4
     dd 0x1BADB002
-    dd 0x00000007
-    dd -(0x1BADB002 + 0x00000007)
-    dd 0
-    dd 640
-    dd 480
-    dd 32
+    dd 0x00000003
+    dd -(0x1BADB002 + 0x00000003)
 
 section .text
 global start
