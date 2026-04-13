@@ -19,6 +19,11 @@
 // Backgrounds
 extern const uint8_t _binary_build_login_bin_start[];
 extern const uint8_t _binary_build_desktop_bin_start[];
+extern const uint8_t _binary_build_user_frame_bin_start[];
+extern const uint8_t _binary_build_notepad_icon_bin_start[];
+extern const uint8_t _binary_build_terminal_icon_bin_start[];
+extern const uint8_t _binary_build_game_icon_bin_start[];
+extern const uint8_t _binary_build_program_icon_bin_start[];
 
 #define OS_WIDTH 640
 #define OS_HEIGHT 480
@@ -28,7 +33,7 @@ extern const uint8_t _binary_build_desktop_bin_start[];
 #define MAX_TEXT 4096
 #define TERM_MAX_LINES 32
 #define TERM_LINE_LEN 72
-#define APP_COUNT 9
+#define APP_COUNT 10
 #define SNAKE_MAX_SEGMENTS 128
 #define MINES_SIZE 8
 #define MINES_COUNT 10
@@ -153,6 +158,7 @@ typedef enum {
     APP_SNAKE,
     APP_GUESS,
     APP_MINES,
+    APP_GAME_CENTER,
     APP_POWER,
     APP_SETTINGS
 } AppId;
@@ -203,6 +209,7 @@ static const char *app_titles[APP_COUNT] = {
     "Snake",
     "Guess Num.",
     "Minesw...",
+    "Games",
     "Power",
     "Settings"
 };
@@ -1519,8 +1526,70 @@ static bool point_in_rect(int x, int y, int rx, int ry, int rw, int rh) {
     return x >= rx && y >= ry && x < rx + rw && y < ry + rh;
 }
 
+static uint16_t image_width(const uint8_t *image) {
+    return (uint16_t)(image[0] | ((uint16_t)image[1] << 8));
+}
+
+static uint16_t image_height(const uint8_t *image) {
+    return (uint16_t)(image[2] | ((uint16_t)image[3] << 8));
+}
+
+static const uint8_t *image_pixels(const uint8_t *image) {
+    return image + 4;
+}
+
+static const uint8_t *image_alpha(const uint8_t *image) {
+    size_t count = (size_t)image_width(image) * image_height(image);
+    return image + 4 + count;
+}
+
+static int text_pixel_width(const char *text) {
+    return (int)strlen_local(text) * 8;
+}
+
+static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) {
+    uint16_t width = image_width(image);
+    uint16_t height = image_height(image);
+    const uint8_t *pixels = image_pixels(image);
+    const uint8_t *alpha = image_alpha(image);
+
+    for (uint16_t py = 0; py < height; ++py) {
+        for (uint16_t px = 0; px < width; ++px) {
+            size_t index = (size_t)py * width + px;
+            if (!transparent || alpha[index] >= 128) {
+                draw_pixel(x + px, y + py, pixels[index]);
+            }
+        }
+    }
+}
+
 static void draw_image(const uint8_t *image) {
-    memcpy_local(backbuffer, image, OS_WIDTH * OS_HEIGHT);
+    draw_image_at(image, 0, 0, false);
+}
+
+static void desktop_icon_bounds(int x, int y, const uint8_t *image, const char *label, int *out_x, int *out_y, int *out_w, int *out_h) {
+    int icon_w = image_width(image);
+    int icon_h = image_height(image);
+    int label_w = text_pixel_width(label);
+    int width = icon_w > label_w ? icon_w : label_w;
+
+    *out_x = x;
+    *out_y = y;
+    *out_w = width;
+    *out_h = icon_h + 18;
+}
+
+static void draw_desktop_icon(int x, int y, const uint8_t *image, const char *label) {
+    int box_x;
+    int box_y;
+    int box_w;
+    int box_h;
+    int icon_w = image_width(image);
+    int label_w = text_pixel_width(label);
+
+    desktop_icon_bounds(x, y, image, label, &box_x, &box_y, &box_w, &box_h);
+    draw_image_at(image, box_x + (box_w - icon_w) / 2, box_y, true);
+    draw_text(box_x + (box_w - label_w) / 2, box_y + image_height(image) + 8, label, color_black, 0, true);
 }
 
 static uint8_t solid_color_index(uint8_t mode) {
@@ -1866,16 +1935,18 @@ static void open_window(AppId app) {
     Window *window = &windows[app];
     if (!window->open) {
         window->open = true;
-        window->title = app_titles[app];
+        window->title = app == APP_GAME_CENTER ? "Game Center" : app_titles[app];
         window->w = (app == APP_SETTINGS) ? 400 :
                     (app == APP_POWER ? 220 :
+                    (app == APP_GAME_CENTER ? 360 :
                     (app == APP_PAINT ? 340 :
-                    (app == APP_EXPLORER ? 336 : 300)));
+                    (app == APP_EXPLORER ? 336 : 300))));
         window->h = (app == APP_SETTINGS) ? 260 :
                     (app == APP_POWER ? 160 :
+                    (app == APP_GAME_CENTER ? 230 :
                     (app == APP_MINES ? 250 :
                     (app == APP_PAINT ? 240 :
-                    (app == APP_EXPLORER ? 220 : 200))));
+                    (app == APP_EXPLORER ? 220 : 200)))));
         window->x = 70 + app * 18;
         window->y = 40 + app * 12;
         if (window->x + window->w > OS_WIDTH - 10) {
@@ -2487,6 +2558,25 @@ static void render_mines(const Window *window) {
     }
 }
 
+static void render_game_center(const Window *window) {
+    static const char *games[] = {"Minesweeper", "Snake", "Guess Number"};
+    int header_icon_w = image_width(_binary_build_game_icon_bin_start);
+    int header_text_w = text_pixel_width("Game Center");
+    int header_x = window->x + (window->w - (header_icon_w + 8 + header_text_w)) / 2;
+    int list_y = window->y + 112;
+
+    fill_rect(window->x + 8, window->y + 24, window->w - 16, window->h - 32, color_white);
+    draw_image_at(_binary_build_game_icon_bin_start, header_x, window->y + 36, true);
+    draw_text(header_x + header_icon_w + 8, window->y + 48, "Game Center", color_black, color_white, true);
+    draw_text(window->x + 20, window->y + 80, "Welcome games! Choose one to play:", color_black, color_white, true);
+
+    for (int i = 0; i < 3; ++i) {
+        int row_y = list_y + i * 34;
+        draw_image_at(_binary_build_program_icon_bin_start, window->x + 24, row_y, true);
+        draw_text(window->x + 64, row_y + 12, games[i], color_black, color_white, true);
+    }
+}
+
 static void render_power(const Window *window) {
     int x = window->x + 20;
     int y = window->y + 36;
@@ -2556,6 +2646,7 @@ static void render_app_window(AppId app) {
         case APP_SNAKE: render_snake(window); break;
         case APP_GUESS: render_guess(window); break;
         case APP_MINES: render_mines(window); break;
+        case APP_GAME_CENTER: render_game_center(window); break;
         case APP_POWER: render_power(window); break;
         case APP_SETTINGS: render_settings(window); break;
     }
@@ -2595,13 +2686,11 @@ static void render_start_menu(void) {
     draw_text(x + 8, y + 56, "Paint", color_black, color_gray_light, true);
     draw_text(x + 8, y + 72, "Explorer", color_black, color_gray_light, true);
     draw_text(x + 8, y + 96, "Games:", color_blue_dark, color_gray_light, true);
-    draw_text(x + 8, y + 112, "Snake", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 128, "Guess Number", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 144, "Minesweeper", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 168, "Options:", color_blue_dark, color_gray_light, true);
-    draw_text(x + 8, y + 184, "Power Options", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 200, "Settings", color_black, color_gray_light, true);
-    draw_text(x + 100, y + 200, "x Close", color_red, color_gray_light, true);
+    draw_text(x + 8, y + 112, "Game Center", color_black, color_gray_light, true);
+    draw_text(x + 8, y + 144, "Options:", color_blue_dark, color_gray_light, true);
+    draw_text(x + 8, y + 160, "Power Options", color_black, color_gray_light, true);
+    draw_text(x + 8, y + 176, "Settings", color_black, color_gray_light, true);
+    draw_text(x + 8, y + 192, "x Close", color_red, color_gray_light, true);
 }
 
 static void render_context_menu(void) {
@@ -2616,15 +2705,8 @@ static void render_context_menu(void) {
 }
 
 static void render_desktop_icons(void) {
-    fill_rect(18, 24, 48, 48, color_desktop_icon);
-    draw_rect(18, 24, 48, 48, color_black);
-    draw_text(22, 42, "CLICK", color_blue_dark, color_desktop_icon, true);
-    draw_text(14, 76, "Explorer", color_black, 0, true);
-
-    fill_rect(18, 104, 48, 48, color_desktop_icon);
-    draw_rect(18, 104, 48, 48, color_black);
-    draw_text(22, 122, "CLICK", color_blue_dark, color_desktop_icon, true);
-    draw_text(18, 156, "Notepad", color_black, 0, true);
+    draw_desktop_icon(18, 24, _binary_build_notepad_icon_bin_start, "Notepad");
+    draw_desktop_icon(18, 104, _binary_build_terminal_icon_bin_start, "Terminal");
 }
 
 static void render_cursor(void) {
@@ -2712,11 +2794,32 @@ static void render_boot_menu(void) {
 }
 
 static void render_login(void) {
+    const char *line1 = "Welcome! Enter to your login access:";
+    const char *line2 = "Press ENTER to start";
+    const char *line3 = "Press ESC to shutdown";
+    int icon_w = image_width(_binary_build_user_frame_bin_start);
+    int text_w = text_pixel_width(line1);
+    int text_x;
+    int icon_x;
+
+    if (text_pixel_width(line2) > text_w) {
+        text_w = text_pixel_width(line2);
+    }
+    if (text_pixel_width(line3) > text_w) {
+        text_w = text_pixel_width(line3);
+    }
+
+    icon_x = (OS_WIDTH - (icon_w + 16 + text_w)) / 2;
+    text_x = icon_x + icon_w + 16;
+
     draw_image(_binary_build_login_bin_start);
-    draw_text_center_scaled(OS_WIDTH / 2, 176, "Welcome! Enter to your login access:", color_black, 0, true, 2);
-    draw_text_center_scaled(OS_WIDTH / 2, 214, "Press ENTER to start", color_black, 0, true, 2);
-    draw_text_center_scaled(OS_WIDTH / 2, 238, "Press ESC to shutdown", color_black, 0, true, 2);
-    draw_text_center(OS_WIDTH / 2, 450, "Available here! https://github.com/svh03ra/HaloxOS", color_black, color_gray_light, true);}
+    draw_image_at(_binary_build_user_frame_bin_start, icon_x, 182, true);
+    draw_text(text_x, 190, line1, color_black, 0, true);
+    draw_text(text_x, 216, line2, color_black, 0, true);
+    draw_text(text_x, 227, line3, color_black, 0, true);
+    draw_text_center(OS_WIDTH / 2, 460, "For Development Purposes only!", color_black, color_gray_light, true);
+    draw_text_center(OS_WIDTH / 2, 450, "Available here! https://github.com/svh03ra/HaloxOS", color_black, color_gray_light, true);
+}
 
 static void render_desktop(void) {
     draw_desktop_background();
@@ -2735,8 +2838,8 @@ static void render_desktop(void) {
     }
 
     render_cursor();
-    draw_text(467, 430,  "HaloxOS Version 1.01B", color_black, color_gray_light, true);
-    draw_text(467, 440,  "For Demo",             color_black, color_gray_light, true);
+    draw_text(438, 430,  "HaloxOS Version 1.0D", color_black, color_gray_light, true);
+    draw_text(438, 440,  "For Testing purposes only",             color_black, color_gray_light, true);
 }
 
 static void render_shutdown(void) {
@@ -2803,17 +2906,10 @@ static void handle_start_menu_click(void) {
         case 1: open_window(APP_CMD); break;
         case 2: open_window(APP_PAINT); break;
         case 3: open_window(APP_EXPLORER); break;
-        case 5: open_window(APP_SNAKE); break;
-        case 6: open_window(APP_GUESS); break;
-        case 7: open_window(APP_MINES); break;
-        case 10: open_window(APP_POWER); break;
-        case 11:
-            if (mouse.x > x + 92) {
-                menu_open = false;
-            } else {
-                open_window(APP_SETTINGS);
-            }
-            break;
+        case 5: open_window(APP_GAME_CENTER); break;
+        case 8: open_window(APP_POWER); break;
+        case 9: open_window(APP_SETTINGS); break;
+        case 10: menu_open = false; break;
         default: break;
     }
 }
@@ -2870,11 +2966,21 @@ static void handle_desktop_mouse(void) {
         context_menu_y = clampi(mouse.y, 0, OS_HEIGHT - TASKBAR_H - 60);
     }
 
-    if (button_clicked(18, 24, 48, 60)) {
-        open_window(APP_EXPLORER);
-    }
-    if (button_clicked(18, 104, 48, 60)) {
-        open_window(APP_NOTEPAD);
+    {
+        int icon_x;
+        int icon_y;
+        int icon_w;
+        int icon_h;
+
+        desktop_icon_bounds(18, 24, _binary_build_notepad_icon_bin_start, "Notepad", &icon_x, &icon_y, &icon_w, &icon_h);
+        if (button_clicked(icon_x, icon_y, icon_w, icon_h)) {
+            open_window(APP_NOTEPAD);
+        }
+
+        desktop_icon_bounds(18, 104, _binary_build_terminal_icon_bin_start, "Terminal", &icon_x, &icon_y, &icon_w, &icon_h);
+        if (button_clicked(icon_x, icon_y, icon_w, icon_h)) {
+            open_window(APP_CMD);
+        }
     }
 
     for (int app = APP_COUNT - 1; app >= 0; --app) {
@@ -2953,7 +3059,7 @@ static void handle_desktop_mouse(void) {
                         case 1: open_window(APP_NOTEPAD); break;
                         case 2: open_window(APP_CMD); break;
                         case 3: open_window(APP_PAINT); break;
-                        case 4: open_window(APP_SNAKE); break;
+                        case 4: open_window(APP_GAME_CENTER); break;
                         case 5: open_window(APP_SETTINGS); break;
                         default: break;
                     }
@@ -2992,6 +3098,21 @@ static void handle_desktop_mouse(void) {
                     mines_flagged[cell_y][cell_x] = !mines_flagged[cell_y][cell_x];
                 }
             }
+        }
+    }
+
+    if (windows[APP_GAME_CENTER].open && active_window == APP_GAME_CENTER && mouse.left && !mouse.prev_left) {
+        Window *window = &windows[APP_GAME_CENTER];
+        int row_x = window->x + 20;
+        int row_y = window->y + 108;
+        int row_w = window->w - 40;
+
+        if (point_in_rect(mouse.x, mouse.y, row_x, row_y, row_w, 36)) {
+            open_window(APP_MINES);
+        } else if (point_in_rect(mouse.x, mouse.y, row_x, row_y + 34, row_w, 36)) {
+            open_window(APP_SNAKE);
+        } else if (point_in_rect(mouse.x, mouse.y, row_x, row_y + 68, row_w, 36)) {
+            open_window(APP_GUESS);
         }
     }
 

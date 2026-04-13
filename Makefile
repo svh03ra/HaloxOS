@@ -29,6 +29,11 @@ build/interrupts.o \
 build/kernel.o \
 build/login_asset.o \
 build/desktop_asset.o \
+build/user_frame_asset.o \
+build/notepad_icon_asset.o \
+build/terminal_icon_asset.o \
+build/game_icon_asset.o \
+build/program_icon_asset.o \
 
 .PHONY: all clean run install-deps
 all: check-build install-deps $(ISO)
@@ -82,10 +87,40 @@ build/login.bin: src/bg/login.png build/tools/png2indexed | build
 build/desktop.bin: src/bg/desktop.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
+build/user_frame.bin: src/item/user/user-frame.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/notepad_icon.bin: src/item/notepad.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/terminal_icon.bin: src/item/terminal.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/game_icon.bin: src/item/game.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/program_icon.bin: src/item/program.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
 build/login_asset.o: build/login.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/desktop_asset.o: build/desktop.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/user_frame_asset.o: build/user_frame.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/notepad_icon_asset.o: build/notepad_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/terminal_icon_asset.o: build/terminal_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/game_icon_asset.o: build/game_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/program_icon_asset.o: build/program_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/boot.o: src/boot.asm | build

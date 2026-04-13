@@ -4,9 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define TARGET_W 640
-#define TARGET_H 480
-
 typedef struct {
     uint8_t r;
     uint8_t g;
@@ -123,11 +120,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // if you enable these lines due to size restriction so any image size works
-    /*if (width != TARGET_W || height != TARGET_H) {
-        fprintf(stderr, "%s must be %dx%d, got %dx%d\n", argv[1], TARGET_W, TARGET_H, width, height);
+    if (width <= 0 || height <= 0 || width > 65535 || height > 65535) {
+        fprintf(stderr, "%s has unsupported size %dx%d\n", argv[1], width, height);
         return 1;
-    }*/
+    }
 
     Color palette[256];
     build_system_palette(palette);
@@ -138,12 +134,25 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    {
+        uint16_t dims[2] = {(uint16_t)width, (uint16_t)height};
+        fwrite(dims, sizeof(uint16_t), 2, output);
+    }
+
     for (int y = 0; y < height; ++y) {
         png_bytep row = rows[y];
         for (int x = 0; x < width; ++x) {
             png_bytep px = &row[x * 4];
             uint8_t index = nearest_color(palette, px[0], px[1], px[2]);
             fwrite(&index, 1, 1, output);
+        }
+    }
+
+    for (int y = 0; y < height; ++y) {
+        png_bytep row = rows[y];
+        for (int x = 0; x < width; ++x) {
+            uint8_t alpha = row[x * 4 + 3];
+            fwrite(&alpha, 1, 1, output);
         }
         free(rows[y]);
     }
