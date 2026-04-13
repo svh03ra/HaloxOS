@@ -23,6 +23,7 @@ build/isodir/
 # Generated assets
 *.img
 *.map
+*.ppm
 
 # Editor files
 .vscode/
