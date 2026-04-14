@@ -47,5 +47,13 @@ First of all, you need to understand what you will do in order to follow the ins
 
 - **If you want to get a latest build from the development progress, you need to compile yourself.**
 
+#
+
+### Makefile Commands:
+**Look for the information to see how it works:**
+- Required for `make` command to compile the full build.
+- For using `make run` command to test via QEMU to ensure everything is OK.
+- To use `make clean` command to remove build artifacts for quick recovery.
+
 ## ⚖️ License:
 This repository is licensed under the GNU General Public License. You can view the full license here: [License Available](https://github.com/svh03ra/HaloxOS/blob/main/LICENSE)
