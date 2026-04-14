@@ -8,6 +8,18 @@ _<sup>(Graphical Demonstration included)</sup>_
 This was actually made in VS Code with Codex while I was developing my own OS.
 I’ve been handling things carefully and delicately for progress... So what’s going to be build lads?
 
+## 📝 System Requirements
+Let’s take a look at some requirements you may need for _pinchy salt_!
+
+**Minimum Requirements:**
+- **CPU:** `Intel i386(?)` or Fewer
+- **RAM:** `5 MB` _(Required to boot from the GRUB bootloader)_
+- **VRAM:** `1 MB` or Fewer
+- **Run as Boot:** `CDROM` _(ISO)_ Only, not the disk.
+- **Architecture:** `32-Bit` _(x86)_ Only, x64 can run as well.
+
+**If you have fewer specifications, you can run it at the same time!**
+
 ## 📦 Build Instructions
 First of all, you need to understand what you will do in order to follow the instructions such like following a plan on paper:
 
