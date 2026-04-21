@@ -22,7 +22,9 @@ jobs:
             gcc \
             binutils \
             grub-pc-bin \
+            grub-common \
             xorriso \
+            mtools \
             pkg-config \
             libpng-dev \
             qemu-system-x86
@@ -30,8 +32,7 @@ jobs:
       - name: Build
         run: make
 
-      - name: Verify ISO was created
+      - name: Verify ISO
         run: |
           test -s build/os.iso
           echo "ISO is ready: build/os.iso"
-          ls -lh build/os.iso
