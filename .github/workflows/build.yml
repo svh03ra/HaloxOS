@@ -1,0 +1,37 @@
+name: Build Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nasm \
+            gcc \
+            binutils \
+            grub-pc-bin \
+            xorriso \
+            pkg-config \
+            libpng-dev \
+            qemu-system-x86
+
+      - name: Build
+        run: make
+
+      - name: Verify ISO was created
+        run: |
+          test -s build/os.iso
+          echo "ISO is ready: build/os.iso"
+          ls -lh build/os.iso
