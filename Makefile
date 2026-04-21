@@ -34,6 +34,7 @@ build/notepad_icon_asset.o \
 build/terminal_icon_asset.o \
 build/game_icon_asset.o \
 build/program_icon_asset.o \
+build/settings_icon_asset.o \
 
 .PHONY: all clean run install-deps
 all: check-build install-deps $(ISO)
@@ -102,6 +103,9 @@ build/game_icon.bin: src/item/game.png build/tools/png2indexed | build
 build/program_icon.bin: src/item/program.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
+build/settings_icon.bin: src/item/settings.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
 build/login_asset.o: build/login.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
@@ -121,6 +125,9 @@ build/game_icon_asset.o: build/game_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/program_icon_asset.o: build/program_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/settings_icon_asset.o: build/settings_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/boot.o: src/boot.asm | build
