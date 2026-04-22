@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: png2indexed.c, converts image palette into index tool.
+
+// This repository is licensed under the GNU General Public License.
+
 #include <png.h>
 #include <stdbool.h>
 #include <stdint.h>

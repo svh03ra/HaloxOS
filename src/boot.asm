@@ -1,4 +1,6 @@
-; Copyright Svh03ra (C) 2026, All rights reserved.
+; Copyright Svh03ra (C) 2026, All rights reserved
+; This repository is licensed under the GNU General Public License.
+
 [BITS 32]
 
 section .multiboot

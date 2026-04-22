@@ -2,7 +2,7 @@
     HaloxOS - Version 1.0 Dev!
     Copyright Svh03ra (C) 2026, All rights reserved.
     Source File: kernel.c, main core.
-    Build: 13th April 2026
+    Build: 22th April 2026
 
     Made in AI used: GPT-5.4 for Visual Code Editor at Codex.
 */
@@ -15,6 +15,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "build_info.h"
 
 // Backgrounds
 extern const uint8_t _binary_build_login_bin_start[];
@@ -31,6 +33,7 @@ extern const uint8_t _binary_build_settings_icon_bin_start[];
 #define MAX_OUTPUT_WIDTH 1280
 #define MAX_OUTPUT_HEIGHT 720
 #define TASKBAR_H 28
+#define DESKTOP_ICON_COUNT 2
 #define MAX_TEXT 4096
 #define TERM_MAX_LINES 32
 #define TERM_LINE_LEN 72
@@ -51,6 +54,8 @@ extern const uint8_t _binary_build_settings_icon_bin_start[];
 #define VGA_TEXT_ROWS 25
 #define VGA_TEXT_ATTR_GRAY 0x07
 #define VGA_TEXT_ATTR_BLUE 0x09
+#define DESKTOP_LAYOUT_MAGIC 0x484C5850u
+#define DESKTOP_LAYOUT_LBA 1536u
 
 typedef enum {
     STATE_BOOT_MENU,
@@ -121,6 +126,18 @@ typedef struct {
     uint64_t length;
     uint32_t type;
 } __attribute__((packed)) MultibootMmapEntry;
+
+typedef struct {
+    int x;
+    int y;
+} DesktopIconPosition;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t checksum;
+    int32_t icon_x[DESKTOP_ICON_COUNT];
+    int32_t icon_y[DESKTOP_ICON_COUNT];
+} __attribute__((packed)) DesktopLayoutSector;
 
 typedef struct {
     uint8_t *address;
@@ -366,6 +383,17 @@ static bool cpu_has_cpuid = false;
 static bool cpu_has_tsc = false;
 static bool boot_drive_valid = false;
 static uint8_t boot_drive_number = 0;
+static bool desktop_icon_persistence_enabled = false;
+static DesktopIconPosition desktop_icons[DESKTOP_ICON_COUNT];
+static int selected_desktop_icon = -1;
+static int desktop_icon_press = -1;
+static int drag_desktop_icon = -1;
+static int desktop_icon_press_x = 0;
+static int desktop_icon_press_y = 0;
+static int desktop_icon_drag_offset_x = 0;
+static int desktop_icon_drag_offset_y = 0;
+static bool desktop_icon_drag_moved = false;
+static bool desktop_icon_press_was_selected = false;
 static bool video_mode_switch_available = false;
 static bool boot_text_mode = true;
 static volatile uint16_t *const vga_text_buffer = (volatile uint16_t *)(uintptr_t)0xB8000;
@@ -423,6 +451,85 @@ static inline uint8_t inb(uint16_t port) {
 
 static inline void io_wait(void) {
     outb(0x80, 0);
+}
+
+static bool ata_wait_ready(uint16_t status_port) {
+    for (int i = 0; i < 100000; ++i) {
+        uint8_t status = inb(status_port);
+        if ((status & 0x80u) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ata_wait_drq(uint16_t status_port) {
+    for (int i = 0; i < 100000; ++i) {
+        uint8_t status = inb(status_port);
+        if ((status & 0x01u) != 0) {
+            return false;
+        }
+        if ((status & 0x08u) != 0 && (status & 0x80u) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ata_pio_read_sector(uint32_t lba, uint8_t *buffer) {
+    const uint16_t io_base = 0x1F0;
+    const uint16_t status_port = io_base + 7;
+
+    if (!ata_wait_ready(status_port)) {
+        return false;
+    }
+
+    outb(io_base + 6, (uint8_t)(0xE0u | ((lba >> 24) & 0x0Fu)));
+    outb(io_base + 2, 1);
+    outb(io_base + 3, (uint8_t)(lba & 0xFFu));
+    outb(io_base + 4, (uint8_t)((lba >> 8) & 0xFFu));
+    outb(io_base + 5, (uint8_t)((lba >> 16) & 0xFFu));
+    outb(status_port, 0x20);
+
+    if (!ata_wait_drq(status_port)) {
+        return false;
+    }
+
+    for (int i = 0; i < 256; ++i) {
+        uint16_t word = inw(io_base);
+        buffer[i * 2 + 0] = (uint8_t)(word & 0xFFu);
+        buffer[i * 2 + 1] = (uint8_t)(word >> 8);
+    }
+
+    return true;
+}
+
+static bool ata_pio_write_sector(uint32_t lba, const uint8_t *buffer) {
+    const uint16_t io_base = 0x1F0;
+    const uint16_t status_port = io_base + 7;
+
+    if (!ata_wait_ready(status_port)) {
+        return false;
+    }
+
+    outb(io_base + 6, (uint8_t)(0xE0u | ((lba >> 24) & 0x0Fu)));
+    outb(io_base + 2, 1);
+    outb(io_base + 3, (uint8_t)(lba & 0xFFu));
+    outb(io_base + 4, (uint8_t)((lba >> 8) & 0xFFu));
+    outb(io_base + 5, (uint8_t)((lba >> 16) & 0xFFu));
+    outb(status_port, 0x30);
+
+    if (!ata_wait_drq(status_port)) {
+        return false;
+    }
+
+    for (int i = 0; i < 256; ++i) {
+        uint16_t word = (uint16_t)buffer[i * 2 + 0] | ((uint16_t)buffer[i * 2 + 1] << 8);
+        outw(io_base, word);
+    }
+
+    outb(status_port, 0xE7);
+    return ata_wait_ready(status_port);
 }
 
 static bool cpuid_is_available(void) {
@@ -1717,29 +1824,147 @@ static void draw_image(const uint8_t *image) {
     draw_image_at(image, 0, 0, false);
 }
 
+static const uint8_t *desktop_icon_image(int index) {
+    return index == 0 ? _binary_build_notepad_icon_bin_start : _binary_build_terminal_icon_bin_start;
+}
+
+static const char *desktop_icon_label(int index) {
+    return index == 0 ? "Notepad" : "Terminal";
+}
+
+static AppId desktop_icon_app(int index) {
+    return index == 0 ? APP_NOTEPAD : APP_CMD;
+}
+
+static void init_desktop_icon_defaults(void) {
+    desktop_icons[0].x = 18;
+    desktop_icons[0].y = 24;
+    desktop_icons[1].x = 18;
+    desktop_icons[1].y = 104;
+}
+
+static uint32_t desktop_layout_checksum(const DesktopLayoutSector *layout) {
+    return (uint32_t)(layout->magic ^
+                      (uint32_t)layout->icon_x[0] ^ (uint32_t)layout->icon_y[0] ^
+                      (uint32_t)layout->icon_x[1] ^ (uint32_t)layout->icon_y[1]);
+}
+
 static void desktop_icon_bounds(int x, int y, const uint8_t *image, const char *label, int *out_x, int *out_y, int *out_w, int *out_h) {
     int icon_w = image_width(image);
     int icon_h = image_height(image);
     int label_w = text_pixel_width(label);
-    int width = icon_w > label_w ? icon_w : label_w;
+    int width = (icon_w > label_w ? icon_w : label_w) + 8;
 
     *out_x = x;
     *out_y = y;
     *out_w = width;
-    *out_h = icon_h + 18;
+    *out_h = icon_h + 24;
 }
 
-static void draw_desktop_icon(int x, int y, const uint8_t *image, const char *label) {
+static void draw_dither_rect(int x, int y, int w, int h, uint8_t a, uint8_t b) {
+    int x0 = clampi(x, 0, OS_WIDTH);
+    int y0 = clampi(y, 0, OS_HEIGHT);
+    int x1 = clampi(x + w, 0, OS_WIDTH);
+    int y1 = clampi(y + h, 0, OS_HEIGHT);
+
+    for (int py = y0; py < y1; ++py) {
+        for (int px = x0; px < x1; ++px) {
+            draw_pixel(px, py, ((px + py) & 1) == 0 ? a : b);
+        }
+    }
+}
+
+static bool load_desktop_icon_positions(void) {
+    uint8_t sector[512];
+    const DesktopLayoutSector *layout = (const DesktopLayoutSector *)(const void *)sector;
+
+    if (!boot_drive_valid || boot_drive_number < 0x80u) {
+        return false;
+    }
+    if (!ata_pio_read_sector(DESKTOP_LAYOUT_LBA, sector)) {
+        return false;
+    }
+    if (layout->magic != DESKTOP_LAYOUT_MAGIC || layout->checksum != desktop_layout_checksum(layout)) {
+        return false;
+    }
+
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        if (layout->icon_x[i] < 0 || layout->icon_x[i] > OS_WIDTH - 64 ||
+            layout->icon_y[i] < 0 || layout->icon_y[i] > OS_HEIGHT - TASKBAR_H - 64) {
+            return false;
+        }
+        desktop_icons[i].x = layout->icon_x[i];
+        desktop_icons[i].y = layout->icon_y[i];
+    }
+
+    desktop_icon_persistence_enabled = true;
+    return true;
+}
+
+static void save_desktop_icon_positions(void) {
+    uint8_t sector[512];
+    DesktopLayoutSector *layout = (DesktopLayoutSector *)(void *)sector;
+
+    if (!desktop_icon_persistence_enabled) {
+        return;
+    }
+
+    memset_local(sector, 0, sizeof(sector));
+    layout->magic = DESKTOP_LAYOUT_MAGIC;
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        layout->icon_x[i] = desktop_icons[i].x;
+        layout->icon_y[i] = desktop_icons[i].y;
+    }
+    layout->checksum = desktop_layout_checksum(layout);
+    ata_pio_write_sector(DESKTOP_LAYOUT_LBA, sector);
+}
+
+static void draw_desktop_icon(int index, bool selected) {
     int box_x;
     int box_y;
     int box_w;
     int box_h;
+    int label_x;
+    int label_y;
+    int icon_x;
+    int x = desktop_icons[index].x;
+    int y = desktop_icons[index].y;
+    const uint8_t *image = desktop_icon_image(index);
+    const char *label = desktop_icon_label(index);
     int icon_w = image_width(image);
     int label_w = text_pixel_width(label);
 
     desktop_icon_bounds(x, y, image, label, &box_x, &box_y, &box_w, &box_h);
-    draw_image_at(image, box_x + (box_w - icon_w) / 2, box_y, true);
-    draw_text(box_x + (box_w - label_w) / 2, box_y + image_height(image) + 8, label, color_black, 0, true);
+    icon_x = box_x + (box_w - icon_w) / 2;
+    label_x = box_x + (box_w - label_w) / 2;
+    label_y = box_y + image_height(image) + 10;
+
+    if (selected) {
+        draw_dither_rect(box_x - 2, box_y - 2, box_w + 4, image_height(image) + 6, color_blue, color_blue_dark);
+        fill_rect(label_x - 4, label_y - 2, label_w + 8, 12, color_blue);
+        draw_text(label_x, label_y, label, color_white, color_blue, true);
+    } else {
+        draw_text(label_x, label_y, label, color_black, 0, true);
+    }
+
+    draw_image_at(image, icon_x, box_y, true);
+}
+
+static int desktop_icon_hit_test(int x, int y) {
+    for (int i = DESKTOP_ICON_COUNT - 1; i >= 0; --i) {
+        int icon_x;
+        int icon_y;
+        int icon_w;
+        int icon_h;
+
+        desktop_icon_bounds(desktop_icons[i].x, desktop_icons[i].y,
+                            desktop_icon_image(i), desktop_icon_label(i),
+                            &icon_x, &icon_y, &icon_w, &icon_h);
+        if (point_in_rect(x, y, icon_x, icon_y, icon_w, icon_h)) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 static uint8_t solid_color_index(uint8_t mode) {
@@ -3519,8 +3744,9 @@ static void render_context_menu(void) {
 }
 
 static void render_desktop_icons(void) {
-    draw_desktop_icon(18, 24, _binary_build_notepad_icon_bin_start, "Notepad");
-    draw_desktop_icon(18, 104, _binary_build_terminal_icon_bin_start, "Terminal");
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        draw_desktop_icon(i, i == selected_desktop_icon);
+    }
 }
 
 static void render_cursor(void) {
@@ -3643,7 +3869,7 @@ static void render_login(void) {
     draw_text(text_x, 190, line1, color_black, 0, true);
     draw_text(text_x, 216, line2, color_black, 0, true);
     draw_text(text_x, 227, line3, color_black, 0, true);
-    draw_text(490, 10,  "Build: '21/4/2026'", color_black, color_gray_light, true);
+    draw_text(505, 10, HALOXOS_BUILD_TEXT, color_black, color_gray_light, true);
     draw_text_center(OS_WIDTH / 2, 460, "For Development Purposes only!", color_black, color_gray_light, true);
     draw_text_center(OS_WIDTH / 2, 450, "Available here! https://github.com/svh03ra/HaloxOS", color_black, color_gray_light, true);
 }
@@ -3795,6 +4021,19 @@ static void handle_desktop_mouse(void) {
     handle_start_menu_click();
     handle_context_menu_click();
 
+    if (mouse.left && drag_desktop_icon >= 0 && drag_desktop_icon < DESKTOP_ICON_COUNT) {
+        int box_x;
+        int box_y;
+        int box_w;
+        int box_h;
+
+        desktop_icon_bounds(0, 0, desktop_icon_image(drag_desktop_icon), desktop_icon_label(drag_desktop_icon),
+                            &box_x, &box_y, &box_w, &box_h);
+        desktop_icons[drag_desktop_icon].x = clampi(mouse.x - desktop_icon_drag_offset_x, 0, OS_WIDTH - box_w);
+        desktop_icons[drag_desktop_icon].y = clampi(mouse.y - desktop_icon_drag_offset_y, 0, OS_HEIGHT - TASKBAR_H - box_h);
+        return;
+    }
+
     if (mouse.left && drag_window >= 0 && drag_window < APP_COUNT && windows[drag_window].open) {
         Window *window = &windows[drag_window];
         window->x = clampi(mouse.x - drag_offset_x, 0, OS_WIDTH - window->w);
@@ -3804,6 +4043,20 @@ static void handle_desktop_mouse(void) {
 
     if (!mouse.left) {
         drag_window = -1;
+        if (drag_desktop_icon >= 0 && desktop_icon_drag_moved) {
+            save_desktop_icon_positions();
+        } else if (desktop_icon_press >= 0 && desktop_icon_press_was_selected) {
+            open_window(desktop_icon_app(desktop_icon_press));
+            desktop_icon_press = -1;
+            drag_desktop_icon = -1;
+            desktop_icon_drag_moved = false;
+            desktop_icon_press_was_selected = false;
+            return;
+        }
+        desktop_icon_press = -1;
+        drag_desktop_icon = -1;
+        desktop_icon_drag_moved = false;
+        desktop_icon_press_was_selected = false;
     }
 
     {
@@ -3858,20 +4111,43 @@ static void handle_desktop_mouse(void) {
     }
 
     if (!pointer_over_window) {
-        int icon_x;
-        int icon_y;
-        int icon_w;
-        int icon_h;
+        int hit = desktop_icon_hit_test(mouse.x, mouse.y);
 
-        desktop_icon_bounds(18, 24, _binary_build_notepad_icon_bin_start, "Notepad", &icon_x, &icon_y, &icon_w, &icon_h);
-        if (button_clicked(icon_x, icon_y, icon_w, icon_h)) {
-            open_window(APP_NOTEPAD);
+        if (clicked && hit >= 0) {
+            desktop_icon_press = hit;
+            desktop_icon_press_x = mouse.x;
+            desktop_icon_press_y = mouse.y;
+            desktop_icon_drag_offset_x = mouse.x - desktop_icons[hit].x;
+            desktop_icon_drag_offset_y = mouse.y - desktop_icons[hit].y;
+            desktop_icon_drag_moved = false;
+            desktop_icon_press_was_selected = selected_desktop_icon == hit;
+            selected_desktop_icon = hit;
             return;
         }
 
-        desktop_icon_bounds(18, 104, _binary_build_terminal_icon_bin_start, "Terminal", &icon_x, &icon_y, &icon_w, &icon_h);
-        if (button_clicked(icon_x, icon_y, icon_w, icon_h)) {
-            open_window(APP_CMD);
+        if (mouse.left && desktop_icon_press >= 0) {
+            int dx = mouse.x - desktop_icon_press_x;
+            int dy = mouse.y - desktop_icon_press_y;
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            if (dx > 2 || dy > 2) {
+                drag_desktop_icon = desktop_icon_press;
+                desktop_icon_drag_moved = true;
+            }
+            if (drag_desktop_icon >= 0) {
+                int box_x;
+                int box_y;
+                int box_w;
+                int box_h;
+
+                desktop_icon_bounds(0, 0, desktop_icon_image(drag_desktop_icon), desktop_icon_label(drag_desktop_icon),
+                                    &box_x, &box_y, &box_w, &box_h);
+                desktop_icons[drag_desktop_icon].x = clampi(mouse.x - desktop_icon_drag_offset_x, 0, OS_WIDTH - box_w);
+                desktop_icons[drag_desktop_icon].y = clampi(mouse.y - desktop_icon_drag_offset_y, 0, OS_HEIGHT - TASKBAR_H - box_h);
+                return;
+            }
+        } else if (clicked && hit < 0) {
+            selected_desktop_icon = -1;
             return;
         }
     }
@@ -4179,6 +4455,14 @@ static void update_state(void) {
 static void init_state(void) {
     build_system_palette();
     init_theme_colors();
+    init_desktop_icon_defaults();
+    desktop_icon_persistence_enabled = false;
+    selected_desktop_icon = -1;
+    desktop_icon_press = -1;
+    drag_desktop_icon = -1;
+    desktop_icon_drag_moved = false;
+    desktop_icon_press_was_selected = false;
+    load_desktop_icon_positions();
     clear_boot_status();
     boot_menu_dirty = true;
     boot_terminal_dirty = true;

@@ -1,4 +1,7 @@
-name: Build Test
+# Copyright Svh03ra (C) 2026, All rights reserved
+# This repository is licensed under the GNU General Public License.
+
+name: Development Build 1.0
 
 on:
   push:
@@ -25,14 +28,28 @@ jobs:
             grub-common \
             xorriso \
             mtools \
+            dosfstools \
+            parted \
+            gzip \
             pkg-config \
             libpng-dev \
             qemu-system-x86
 
-      - name: Build
+      - name: Build CD-ROM
         run: make
 
-      - name: Verify ISO
+      - name: Build Disk
+        run: make disk
+
+      - name: Build Floppy
+        run: make floppy
+
+      - name: Verify Build
         run: |
           test -s build/os.iso
-          echo "ISO is ready: build/os.iso"
+          test -s build/haloxos-disk.img
+          test -s build/core_disk.img
+          test -s build/haloxos-floppy.img
+          test -s build/core_floppy.img
+          echo "All builds are ready:"
+          ls -lh build/os.iso build/haloxos-disk.img build/core_disk.img build/haloxos-floppy.img build/core_floppy.img
