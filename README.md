@@ -38,20 +38,31 @@ First of all, you need to understand what you will do in order to follow the ins
 - nasm
 - gcc
 - binutils
-- grub
+- grub-pc-bin
+- grub-common
 - xorriso
+- mtools
+- dosfstools
+- parted
+- gzip
+- pkg-config
+- libpng-dev
 - qemu
-- pkgconf
-- libpng
 ```
 
 - **If you want to get a latest build from the development progress, you need to compile yourself.**
 
 #
 
-### Makefile Commands:
+### `>_` Makefile Commands:
 **Look for the information to see how it works:**
-- Required for `make` command to compile the full build.
+
+**- Supports all of these storage media for make with them:**
+- Required for `make` command to compile the full build for CD-ROM build _(default opinion)_.
+- Required for `make disk` command to compile the full build for Hard Disk build.
+- Required for `make floppy` command to compile the full build for Floppy Disk build.
+
+**- Quick Targets:**
 - For using `make run` command to test via QEMU to ensure everything is OK.
 - To use `make clean` command to remove build artifacts for quick recovery.
 
