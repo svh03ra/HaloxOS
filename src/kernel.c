@@ -20,23 +20,31 @@
 
 // Backgrounds
 extern const uint8_t _binary_build_login_bin_start[];
-extern const uint8_t _binary_build_desktop_bin_start[];
+extern const uint8_t _binary_build_theme1_bin_start[];
+extern const uint8_t _binary_build_theme2_bin_start[];
 extern const uint8_t _binary_build_user_frame_bin_start[];
 extern const uint8_t _binary_build_notepad_icon_bin_start[];
 extern const uint8_t _binary_build_terminal_icon_bin_start[];
 extern const uint8_t _binary_build_game_icon_bin_start[];
 extern const uint8_t _binary_build_program_icon_bin_start[];
 extern const uint8_t _binary_build_settings_icon_bin_start[];
+extern const uint8_t _binary_build_explorer_icon_bin_start[];
+extern const uint8_t _binary_build_taskmgr_icon_bin_start[];
+extern const uint8_t _binary_build_mines_icon_bin_start[];
+extern const uint8_t _binary_build_snake_icon_bin_start[];
+extern const uint8_t _binary_build_guessnum_icon_bin_start[];
 
 #define OS_WIDTH 640
 #define OS_HEIGHT 480
 #define MAX_OUTPUT_WIDTH 1280
 #define MAX_OUTPUT_HEIGHT 720
 #define TASKBAR_H 28
-#define DESKTOP_ICON_COUNT 2
+#define DESKTOP_ICON_COUNT 11
+#define DESKTOP_ICON_NAME_MAX 50
 #define MAX_TEXT 4096
 #define TERM_MAX_LINES 32
 #define TERM_LINE_LEN 72
+#define DEBUG_HISTORY_COUNT 8
 #define APP_COUNT 11
 #define SNAKE_MAX_SEGMENTS 128
 #define MINES_SIZE 8
@@ -47,8 +55,11 @@ extern const uint8_t _binary_build_settings_icon_bin_start[];
 #define PERF_UPDATE_TICKS 6
 #define PAINT_CANVAS_W 304
 #define PAINT_CANVAS_H 172
-#define GPU_GRID_COLS 16
-#define GPU_GRID_ROWS 16
+#define GPU_GRID_COLS 24
+#define GPU_GRID_ROWS 12
+#define GPU_SWATCH_SIZE 10
+#define GPU_GRID_W (GPU_GRID_COLS * GPU_SWATCH_SIZE)
+#define GPU_GRID_H (GPU_GRID_ROWS * GPU_SWATCH_SIZE)
 #define GPU_GRID_PAGE_ENTRIES (GPU_GRID_COLS * GPU_GRID_ROWS)
 #define VGA_TEXT_COLS 80
 #define VGA_TEXT_ROWS 25
@@ -201,6 +212,15 @@ typedef struct {
     int input_len;
 } Terminal;
 
+typedef enum {
+    DEBUG_ACTION_NONE,
+    DEBUG_ACTION_CRASH,
+    DEBUG_ACTION_HALT,
+    DEBUG_ACTION_FAULT1,
+    DEBUG_ACTION_FAULT2,
+    DEBUG_ACTION_FAULT3
+} DebugAction;
+
 typedef struct {
     uint8_t palette_mode;
     uint8_t resolution_mode;
@@ -278,6 +298,7 @@ static SystemState system_state = STATE_BOOT_MENU;
 static MouseState mouse = {320, 240, false, false, false, false, false, false};
 static Window windows[APP_COUNT];
 static uint8_t backbuffer[OS_WIDTH * OS_HEIGHT];
+static uint16_t backbuffer_rgb565[OS_WIDTH * OS_HEIGHT];
 static Color palette[256];
 static IdtEntry idt[256];
 static KeyEvent key_queue[64];
@@ -288,10 +309,27 @@ static int mouse_packet_index = 0;
 static bool keyboard_extended = false;
 static bool keyboard_shift = false;
 static bool keyboard_alt = false;
+static bool keyboard_ctrl = false;
 static bool menu_open = false;
 static bool context_menu_open = false;
 static int context_menu_x = 0;
 static int context_menu_y = 0;
+static bool desktop_icon_menu_open = false;
+static int desktop_icon_menu_x = 0;
+static int desktop_icon_menu_y = 0;
+static int desktop_icon_menu_target = -1;
+static bool start_app_menu_open = false;
+static int start_app_menu_x = 0;
+static int start_app_menu_y = 0;
+static AppId start_app_menu_app = APP_NOTEPAD;
+static bool power_menu_open = false;
+static int start_menu_hover_row = -1;
+static uint32_t start_menu_hover_tick = 0;
+static int game_center_hover_row = -1;
+static uint32_t game_center_hover_tick = 0;
+static uint32_t button_hover_id = 0;
+static uint32_t button_hover_tick = 0;
+static bool cursor_hand_hint = false;
 static int active_window = -1;
 static int drag_window = -1;
 static int drag_offset_x = 0;
@@ -329,6 +367,13 @@ static size_t notepad_len = 0;
 
 static Terminal boot_term;
 static Terminal cmd_term;
+static Terminal debug_term;
+static bool debug = false;
+static bool debug_overlay_open = false;
+static DebugAction debug_pending_action = DEBUG_ACTION_NONE;
+static char debug_history[DEBUG_HISTORY_COUNT][TERM_LINE_LEN];
+static int debug_history_count = 0;
+static int debug_history_cursor = 0;
 
 static uint8_t paint_canvas[PAINT_CANVAS_W * PAINT_CANVAS_H];
 static uint8_t paint_color = 1;
@@ -385,6 +430,9 @@ static bool boot_drive_valid = false;
 static uint8_t boot_drive_number = 0;
 static bool desktop_icon_persistence_enabled = false;
 static DesktopIconPosition desktop_icons[DESKTOP_ICON_COUNT];
+static bool desktop_icon_visible[DESKTOP_ICON_COUNT];
+static AppId desktop_icon_apps[DESKTOP_ICON_COUNT];
+static char desktop_icon_names[DESKTOP_ICON_COUNT][DESKTOP_ICON_NAME_MAX + 1];
 static int selected_desktop_icon = -1;
 static int desktop_icon_press = -1;
 static int drag_desktop_icon = -1;
@@ -394,6 +442,14 @@ static int desktop_icon_drag_offset_x = 0;
 static int desktop_icon_drag_offset_y = 0;
 static bool desktop_icon_drag_moved = false;
 static bool desktop_icon_press_was_selected = false;
+static bool desktop_clipboard_valid = false;
+static bool desktop_clipboard_cut = false;
+static AppId desktop_clipboard_app = APP_NOTEPAD;
+static char desktop_clipboard_name[DESKTOP_ICON_NAME_MAX + 1];
+static bool desktop_rename_active = false;
+static int desktop_rename_icon = -1;
+static char desktop_rename_buffer[DESKTOP_ICON_NAME_MAX + 1];
+static int desktop_rename_len = 0;
 static bool video_mode_switch_available = false;
 static bool boot_text_mode = true;
 static volatile uint16_t *const vga_text_buffer = (volatile uint16_t *)(uintptr_t)0xB8000;
@@ -418,6 +474,13 @@ extern void idt_load(const IdtPointer *pointer);
 extern void cpu_halt_once(void);
 
 static void program_vga_palette(void);
+static uint16_t palette_rgb565(uint8_t color);
+static Color rgb565_to_color(uint16_t value);
+static void apply_settings(void);
+static void desktop_finish_rename(bool commit);
+static void append_char(char *dest, size_t *len, size_t max_len, char ch);
+static bool cursor_over_clickable(void);
+static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8_t dark, uint32_t hover_tick);
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -451,6 +514,49 @@ static inline uint8_t inb(uint16_t port) {
 
 static inline void io_wait(void) {
     outb(0x80, 0);
+}
+
+static void serial_init(void) {
+    outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x80);
+    outb(0x3F8 + 0, 0x03);
+    outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x03);
+    outb(0x3F8 + 2, 0xC7);
+    outb(0x3F8 + 4, 0x0B);
+}
+
+static bool serial_ready(void) {
+    return (inb(0x3F8 + 5) & 0x20u) != 0;
+}
+
+static void serial_write_char(char ch) {
+    for (int i = 0; i < 100000 && !serial_ready(); ++i) {
+    }
+    outb(0x3F8, (uint8_t)ch);
+}
+
+static void serial_write_string(const char *text) {
+    if (!debug) {
+        return;
+    }
+    while (*text) {
+        if (*text == '\n') {
+            serial_write_char('\r');
+        }
+        serial_write_char(*text++);
+    }
+}
+
+static void serial_trace(const char *level, const char *text) {
+    if (!debug) {
+        return;
+    }
+    serial_write_char('[');
+    serial_write_string(level);
+    serial_write_string("]: ");
+    serial_write_string(text);
+    serial_write_string("\n");
 }
 
 static bool ata_wait_ready(uint16_t status_port) {
@@ -679,6 +785,82 @@ static bool starts_with(const char *text, const char *prefix) {
         ++i;
     }
     return true;
+}
+
+static bool contains_text(const char *text, const char *needle) {
+    if (*needle == '\0') {
+        return true;
+    }
+    for (size_t i = 0; text[i]; ++i) {
+        size_t j = 0;
+        while (needle[j] && text[i + j] == needle[j]) {
+            ++j;
+        }
+        if (needle[j] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool parse_uint_decimal(const char *text, uint32_t *value_out) {
+    uint32_t value = 0;
+    bool any = false;
+    while (*text >= '0' && *text <= '9') {
+        value = value * 10u + (uint32_t)(*text - '0');
+        ++text;
+        any = true;
+    }
+    if (!any) {
+        return false;
+    }
+    *value_out = value;
+    return true;
+}
+
+static bool parse_uint_auto(const char *text, uint32_t *value_out) {
+    uint32_t value = 0;
+    bool any = false;
+    if (starts_with(text, "0x") || starts_with(text, "0X")) {
+        text += 2;
+    } else if (!((*text >= 'a' && *text <= 'f') || (*text >= 'A' && *text <= 'F'))) {
+        return parse_uint_decimal(text, value_out);
+    }
+
+    while ((*text >= '0' && *text <= '9') || (*text >= 'a' && *text <= 'f') || (*text >= 'A' && *text <= 'F')) {
+        uint32_t digit = 0;
+        if (*text >= '0' && *text <= '9') {
+            digit = (uint32_t)(*text - '0');
+        } else if (*text >= 'a' && *text <= 'f') {
+            digit = (uint32_t)(*text - 'a' + 10);
+        } else {
+            digit = (uint32_t)(*text - 'A' + 10);
+        }
+        value = (value << 4) | digit;
+        ++text;
+        any = true;
+    }
+
+    if (!any) {
+        return false;
+    }
+    *value_out = value;
+    return true;
+}
+
+static void append_hex8(char *dest, size_t *len, size_t max_len, uint8_t value) {
+    static const char hex[] = "0123456789ABCDEF";
+    append_char(dest, len, max_len, hex[(value >> 4) & 0x0F]);
+    append_char(dest, len, max_len, hex[value & 0x0F]);
+}
+
+static void append_hex32(char *dest, size_t *len, size_t max_len, uint32_t value) {
+    append_char(dest, len, max_len, '0');
+    append_char(dest, len, max_len, 'x');
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        static const char hex[] = "0123456789ABCDEF";
+        append_char(dest, len, max_len, hex[(value >> shift) & 0x0Fu]);
+    }
 }
 
 static int clampi(int value, int min, int max) {
@@ -1520,8 +1702,7 @@ static void present(void) {
         if (fb.bpp == 16) {
             uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = palette[src[present_x_map[x]]];
-                dest[x] = (uint16_t)(((c.r >> 3) << 11) | ((c.g >> 2) << 5) | (c.b >> 3));
+                dest[x] = backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]];
             }
             continue;
         }
@@ -1529,7 +1710,7 @@ static void present(void) {
         if (fb.bpp == 24) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = palette[src[present_x_map[x]]];
+                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
                 dest[x * 3 + 0] = c.b;
                 dest[x * 3 + 1] = c.g;
                 dest[x * 3 + 2] = c.r;
@@ -1540,7 +1721,7 @@ static void present(void) {
         {
             uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = palette[src[present_x_map[x]]];
+                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
                 dest[x] = ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b;
             }
         }
@@ -1553,6 +1734,12 @@ static void present(void) {
 
 static void clear_screen(uint8_t color) {
     memset_local(backbuffer, color, sizeof(backbuffer));
+    {
+        uint16_t rgb = palette_rgb565(color);
+        for (int i = 0; i < OS_WIDTH * OS_HEIGHT; ++i) {
+            backbuffer_rgb565[i] = rgb;
+        }
+    }
 }
 
 static void draw_pixel(int x, int y, uint8_t color) {
@@ -1560,6 +1747,7 @@ static void draw_pixel(int x, int y, uint8_t color) {
         return;
     }
     backbuffer[y * OS_WIDTH + x] = color;
+    backbuffer_rgb565[y * OS_WIDTH + x] = palette_rgb565(color);
 }
 
 static void fill_rect(int x, int y, int w, int h, uint8_t color) {
@@ -1571,6 +1759,7 @@ static void fill_rect(int x, int y, int w, int h, uint8_t color) {
     for (int py = y0; py < y1; ++py) {
         for (int px = x0; px < x1; ++px) {
             backbuffer[py * OS_WIDTH + px] = color;
+            backbuffer_rgb565[py * OS_WIDTH + px] = palette_rgb565(color);
         }
     }
 }
@@ -1800,6 +1989,26 @@ static const uint8_t *image_alpha(const uint8_t *image) {
     return image + 4 + count;
 }
 
+static const uint16_t *image_rgb565(const uint8_t *image) {
+    size_t count = (size_t)image_width(image) * image_height(image);
+    return (const uint16_t *)(const void *)(image + 4 + count + count);
+}
+
+static uint16_t palette_rgb565(uint8_t color) {
+    Color c = palette[color];
+    return (uint16_t)(((uint16_t)(c.r >> 3) << 11) |
+                      ((uint16_t)(c.g >> 2) << 5) |
+                      (uint16_t)(c.b >> 3));
+}
+
+static Color rgb565_to_color(uint16_t value) {
+    Color c;
+    c.r = (uint8_t)((((value >> 11) & 0x1Fu) * 255u) / 31u);
+    c.g = (uint8_t)((((value >> 5) & 0x3Fu) * 255u) / 63u);
+    c.b = (uint8_t)(((value & 0x1Fu) * 255u) / 31u);
+    return c;
+}
+
 static int text_pixel_width(const char *text) {
     return (int)strlen_local(text) * 8;
 }
@@ -1809,12 +2018,18 @@ static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) 
     uint16_t height = image_height(image);
     const uint8_t *pixels = image_pixels(image);
     const uint8_t *alpha = image_alpha(image);
+    const uint16_t *rgb565 = image_rgb565(image);
 
     for (uint16_t py = 0; py < height; ++py) {
         for (uint16_t px = 0; px < width; ++px) {
             size_t index = (size_t)py * width + px;
             if (!transparent || alpha[index] >= 128) {
-                draw_pixel(x + px, y + py, pixels[index]);
+                int dx = x + px;
+                int dy = y + py;
+                if (dx >= 0 && dy >= 0 && dx < OS_WIDTH && dy < OS_HEIGHT) {
+                    backbuffer[dy * OS_WIDTH + dx] = pixels[index];
+                    backbuffer_rgb565[dy * OS_WIDTH + dx] = rgb565[index];
+                }
             }
         }
     }
@@ -1824,29 +2039,68 @@ static void draw_image(const uint8_t *image) {
     draw_image_at(image, 0, 0, false);
 }
 
+static const uint8_t *app_icon_image(AppId app) {
+    switch (app) {
+        case APP_NOTEPAD: return _binary_build_notepad_icon_bin_start;
+        case APP_CMD: return _binary_build_terminal_icon_bin_start;
+        case APP_EXPLORER: return _binary_build_explorer_icon_bin_start;
+        case APP_GAME_CENTER: return _binary_build_game_icon_bin_start;
+        case APP_SETTINGS: return _binary_build_settings_icon_bin_start;
+        case APP_TASK_MANAGER: return _binary_build_taskmgr_icon_bin_start;
+        case APP_MINES: return _binary_build_mines_icon_bin_start;
+        case APP_SNAKE: return _binary_build_snake_icon_bin_start;
+        case APP_GUESS: return _binary_build_guessnum_icon_bin_start;
+        default: return _binary_build_program_icon_bin_start;
+    }
+}
+
 static const uint8_t *desktop_icon_image(int index) {
-    return index == 0 ? _binary_build_notepad_icon_bin_start : _binary_build_terminal_icon_bin_start;
+    if (index < 0 || index >= DESKTOP_ICON_COUNT) {
+        return _binary_build_program_icon_bin_start;
+    }
+    return app_icon_image(desktop_icon_apps[index]);
 }
 
 static const char *desktop_icon_label(int index) {
-    return index == 0 ? "Notepad" : "Terminal";
+    if (index < 0 || index >= DESKTOP_ICON_COUNT) {
+        return "";
+    }
+    return desktop_icon_names[index];
 }
 
 static AppId desktop_icon_app(int index) {
-    return index == 0 ? APP_NOTEPAD : APP_CMD;
+    if (index < 0 || index >= DESKTOP_ICON_COUNT) {
+        return APP_NOTEPAD;
+    }
+    return desktop_icon_apps[index];
 }
 
 static void init_desktop_icon_defaults(void) {
-    desktop_icons[0].x = 18;
-    desktop_icons[0].y = 24;
-    desktop_icons[1].x = 18;
-    desktop_icons[1].y = 104;
+    static const AppId apps[DESKTOP_ICON_COUNT] = {
+        APP_NOTEPAD, APP_CMD, APP_EXPLORER, APP_TASK_MANAGER, APP_GAME_CENTER,
+        APP_MINES, APP_SNAKE, APP_GUESS, APP_SETTINGS, APP_PAINT, APP_POWER
+    };
+    static const char *names[DESKTOP_ICON_COUNT] = {
+        "Notepad", "Terminal", "Explorer", "Task Manager", "Game Center",
+        "Minesweeper", "Snake", "Guess Number", "Settings", "Paint", "Power"
+    };
+    static const int visible_count = 2;
+
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        desktop_icons[i].x = 18 + (i / 3) * 78;
+        desktop_icons[i].y = 24 + (i % 3) * 80;
+        desktop_icon_apps[i] = apps[i];
+        desktop_icon_visible[i] = i < visible_count;
+        copy_string(desktop_icon_names[i], names[i], sizeof(desktop_icon_names[i]));
+    }
 }
 
 static uint32_t desktop_layout_checksum(const DesktopLayoutSector *layout) {
-    return (uint32_t)(layout->magic ^
-                      (uint32_t)layout->icon_x[0] ^ (uint32_t)layout->icon_y[0] ^
-                      (uint32_t)layout->icon_x[1] ^ (uint32_t)layout->icon_y[1]);
+    uint32_t checksum = layout->magic;
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        checksum ^= (uint32_t)layout->icon_x[i] ^ (uint32_t)layout->icon_y[i];
+    }
+    return checksum;
 }
 
 static void desktop_icon_bounds(int x, int y, const uint8_t *image, const char *label, int *out_x, int *out_y, int *out_w, int *out_h) {
@@ -1934,12 +2188,21 @@ static void draw_desktop_icon(int index, bool selected) {
     int icon_w = image_width(image);
     int label_w = text_pixel_width(label);
 
+    if (!desktop_icon_visible[index]) {
+        return;
+    }
+
     desktop_icon_bounds(x, y, image, label, &box_x, &box_y, &box_w, &box_h);
     icon_x = box_x + (box_w - icon_w) / 2;
     label_x = box_x + (box_w - label_w) / 2;
     label_y = box_y + image_height(image) + 10;
 
-    if (selected) {
+    if (desktop_rename_active && desktop_rename_icon == index) {
+        draw_dither_rect(box_x - 2, box_y - 2, box_w + 4, image_height(image) + 6, color_blue, color_blue_dark);
+        fill_rect(label_x - 6, label_y - 3, box_w + 4, 14, color_blue);
+        draw_rect(label_x - 6, label_y - 3, box_w + 4, 14, color_white);
+        draw_text_clipped(label_x - 2, label_y, box_w, desktop_rename_buffer, color_white, color_blue, true);
+    } else if (selected) {
         draw_dither_rect(box_x - 2, box_y - 2, box_w + 4, image_height(image) + 6, color_blue, color_blue_dark);
         fill_rect(label_x - 4, label_y - 2, label_w + 8, 12, color_blue);
         draw_text(label_x, label_y, label, color_white, color_blue, true);
@@ -1956,6 +2219,10 @@ static int desktop_icon_hit_test(int x, int y) {
         int icon_y;
         int icon_w;
         int icon_h;
+
+        if (!desktop_icon_visible[i]) {
+            continue;
+        }
 
         desktop_icon_bounds(desktop_icons[i].x, desktop_icons[i].y,
                             desktop_icon_image(i), desktop_icon_label(i),
@@ -1982,8 +2249,10 @@ static uint8_t solid_color_index(uint8_t mode) {
 }
 
 static void draw_desktop_background(void) {
-    if (settings_applied.background_mode == 0 || settings_applied.background_mode == 1) {
-        draw_image(_binary_build_desktop_bin_start);
+    if (settings_applied.background_mode == 0) {
+        draw_image(_binary_build_theme1_bin_start);
+    } else if (settings_applied.background_mode == 1) {
+        draw_image(_binary_build_theme2_bin_start);
     } else {
         clear_screen(solid_color_index(settings_applied.background_mode));
     }
@@ -2006,18 +2275,35 @@ static void read_datetime(char *buffer, size_t max_len) {
     uint8_t day;
     uint8_t month;
     uint8_t year;
+    uint8_t second_check;
+    uint8_t minute_check;
+    uint8_t hour_check;
+    uint8_t day_check;
+    uint8_t month_check;
+    uint8_t year_check;
     uint8_t reg_b;
     size_t len = 0;
 
-    while (cmos_read(0x0A) & 0x80) {
-    }
+    do {
+        while (cmos_read(0x0A) & 0x80) {
+        }
+        second = cmos_read(0x00);
+        minute = cmos_read(0x02);
+        hour = cmos_read(0x04);
+        day = cmos_read(0x07);
+        month = cmos_read(0x08);
+        year = cmos_read(0x09);
+        while (cmos_read(0x0A) & 0x80) {
+        }
+        second_check = cmos_read(0x00);
+        minute_check = cmos_read(0x02);
+        hour_check = cmos_read(0x04);
+        day_check = cmos_read(0x07);
+        month_check = cmos_read(0x08);
+        year_check = cmos_read(0x09);
+    } while (second != second_check || minute != minute_check || hour != hour_check ||
+             day != day_check || month != month_check || year != year_check);
 
-    second = cmos_read(0x00);
-    minute = cmos_read(0x02);
-    hour = cmos_read(0x04);
-    day = cmos_read(0x07);
-    month = cmos_read(0x08);
-    year = cmos_read(0x09);
     reg_b = cmos_read(0x0B);
 
     if ((reg_b & 0x04) == 0) {
@@ -2163,7 +2449,7 @@ static void gpu_palette_scroll_geometry(int track_y,
                                         int *thumb_track_out) {
     uint32_t max_scroll = gpu_palette_max_scroll();
     int thumb_h = 20;
-    int thumb_track = 98 - thumb_h;
+    int thumb_track = (GPU_GRID_H - 32) - thumb_h;
     int thumb_y = track_y + 1;
 
     if (max_scroll != 0) {
@@ -2189,7 +2475,7 @@ static const char *disk_physical_type_label(void) {
         if (boot_drive_number >= 0x80u) {
             return "Hard Disk";
         }
-        return "USB";
+        return "Floppy";
     }
     return "CD-ROM";
 }
@@ -2248,6 +2534,10 @@ static bool desktop_should_redraw(void) {
         return true;
     }
     if (windows[APP_SNAKE].open && last_desktop_redraw_snake_tick != snake_last_step_tick) {
+        return true;
+    }
+    if (menu_open || context_menu_open || desktop_icon_menu_open || start_app_menu_open || power_menu_open ||
+        (windows[APP_GAME_CENTER].open && active_window == APP_GAME_CENTER)) {
         return true;
     }
     return false;
@@ -2495,6 +2785,11 @@ static void handle_scancode(uint8_t code) {
         return;
     }
 
+    if (code == 0x1D) {
+        keyboard_ctrl = true;
+        return;
+    }
+
     if (code == 0xAA || code == 0xB6) {
         keyboard_shift = false;
         return;
@@ -2502,6 +2797,11 @@ static void handle_scancode(uint8_t code) {
 
     if (code == 0xB8) {
         keyboard_alt = false;
+        return;
+    }
+
+    if (code == 0x9D) {
+        keyboard_ctrl = false;
         return;
     }
 
@@ -2719,7 +3019,15 @@ static void open_window(AppId app) {
     Window *window = &windows[app];
     menu_open = false;
     context_menu_open = false;
+    desktop_icon_menu_open = false;
+    start_app_menu_open = false;
     task_manager_confirm_kill = false;
+    if (app == APP_POWER) {
+        power_menu_open = true;
+        active_window = -1;
+        serial_trace("INFO", "Power option menu opened");
+        return;
+    }
     if (!window->open) {
         window->open = true;
         window->title = app == APP_GAME_CENTER ? "Game Center" :
@@ -2764,15 +3072,22 @@ static void open_window(AppId app) {
     }
 
     active_window = app;
+    serial_trace("INFO", app_titles[app]);
 }
 
 static void set_active_window(AppId app) {
     active_window = app;
     menu_open = false;
     context_menu_open = false;
+    desktop_icon_menu_open = false;
+    start_app_menu_open = false;
 }
 
 static void close_window(AppId app) {
+    if (app == APP_POWER) {
+        power_menu_open = false;
+        return;
+    }
     windows[app].open = false;
     if (app == APP_TASK_MANAGER) {
         task_manager_confirm_kill = false;
@@ -2911,6 +3226,244 @@ static void terminal_handle_key(Terminal *term, KeyEvent event, bool boot_consol
     }
 }
 
+static void debug_enter(void) {
+    if (!debug || debug_overlay_open) {
+        return;
+    }
+    debug_overlay_open = true;
+    terminal_reset(&debug_term);
+    terminal_add_line(&debug_term, "Welcome to HaloxOS Debugger!");
+    terminal_add_line(&debug_term, "Type 'help' for show all comannds to use.");
+    debug_history_cursor = debug_history_count;
+    serial_trace("INFO", "Debugger opened");
+}
+
+static void debug_execute_pending(void) {
+    DebugAction action = debug_pending_action;
+    debug_pending_action = DEBUG_ACTION_NONE;
+    if (action == DEBUG_ACTION_CRASH) {
+        serial_write_string("***** MACHINE CRASH!!! *****\n");
+        serial_trace("ERROR", "debug crash command requested");
+        *(volatile uint32_t *)0 = 0xDEADC0DEu;
+    } else if (action == DEBUG_ACTION_HALT) {
+        serial_trace("INFO", "debug halt command requested");
+        __asm__ volatile("cli");
+        for (;;) {
+            __asm__ volatile("hlt");
+        }
+    } else if (action == DEBUG_ACTION_FAULT1) {
+        serial_trace("ERROR", "debug divide fault requested");
+        __asm__ volatile("xor %%edx, %%edx; xor %%ecx, %%ecx; div %%ecx" : : : "eax", "ecx", "edx");
+    } else if (action == DEBUG_ACTION_FAULT2) {
+        serial_trace("ERROR", "debug invalid opcode requested");
+        __asm__ volatile(".byte 0x0F, 0x0B");
+    } else if (action == DEBUG_ACTION_FAULT3) {
+        serial_trace("ERROR", "debug triple fault requested");
+        IdtPointer empty = {0, 0};
+        idt_load(&empty);
+        __asm__ volatile("int $3");
+    }
+}
+
+static void debug_change_command(const char *command) {
+    if (contains_text(command, "bg 1") || contains_text(command, "background 1")) {
+        settings_pending.background_mode = 0;
+        apply_settings();
+        terminal_add_line(&debug_term, "Background changed to Default.");
+    } else if (contains_text(command, "bg 2") || contains_text(command, "background 2")) {
+        settings_pending.background_mode = 1;
+        apply_settings();
+        terminal_add_line(&debug_term, "Background changed to Fruish.");
+    } else if (contains_text(command, "bpp 4")) {
+        settings_pending.palette_mode = 1;
+        apply_settings();
+        terminal_add_line(&debug_term, "Bit depth request: 4-bit palette emulation.");
+    } else if (contains_text(command, "bpp 8")) {
+        settings_pending.palette_mode = 0;
+        apply_settings();
+        terminal_add_line(&debug_term, "Bit depth request: 8-bit palette.");
+    } else if (contains_text(command, "bpp 16")) {
+        settings_pending.palette_mode = 2;
+        apply_settings();
+        terminal_add_line(&debug_term, "Bit depth request: 16-bit color.");
+    } else if (contains_text(command, "800x600")) {
+        if (set_framebuffer_mode_raw(800, 600, fb.bpp)) {
+            terminal_add_line(&debug_term, "Screen changed: 800x600.");
+        } else {
+            terminal_add_line(&debug_term, "ERROR: mode 800x600 unavailable.");
+        }
+    } else if (contains_text(command, "640x480")) {
+        if (set_framebuffer_mode_raw(640, 480, fb.bpp)) {
+            terminal_add_line(&debug_term, "Screen changed: 640x480.");
+        } else {
+            terminal_add_line(&debug_term, "ERROR: mode 640x480 unavailable.");
+        }
+    } else {
+        terminal_add_line(&debug_term, "Usage: change vid 640x480 | change vid bpp 16 | change bg 2");
+    }
+}
+
+static void debug_view_command(const char *command) {
+    char line[TERM_LINE_LEN] = {0};
+    size_t len = 0;
+    if (contains_text(command, "vid") || contains_text(command, "video")) {
+        append_uint(line, &len, sizeof(line), fb.width);
+        append_char(line, &len, sizeof(line), 'x');
+        append_uint(line, &len, sizeof(line), fb.height);
+        append_char(line, &len, sizeof(line), 'x');
+        append_uint(line, &len, sizeof(line), fb.bpp);
+        terminal_add_line(&debug_term, line);
+    } else if (contains_text(command, "disk") || contains_text(command, "drive")) {
+        terminal_add_line(&debug_term, disk_physical_type_label());
+    } else {
+        uint32_t address = 0;
+        const char *cursor = command;
+        while (*cursor && *cursor != '0') {
+            ++cursor;
+        }
+        parse_uint_auto(cursor, &address);
+        append_memory_amount(line, &len, sizeof(line), ram_total_bytes);
+        terminal_add_line(&debug_term, "Memory Bytes:");
+        terminal_add_line(&debug_term, line);
+        for (int row = 0; row < 4; ++row) {
+            char hexline[TERM_LINE_LEN] = {0};
+            size_t hlen = 0;
+            uint32_t base = address + (uint32_t)row * 16u;
+            append_hex32(hexline, &hlen, sizeof(hexline), base);
+            append_char(hexline, &hlen, sizeof(hexline), ':');
+            append_char(hexline, &hlen, sizeof(hexline), ' ');
+            for (int i = 0; i < 16; ++i) {
+                append_hex8(hexline, &hlen, sizeof(hexline), *(volatile uint8_t *)(uintptr_t)(base + (uint32_t)i));
+                append_char(hexline, &hlen, sizeof(hexline), ' ');
+            }
+            terminal_add_line(&debug_term, hexline);
+        }
+    }
+}
+
+static void debug_edit_command(const char *command) {
+    uint32_t address = 0;
+    uint32_t value = 0;
+    uint32_t length = 1;
+    const char *cursor = command;
+
+    while (*cursor && *cursor != '0') {
+        ++cursor;
+    }
+    if (!parse_uint_auto(cursor, &address)) {
+        terminal_add_line(&debug_term, "Usage: edit mem 0xADDR 0xBYTE length");
+        return;
+    }
+    while (*cursor && *cursor != ' ') {
+        ++cursor;
+    }
+    while (*cursor == ' ') {
+        ++cursor;
+    }
+    if (!parse_uint_auto(cursor, &value)) {
+        terminal_add_line(&debug_term, "Usage: edit mem 0xADDR 0xBYTE length");
+        return;
+    }
+    while (*cursor && *cursor != ' ') {
+        ++cursor;
+    }
+    while (*cursor == ' ') {
+        ++cursor;
+    }
+    parse_uint_auto(cursor, &length);
+    if (length > 0x10000u) {
+        length = 0x10000u;
+    }
+    for (uint32_t i = 0; i < length; ++i) {
+        *(volatile uint8_t *)(uintptr_t)(address + i) = (uint8_t)value;
+    }
+    terminal_add_line(&debug_term, "Memory bytes edited.");
+}
+
+static void debug_execute_command(void) {
+    char command[TERM_LINE_LEN];
+    copy_string(command, debug_term.input, sizeof(command));
+    debug_term.input_len = 0;
+    debug_term.input[0] = '\0';
+    if (command[0] == '\0') {
+        return;
+    }
+    terminal_add_line(&debug_term, command);
+    if (debug_history_count < DEBUG_HISTORY_COUNT) {
+        copy_string(debug_history[debug_history_count++], command, TERM_LINE_LEN);
+    } else {
+        for (int i = 1; i < DEBUG_HISTORY_COUNT; ++i) {
+            copy_string(debug_history[i - 1], debug_history[i], TERM_LINE_LEN);
+        }
+        copy_string(debug_history[DEBUG_HISTORY_COUNT - 1], command, TERM_LINE_LEN);
+    }
+    debug_history_cursor = debug_history_count;
+
+    if (streq(command, "help")) {
+        terminal_add_line(&debug_term, "edit view change crash halt fault continue");
+    } else if (starts_with(command, "help e")) {
+        terminal_add_line(&debug_term, "edit, view, change");
+    } else if (starts_with(command, "help ex") || starts_with(command, "help fault")) {
+        terminal_add_line(&debug_term, "crash, halt, fault 1|2|3");
+    } else if (streq(command, "c") || streq(command, "con") || streq(command, "continue")) {
+        debug_overlay_open = false;
+        serial_trace("INFO", "Debugger continued");
+        debug_execute_pending();
+    } else if (streq(command, "crash")) {
+        debug_pending_action = DEBUG_ACTION_CRASH;
+        terminal_add_line(&debug_term, "Crash armed. Type continue.");
+    } else if (streq(command, "halt")) {
+        debug_pending_action = DEBUG_ACTION_HALT;
+        terminal_add_line(&debug_term, "Halt armed. Type continue.");
+    } else if (starts_with(command, "f ") || starts_with(command, "fault ")) {
+        uint32_t fault = 1;
+        const char *arg = starts_with(command, "f ") ? command + 2 : command + 6;
+        parse_uint_decimal(arg, &fault);
+        debug_pending_action = fault == 3 ? DEBUG_ACTION_FAULT3 : (fault == 2 ? DEBUG_ACTION_FAULT2 : DEBUG_ACTION_FAULT1);
+        terminal_add_line(&debug_term, "Fault armed. Type continue.");
+    } else if (starts_with(command, "change ") || starts_with(command, "ch ")) {
+        debug_change_command(command);
+    } else if (starts_with(command, "view ") || starts_with(command, "v ")) {
+        debug_view_command(command);
+    } else if (starts_with(command, "edit ")) {
+        debug_edit_command(command);
+    } else {
+        terminal_add_line(&debug_term, "Unknown debugger command.");
+    }
+}
+
+static void debug_handle_key(KeyEvent event) {
+    if (event.code == KEY_UP && debug_history_count > 0) {
+        if (debug_history_cursor > 0) {
+            --debug_history_cursor;
+        }
+        copy_string(debug_term.input, debug_history[debug_history_cursor], sizeof(debug_term.input));
+        debug_term.input_len = (int)strlen_local(debug_term.input);
+    } else if (event.code == KEY_DOWN && debug_history_count > 0) {
+        if (debug_history_cursor + 1 < debug_history_count) {
+            ++debug_history_cursor;
+            copy_string(debug_term.input, debug_history[debug_history_cursor], sizeof(debug_term.input));
+            debug_term.input_len = (int)strlen_local(debug_term.input);
+        } else {
+            debug_history_cursor = debug_history_count;
+            debug_term.input[0] = '\0';
+            debug_term.input_len = 0;
+        }
+    } else if (event.code == KEY_BACKSPACE) {
+        if (debug_term.input_len > 0) {
+            --debug_term.input_len;
+            debug_term.input[debug_term.input_len] = '\0';
+        }
+    } else if (event.code == KEY_ENTER) {
+        debug_execute_command();
+    } else if (event.code == KEY_ESC) {
+        debug_overlay_open = false;
+    } else if (event.ch >= 32 && event.ch <= 126 && debug_term.input_len + 1 < TERM_LINE_LEN) {
+        debug_term.input[debug_term.input_len++] = event.ch;
+        debug_term.input[debug_term.input_len] = '\0';
+    }
+}
+
 static void apply_settings(void) {
     SettingsState next = settings_pending;
     bool video_changed = settings_applied.palette_mode != next.palette_mode ||
@@ -2918,6 +3471,7 @@ static void apply_settings(void) {
                          settings_applied.widescreen != next.widescreen;
 
     if (video_changed && !set_output_mode(&next)) {
+        serial_trace("ERROR", "video mode switch failed");
         next.palette_mode = settings_applied.palette_mode;
         next.resolution_mode = settings_applied.resolution_mode;
         next.widescreen = settings_applied.widescreen;
@@ -2926,6 +3480,7 @@ static void apply_settings(void) {
     settings_applied = next;
     settings_pending = next;
     program_vga_palette();
+    serial_trace("INFO", "Screen Changed");
 }
 
 static bool settings_dirty(void) {
@@ -2980,8 +3535,8 @@ static bool live_palette_supported(uint8_t index) {
 
 static const char *background_name(uint8_t index) {
     static const char *names[] = {
-        "desktop.png",
-        //"Import as Custom",
+        "Default",
+        "Fruish",
         "Solid Red",
         "Solid Orange",
         "Solid Yellow",
@@ -2991,7 +3546,7 @@ static const char *background_name(uint8_t index) {
         "Solid White",
         "Solid Black"
     };
-    return names[index % 9];
+    return names[index % 10];
 }
 
 static void resolution_string(char *buffer, size_t max_len, const SettingsState *state) {
@@ -3073,7 +3628,7 @@ static void snake_spawn_food(void) {
 }
 
 static void update_snake(void) {
-    if (!windows[APP_SNAKE].open || snake_dead || cpu_halted_overlay) {
+    if (!windows[APP_SNAKE].open || snake_dead || cpu_halted_overlay || debug_overlay_open) {
         return;
     }
 
@@ -3123,6 +3678,23 @@ static void update_snake(void) {
 }
 
 static void handle_text_target(KeyEvent event) {
+    if (desktop_rename_active) {
+        if (event.code == KEY_ENTER) {
+            desktop_finish_rename(true);
+        } else if (event.code == KEY_ESC) {
+            desktop_finish_rename(false);
+        } else if (event.code == KEY_BACKSPACE) {
+            if (desktop_rename_len > 0) {
+                --desktop_rename_len;
+                desktop_rename_buffer[desktop_rename_len] = '\0';
+            }
+        } else if (event.ch >= 32 && event.ch <= 126 && desktop_rename_len < DESKTOP_ICON_NAME_MAX) {
+            desktop_rename_buffer[desktop_rename_len++] = event.ch;
+            desktop_rename_buffer[desktop_rename_len] = '\0';
+        }
+        return;
+    }
+
     if (active_window == APP_NOTEPAD) {
         if (event.code == KEY_BACKSPACE) {
             if (notepad_len > 0) {
@@ -3165,9 +3737,86 @@ static void handle_text_target(KeyEvent event) {
 }
 
 static void draw_button(int x, int y, int w, int h, const char *label, uint8_t fill, uint8_t border, uint8_t text) {
-    fill_rect(x, y, w, h, fill);
+    bool hover = point_in_rect(mouse.x, mouse.y, x, y, w, h);
+    bool pressed = hover && mouse.left;
+    uint32_t hover_id = ((uint32_t)(x & 0x3FF) << 20) ^ ((uint32_t)(y & 0x3FF) << 10) ^ (uint32_t)((w & 0x1F) << 5) ^ (uint32_t)(h & 0x1F);
+    uint8_t draw_fill = fill;
+    uint8_t hover_fill = fill == color_green ? color_green_dark :
+                         (fill == color_blue ? color_blue_dark :
+                         (fill == color_white ? color_gray_light : color_gray));
+
+    if (hover) {
+        cursor_hand_hint = true;
+        if (button_hover_id != hover_id) {
+            button_hover_id = hover_id;
+            button_hover_tick = timer_ticks;
+        }
+    }
+
+    if (pressed) {
+        draw_fill = color_gray_dark;
+    }
+
+    if (!pressed && hover && fill != color_gray) {
+        draw_hover_fade_rect(x, y, w, h, fill, hover_fill, button_hover_tick);
+        draw_fill = (timer_ticks - button_hover_tick) >= 9u ? hover_fill : fill;
+    } else {
+        fill_rect(x, y, w, h, draw_fill);
+    }
     draw_rect(x, y, w, h, border);
-    draw_text_center(x + w / 2, y + (h - 8) / 2, label, text, fill, true);
+    if (!pressed) {
+        draw_pixel(x + w - 2, y + 1, color_white);
+        draw_pixel(x + 1, y + h - 2, color_black);
+    }
+    draw_text_center(x + w / 2 + (pressed ? 1 : 0), y + (h - 8) / 2 + (pressed ? 1 : 0), label, text, draw_fill, true);
+}
+
+static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8_t dark, uint32_t hover_tick) {
+    uint32_t age = timer_ticks - hover_tick;
+    int density = (int)(age / 3u) + 1;
+
+    if (density >= 4) {
+        fill_rect(x, y, w, h, dark);
+        return;
+    }
+
+    fill_rect(x, y, w, h, base);
+    for (int py = y; py < y + h; ++py) {
+        for (int px = x; px < x + w; ++px) {
+            if (((px + py) & 3) < density) {
+                draw_pixel(px, py, dark);
+            }
+        }
+    }
+}
+
+static void draw_interactive_row(int x, int y, int w, int h,
+                                 const char *label,
+                                 uint8_t text,
+                                 bool hover,
+                                 bool pressed,
+                                 uint32_t hover_tick) {
+    uint8_t bg = color_gray_light;
+    int text_dx = pressed ? 1 : 0;
+    int text_dy = pressed ? 1 : 0;
+
+    if (hover) {
+        cursor_hand_hint = true;
+    }
+
+    if (pressed) {
+        fill_rect(x + 1, y + 1, w, h, color_black);
+        fill_rect(x, y, w, h, color_gray_dark);
+        draw_rect(x, y, w, h, color_black);
+    } else if (hover) {
+        draw_hover_fade_rect(x, y, w, h, color_gray_light, color_gray, hover_tick);
+        draw_rect(x, y, w, h, color_gray_dark);
+        bg = (timer_ticks - hover_tick) >= 9u ? color_gray : color_gray_light;
+    } else {
+        fill_rect(x, y, w, h, color_gray_light);
+    }
+
+    draw_text(x + 8 + text_dx, y + (h - 8) / 2 + text_dy, label, text, bg, true);
 }
 
 static bool button_clicked(int x, int y, int w, int h) {
@@ -3395,10 +4044,25 @@ static void render_mines(const Window *window) {
 
 static void render_game_center(const Window *window) {
     static const char *games[] = {"Minesweeper", "Snake", "Guess Number"};
+    static const AppId game_apps[] = {APP_MINES, APP_SNAKE, APP_GUESS};
     int header_icon_w = image_width(_binary_build_game_icon_bin_start);
     int header_text_w = text_pixel_width("Game Center");
     int header_x = window->x + (window->w - (header_icon_w + 8 + header_text_w)) / 2;
-    int list_y = window->y + 112;
+    int list_y = window->y + 108;
+    int row_x = window->x + 20;
+    int row_w = window->w - 40;
+    int hover_row = -1;
+
+    for (int i = 0; i < 3; ++i) {
+        if (point_in_rect(mouse.x, mouse.y, row_x, list_y + i * 34, row_w, 36)) {
+            hover_row = i;
+            break;
+        }
+    }
+    if (hover_row != game_center_hover_row) {
+        game_center_hover_row = hover_row;
+        game_center_hover_tick = timer_ticks;
+    }
 
     fill_rect(window->x + 8, window->y + 24, window->w - 16, window->h - 32, color_white);
     draw_image_at(_binary_build_game_icon_bin_start, header_x, window->y + 36, true);
@@ -3407,8 +4071,12 @@ static void render_game_center(const Window *window) {
 
     for (int i = 0; i < 3; ++i) {
         int row_y = list_y + i * 34;
-        draw_image_at(_binary_build_program_icon_bin_start, window->x + 24, row_y, true);
-        draw_text(window->x + 64, row_y + 12, games[i], color_black, color_white, true);
+        bool hover = game_center_hover_row == i;
+        bool pressed = hover && mouse.left;
+        int offset = pressed ? 1 : 0;
+        draw_interactive_row(row_x, row_y, row_w, 36, "", color_black, hover, pressed, game_center_hover_tick);
+        draw_image_at(app_icon_image(game_apps[i]), window->x + 24 + offset, row_y + 2 + offset, true);
+        draw_text(window->x + 64 + offset, row_y + 14 + offset, games[i], color_black, color_white, true);
     }
 }
 
@@ -3419,6 +4087,21 @@ static void render_power(const Window *window) {
     draw_button(x, y + 32, 160, 24, "Restart", color_gray_light, color_black, color_black);
     draw_button(x, y + 64, 160, 24, "Halt", color_gray_light, color_black, color_black);
     draw_button(x, y + 96, 160, 24, "x Close", color_gray_light, color_black, color_black);
+}
+
+static void render_power_overlay(void) {
+    int x = 212;
+    int y = 150;
+    if (!power_menu_open) {
+        return;
+    }
+    fill_rect(x, y, 216, 158, color_gray_light);
+    draw_rect(x, y, 216, 158, color_black);
+    draw_text_center(x + 108, y + 12, "Power Options", color_blue_dark, color_gray_light, true);
+    draw_button(x + 28, y + 34, 160, 24, "Shutdown", color_gray_light, color_black, color_black);
+    draw_button(x + 28, y + 66, 160, 24, "Restart", color_gray_light, color_black, color_black);
+    draw_button(x + 28, y + 98, 160, 24, "Halt", color_gray_light, color_black, color_black);
+    draw_button(x + 28, y + 126, 160, 20, "Close", color_gray_light, color_black, color_black);
 }
 
 static void render_settings(const Window *window) {
@@ -3461,8 +4144,8 @@ static void render_settings(const Window *window) {
         draw_button(window->x + 170, window->y + 86, 20, 18, "<", color_gray_light, color_black, color_black);
         draw_button(window->x + 194, window->y + 86, 160, 18, background_name(settings_pending.background_mode), color_gray_light, color_black, color_black);
         draw_button(window->x + 358, window->y + 86, 20, 18, ">", color_gray_light, color_black, color_black);
-        draw_text(window->x + 20, window->y + 120, "Import as Custom is reserved", color_black, color_white, true);
-        draw_text(window->x + 20, window->y + 132, "for a later file browser build.", color_black, color_white, true);
+        draw_text(window->x + 20, window->y + 120, "theme1.png and theme2.png", color_black, color_white, true);
+        draw_text(window->x + 20, window->y + 132, "apply immediately after OK.", color_black, color_white, true);
     }
 
     draw_button(window->x + 120, window->y + window->h - 36, 60, 22, "Cancel", dirty ? color_gray_light : color_gray, color_black, color_black);
@@ -3482,7 +4165,7 @@ static void render_task_manager(const Window *window) {
     int content_x = window->x + 18;
     int grid_x = content_x;
     int grid_y = window->y + 64;
-    int scroll_x = grid_x + 132;
+    int scroll_x = grid_x + GPU_GRID_W + 10;
     uint32_t total_gpu_entries = gpu_palette_entry_count();
     uint32_t max_gpu_scroll = gpu_palette_max_scroll();
 
@@ -3510,9 +4193,9 @@ static void render_task_manager(const Window *window) {
         draw_text(list_x + 210, list_y + 6, "Type", color_blue_dark, color_gray_light, true);
 
         for (int i = 0; i < rows && i < 9; ++i) {
-            const char *name;
-            const char *type;
-            AppId app;
+            const char *name = "";
+            const char *type = "";
+            AppId app = APP_NOTEPAD;
             bool killable = task_manager_process_info(i, &name, &type, &app);
             int row_y = list_y + 24 + i * 15;
             uint8_t fill = i == task_manager_selected_process ? color_blue : color_white;
@@ -3593,31 +4276,31 @@ static void render_task_manager(const Window *window) {
         draw_text(window->x + 262, window->y + 296, disk_physical_type_label(), color_blue_dark, color_white, true);
     } else {
         draw_text(window->x + 20, window->y + 62, "GPU:", color_black, color_white, true);
-        fill_rect(grid_x - 2, grid_y - 2, 132, 132, color_gray_light);
-        draw_rect(grid_x - 2, grid_y - 2, 132, 132, color_gray_dark);
+        fill_rect(grid_x - 2, grid_y - 2, GPU_GRID_W + 4, GPU_GRID_H + 4, color_gray_light);
+        draw_rect(grid_x - 2, grid_y - 2, GPU_GRID_W + 4, GPU_GRID_H + 4, color_gray_dark);
         for (int index = 0; index < GPU_GRID_PAGE_ENTRIES; ++index) {
             uint32_t entry = gpu_palette_scroll + (uint32_t)index;
-            int gx = grid_x + (index % 16) * 8;
-            int gy = grid_y + (index / 16) * 8;
+            int gx = grid_x + (index % GPU_GRID_COLS) * GPU_SWATCH_SIZE;
+            int gy = grid_y + (index / GPU_GRID_COLS) * GPU_SWATCH_SIZE;
             if (entry < total_gpu_entries) {
-                fill_rect(gx, gy, 7, 7, gpu_palette_entry_color(entry));
-                draw_rect(gx, gy, 7, 7, color_black);
+                fill_rect(gx, gy, GPU_SWATCH_SIZE - 1, GPU_SWATCH_SIZE - 1, gpu_palette_entry_color(entry));
+                draw_rect(gx, gy, GPU_SWATCH_SIZE - 1, GPU_SWATCH_SIZE - 1, color_black);
             } else {
-                fill_rect(gx, gy, 7, 7, color_gray_light);
-                draw_rect(gx, gy, 7, 7, color_gray_dark);
+                fill_rect(gx, gy, GPU_SWATCH_SIZE - 1, GPU_SWATCH_SIZE - 1, color_gray_light);
+                draw_rect(gx, gy, GPU_SWATCH_SIZE - 1, GPU_SWATCH_SIZE - 1, color_gray_dark);
                 draw_pixel(gx + 1, gy + 1, color_red);
-                draw_pixel(gx + 5, gy + 5, color_red);
-                draw_pixel(gx + 1, gy + 5, color_red);
-                draw_pixel(gx + 5, gy + 1, color_red);
+                draw_pixel(gx + GPU_SWATCH_SIZE - 3, gy + GPU_SWATCH_SIZE - 3, color_red);
+                draw_pixel(gx + 1, gy + GPU_SWATCH_SIZE - 3, color_red);
+                draw_pixel(gx + GPU_SWATCH_SIZE - 3, gy + 1, color_red);
             }
         }
 
         draw_button(scroll_x, grid_y - 2, 16, 16, "^", gpu_palette_scroll > 0 ? color_gray_light : color_gray, color_black, color_black);
-        fill_rect(scroll_x, grid_y + 16, 16, 98, color_gray_light);
-        draw_rect(scroll_x, grid_y + 16, 16, 98, color_gray_dark);
+        fill_rect(scroll_x, grid_y + 16, 16, GPU_GRID_H - 32, color_gray_light);
+        draw_rect(scroll_x, grid_y + 16, 16, GPU_GRID_H - 32, color_gray_dark);
         if (total_gpu_entries > GPU_GRID_PAGE_ENTRIES) {
             int thumb_h = 20;
-            int thumb_track = 98 - thumb_h;
+            int thumb_track = (GPU_GRID_H - 32) - thumb_h;
             int thumb_y = grid_y + 17 + (int)((gpu_palette_scroll * (uint32_t)thumb_track) / max_gpu_scroll);
             fill_rect(scroll_x + 2, thumb_y, 12, thumb_h, color_blue);
             draw_rect(scroll_x + 2, thumb_y, 12, thumb_h, color_black);
@@ -3625,7 +4308,7 @@ static void render_task_manager(const Window *window) {
             fill_rect(scroll_x + 2, grid_y + 18, 12, 20, color_gray);
             draw_rect(scroll_x + 2, grid_y + 18, 12, 20, color_black);
         }
-        draw_button(scroll_x, grid_y + 114, 16, 16, "v", gpu_palette_scroll < max_gpu_scroll ? color_gray_light : color_gray, color_black, color_black);
+        draw_button(scroll_x, grid_y + GPU_GRID_H - 16, 16, 16, "v", gpu_palette_scroll < max_gpu_scroll ? color_gray_light : color_gray, color_black, color_black);
 
         page_text[0] = '\0';
         {
@@ -3642,17 +4325,17 @@ static void render_task_manager(const Window *window) {
             size_t len = 0;
             append_uint(temp, &len, sizeof(temp), total_gpu_entries);
         }
-        draw_text(grid_x + 2, grid_y + 240, "Total GPU Palettes:", color_black, color_white, true);
-        draw_text(grid_x + 160, grid_y + 240, temp, color_blue_dark, color_white, true);
+        draw_text(grid_x + 2, grid_y + 150, "Total GPU Palettes:", color_black, color_white, true);
+        draw_text(grid_x + 160, grid_y + 150, temp, color_blue_dark, color_white, true);
         temp[0] = '\0';
         {
             size_t len = 0;
             append_uint(temp, &len, sizeof(temp), fb.bpp);
         }
-        draw_text(grid_x + 2, grid_y + 252, "Video Bit Depth   :", color_black, color_white, true);
-        draw_text(grid_x + 160, grid_y + 252, temp, color_blue_dark, color_white, true);
-        draw_text(grid_x + 2, grid_y + 270, "Palette Page      :", color_black, color_white, true);
-        draw_text(grid_x + 160, grid_y + 270, page_text, color_blue_dark, color_white, true);
+        draw_text(grid_x + 2, grid_y + 164, "Video Bit Depth   :", color_black, color_white, true);
+        draw_text(grid_x + 160, grid_y + 164, temp, color_blue_dark, color_white, true);
+        draw_text(grid_x + 2, grid_y + 178, "Palette Page      :", color_black, color_white, true);
+        draw_text(grid_x + 160, grid_y + 178, page_text, color_blue_dark, color_white, true);
     }
 
     if (task_manager_confirm_kill) {
@@ -3710,26 +4393,72 @@ static void render_taskbar(void) {
     draw_text(OS_WIDTH - (int)strlen_local(datetime) * 8 - 8, OS_HEIGHT - 20, datetime, color_white, color_gray_dark, true);
 }
 
+static int start_menu_item_y(int menu_y, int row) {
+    switch (row) {
+        case 0: return menu_y + 22;
+        case 1: return menu_y + 38;
+        case 2: return menu_y + 54;
+        case 3: return menu_y + 70;
+        case 4: return menu_y + 86;
+        case 6: return menu_y + 120;
+        case 9: return menu_y + 158;
+        case 10: return menu_y + 174;
+        case 11: return menu_y + 190;
+        default: return -1;
+    }
+}
+
+static int start_menu_hit_row(int menu_x, int menu_y, int px, int py) {
+    static const int rows[] = {0, 1, 2, 3, 4, 6, 9, 10, 11};
+    for (int i = 0; i < (int)(sizeof(rows) / sizeof(rows[0])); ++i) {
+        int row_y = start_menu_item_y(menu_y, rows[i]);
+        if (point_in_rect(px, py, menu_x + 4, row_y, 172, 15)) {
+            return rows[i];
+        }
+    }
+    return -1;
+}
+
+static void draw_start_menu_item(int menu_x, int menu_y, int row, const char *label, uint8_t text) {
+    int item_x = menu_x + 4;
+    int item_y = start_menu_item_y(menu_y, row);
+    int item_w = 172;
+    int item_h = 15;
+    bool hover = start_menu_hover_row == row;
+    bool pressed = hover && mouse.left;
+
+    draw_interactive_row(item_x, item_y, item_w, item_h, label, text, hover, pressed, start_menu_hover_tick);
+}
+
 static void render_start_menu(void) {
     if (!menu_open) {
         return;
     }
     int x = 0;
-    int y = OS_HEIGHT - TASKBAR_H - 230;
-    fill_rect(x, y, 180, 230, color_gray_light);
-    draw_rect(x, y, 180, 230, color_black);
+    int y = OS_HEIGHT - TASKBAR_H - 214;
+    int hover_row = -1;
+    if (point_in_rect(mouse.x, mouse.y, x, y, 180, 214)) {
+        hover_row = start_menu_hit_row(x, y, mouse.x, mouse.y);
+    }
+    if (hover_row != start_menu_hover_row) {
+        start_menu_hover_row = hover_row;
+        start_menu_hover_tick = timer_ticks;
+    }
+
+    fill_rect(x, y, 180, 214, color_gray_light);
+    draw_rect(x, y, 180, 214, color_black);
     draw_text(x + 8, y + 8, "Tools:", color_blue_dark, color_gray_light, true);
-    draw_text(x + 8, y + 24, "Notepad", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 40, "Command Prompt", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 56, "Paint", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 72, "Explorer", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 88, "Task Manager", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 112, "Games:", color_blue_dark, color_gray_light, true);
-    draw_text(x + 8, y + 128, "Game Center", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 160, "Options:", color_blue_dark, color_gray_light, true);
-    draw_text(x + 8, y + 176, "Power Options", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 192, "Settings", color_black, color_gray_light, true);
-    draw_text(x + 8, y + 208, "x Close", color_red, color_gray_light, true);
+    draw_start_menu_item(x, y, 0, "Notepad", color_black);
+    draw_start_menu_item(x, y, 1, "Command Prompt", color_black);
+    draw_start_menu_item(x, y, 2, "Paint", color_black);
+    draw_start_menu_item(x, y, 3, "Explorer", color_black);
+    draw_start_menu_item(x, y, 4, "Task Manager", color_black);
+    draw_text(x + 8, y + 106, "Games:", color_blue_dark, color_gray_light, true);
+    draw_start_menu_item(x, y, 6, "Game Center", color_black);
+    draw_text(x + 8, y + 144, "Options:", color_blue_dark, color_gray_light, true);
+    draw_start_menu_item(x, y, 9, "Power Options", color_black);
+    draw_start_menu_item(x, y, 10, "Settings", color_black);
+    draw_start_menu_item(x, y, 11, "x Close", color_red);
 }
 
 static void render_context_menu(void) {
@@ -3743,13 +4472,86 @@ static void render_context_menu(void) {
     draw_text(context_menu_x + 8, context_menu_y + 40, "Settings", color_black, color_gray_light, true);
 }
 
+static void render_desktop_icon_menu(void) {
+    static const char *items[] = {"Cut", "Copy", "Paste", "Rename", "Delete"};
+    if (!desktop_icon_menu_open) {
+        return;
+    }
+    fill_rect(desktop_icon_menu_x, desktop_icon_menu_y, 120, 84, color_gray_light);
+    draw_rect(desktop_icon_menu_x, desktop_icon_menu_y, 120, 84, color_black);
+    for (int i = 0; i < 5; ++i) {
+        uint8_t text = (i == 2 && !desktop_clipboard_valid) ? color_gray_dark : color_black;
+        draw_text(desktop_icon_menu_x + 8, desktop_icon_menu_y + 8 + i * 15, items[i], text, color_gray_light, true);
+    }
+}
+
+static void render_start_app_menu(void) {
+    if (!start_app_menu_open) {
+        return;
+    }
+    fill_rect(start_app_menu_x, start_app_menu_y, 154, 28, color_gray_light);
+    draw_rect(start_app_menu_x, start_app_menu_y, 154, 28, color_black);
+    draw_text(start_app_menu_x + 8, start_app_menu_y + 10, "Pin to Desktop Icon", color_black, color_gray_light, true);
+}
+
+static void render_debug_overlay(void) {
+    int x = 42;
+    int y = 46;
+    int w = OS_WIDTH - 84;
+    int h = OS_HEIGHT / 2;
+    int max_lines = (h - 58) / 10;
+    int start = debug_term.line_count > max_lines ? debug_term.line_count - max_lines : 0;
+    int line_y = y + 32;
+
+    if (!debug_overlay_open) {
+        return;
+    }
+
+    fill_rect(x, y, w, h, color_white);
+    draw_rect(x, y, w, h, color_black);
+    draw_text(x + 10, y + 10, "HaloxOS Debugger", color_blue_dark, color_white, true);
+    for (int i = start; i < debug_term.line_count; ++i) {
+        uint8_t text_color = i < 2 ? (i == 0 ? color_blue_dark : color_gray_dark) : color_black;
+        draw_text_clipped(x + 10, line_y, w - 20, debug_term.lines[i], text_color, color_white, true);
+        line_y += 10;
+    }
+    draw_text(x + 10, y + h - 18, "DBG:", color_black, color_white, true);
+    draw_text_clipped(x + 48, y + h - 18, w - 60, debug_term.input, color_black, color_white, true);
+    if (((timer_ticks / TERMINAL_CURSOR_BLINK_TICKS) & 1u) == 0) {
+        draw_text(x + 48 + debug_term.input_len * 8, y + h - 18, "_", color_black, color_white, true);
+    }
+}
+
 static void render_desktop_icons(void) {
     for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
         draw_desktop_icon(i, i == selected_desktop_icon);
     }
 }
 
+static bool cursor_over_clickable(void) {
+    if (cursor_hand_hint || desktop_icon_hit_test(mouse.x, mouse.y) >= 0) {
+        return true;
+    }
+    if (context_menu_open && point_in_rect(mouse.x, mouse.y, context_menu_x, context_menu_y, 120, 60)) {
+        return true;
+    }
+    if (desktop_icon_menu_open && point_in_rect(mouse.x, mouse.y, desktop_icon_menu_x, desktop_icon_menu_y, 120, 84)) {
+        return true;
+    }
+    if (start_app_menu_open && point_in_rect(mouse.x, mouse.y, start_app_menu_x, start_app_menu_y, 154, 28)) {
+        return true;
+    }
+    for (int app = 0; app < APP_COUNT; ++app) {
+        Window *window = &windows[app];
+        if (window->open && point_in_rect(mouse.x, mouse.y, window->x + window->w - 18, window->y + 3, 12, 12)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void render_cursor(void) {
+    bool hand = cursor_over_clickable();
     /* black outline */
     static const uint16_t outline[12] = {
         0b1000000000000000,
@@ -3781,6 +4583,24 @@ static void render_cursor(void) {
         0b0000010000000000,
         0b0000000000000000
     };
+
+    if (hand) {
+        int x = mouse.x;
+        int y = mouse.y;
+        int press = mouse.left ? 1 : 0;
+        fill_rect(x + 6, y + press, 6, 11, color_black);
+        fill_rect(x + 7, y + 1 + press, 4, 9, color_white);
+        fill_rect(x + 4, y + 8 + press, 11, 8, color_black);
+        fill_rect(x + 5, y + 9 + press, 9, 6, color_white);
+        fill_rect(x + 2, y + 9 + press, 5, 5, color_black);
+        fill_rect(x + 3, y + 10 + press, 4, 3, color_white);
+        fill_rect(x + 10, y + 5 + press, 4, 8, color_black);
+        fill_rect(x + 11, y + 6 + press, 2, 6, color_white);
+        fill_rect(x + 13, y + 7 + press, 4, 7, color_black);
+        fill_rect(x + 14, y + 8 + press, 2, 5, color_white);
+        draw_pixel(x + 8, y + press, color_white);
+        return;
+    }
 
     /* draw outline */
     for (int row = 0; row < 12; ++row) {
@@ -3865,6 +4685,9 @@ static void render_login(void) {
     text_x = icon_x + icon_w + 16;
 
     draw_image(_binary_build_login_bin_start);
+    if (debug) {
+        draw_text(8, 8, "DEBUG BUILD!", color_red, color_gray_light, true);
+    }
     draw_image_at(_binary_build_user_frame_bin_start, icon_x, 182, true);
     draw_text(text_x, 190, line1, color_black, 0, true);
     draw_text(text_x, 216, line2, color_black, 0, true);
@@ -3875,11 +4698,10 @@ static void render_login(void) {
 }
 
 static void render_desktop(void) {
+    cursor_hand_hint = false;
     draw_desktop_background();
     render_desktop_icons();
     render_taskbar();
-    render_start_menu();
-    render_context_menu();
     for (int app = 0; app < APP_COUNT; ++app) {
         if (app == active_window) {
             continue;
@@ -3889,6 +4711,11 @@ static void render_desktop(void) {
     if (active_window >= 0 && active_window < APP_COUNT) {
         render_app_window((AppId)active_window);
     }
+    render_power_overlay();
+    render_start_menu();
+    render_context_menu();
+    render_desktop_icon_menu();
+    render_start_app_menu();
 
     if (cpu_halted_overlay) {
         fill_rect(160, 180, 320, 80, color_gray_light);
@@ -3896,7 +4723,10 @@ static void render_desktop(void) {
         draw_text_center(OS_WIDTH / 2, 215, "Halting CPU... *boom* DONE!", color_black, color_gray_light, true);
     }
 
-    render_cursor();
+    render_debug_overlay();
+    if (!debug_overlay_open) {
+        render_cursor();
+    }
     draw_text(438, 430,  "HaloxOS Version 1.0D", color_black, color_gray_light, true);
     draw_text(438, 440,  "For Testing purposes only",             color_black, color_gray_light, true);
 }
@@ -3947,31 +4777,48 @@ static void handle_login_keys(KeyEvent event) {
     }
 }
 
+static bool start_menu_row_app(int row, AppId *app_out) {
+    switch (row) {
+        case 0: *app_out = APP_NOTEPAD; return true;
+        case 1: *app_out = APP_CMD; return true;
+        case 2: *app_out = APP_PAINT; return true;
+        case 3: *app_out = APP_EXPLORER; return true;
+        case 4: *app_out = APP_TASK_MANAGER; return true;
+        case 6: *app_out = APP_GAME_CENTER; return true;
+        case 9: *app_out = APP_POWER; return true;
+        case 10: *app_out = APP_SETTINGS; return true;
+        default: return false;
+    }
+}
+
 static void handle_start_menu_click(void) {
     int x = 0;
-    int y = OS_HEIGHT - TASKBAR_H - 230;
+    int y = OS_HEIGHT - TASKBAR_H - 214;
 
-    if (!menu_open || !mouse.left || mouse.prev_left) {
+    if (!menu_open || ((!mouse.left || mouse.prev_left) && (!mouse.right || mouse.prev_right))) {
         return;
     }
 
-    if (!point_in_rect(mouse.x, mouse.y, x, y, 180, 230)) {
+    if (!point_in_rect(mouse.x, mouse.y, x, y, 180, 214)) {
         menu_open = false;
         return;
     }
 
-    int row = (mouse.y - y - 24) / 16;
-    switch (row) {
-        case 0: open_window(APP_NOTEPAD); break;
-        case 1: open_window(APP_CMD); break;
-        case 2: open_window(APP_PAINT); break;
-        case 3: open_window(APP_EXPLORER); break;
-        case 4: open_window(APP_TASK_MANAGER); break;
-        case 6: open_window(APP_GAME_CENTER); break;
-        case 9: open_window(APP_POWER); break;
-        case 10: open_window(APP_SETTINGS); break;
-        case 11: menu_open = false; break;
-        default: break;
+    int row = start_menu_hit_row(x, y, mouse.x, mouse.y);
+    AppId app;
+    if (mouse.right && !mouse.prev_right && start_menu_row_app(row, &app)) {
+        start_app_menu_open = true;
+        start_app_menu_app = app;
+        start_app_menu_x = clampi(mouse.x, 0, OS_WIDTH - 154);
+        start_app_menu_y = clampi(mouse.y, 0, OS_HEIGHT - TASKBAR_H - 28);
+        return;
+    }
+    if (mouse.left && !mouse.prev_left) {
+        if (start_menu_row_app(row, &app)) {
+            open_window(app);
+        } else if (row == 11) {
+            menu_open = false;
+        }
     }
 }
 
@@ -3997,13 +4844,126 @@ static void handle_context_menu_click(void) {
     }
 }
 
+static int desktop_find_slot_for_app(AppId app) {
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        if (!desktop_icon_visible[i] && desktop_icon_apps[i] == app) {
+            return i;
+        }
+    }
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        if (!desktop_icon_visible[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void desktop_pin_app(AppId app, int x, int y) {
+    int slot = desktop_find_slot_for_app(app);
+    if (slot < 0) {
+        return;
+    }
+    desktop_icon_apps[slot] = app;
+    copy_string(desktop_icon_names[slot], app == APP_GAME_CENTER ? "Game Center" :
+                                      app == APP_TASK_MANAGER ? "Task Manager" :
+                                      app == APP_CMD ? "Terminal" : app_titles[app],
+                sizeof(desktop_icon_names[slot]));
+    desktop_icons[slot].x = clampi(x, 0, OS_WIDTH - 56);
+    desktop_icons[slot].y = clampi(y, 0, OS_HEIGHT - TASKBAR_H - 56);
+    desktop_icon_visible[slot] = true;
+    selected_desktop_icon = slot;
+}
+
+static void desktop_begin_rename(int index) {
+    if (index < 0 || index >= DESKTOP_ICON_COUNT || !desktop_icon_visible[index]) {
+        return;
+    }
+    desktop_rename_active = true;
+    desktop_rename_icon = index;
+    copy_string(desktop_rename_buffer, desktop_icon_names[index], sizeof(desktop_rename_buffer));
+    desktop_rename_len = (int)strlen_local(desktop_rename_buffer);
+}
+
+static void desktop_finish_rename(bool commit) {
+    if (desktop_rename_active && commit && desktop_rename_icon >= 0 && desktop_rename_icon < DESKTOP_ICON_COUNT &&
+        desktop_rename_buffer[0] != '\0') {
+        copy_string(desktop_icon_names[desktop_rename_icon], desktop_rename_buffer, sizeof(desktop_icon_names[desktop_rename_icon]));
+    }
+    desktop_rename_active = false;
+    desktop_rename_icon = -1;
+    desktop_rename_len = 0;
+}
+
+static void handle_desktop_icon_menu_click(void) {
+    if (!desktop_icon_menu_open || !mouse.left || mouse.prev_left) {
+        return;
+    }
+    if (!point_in_rect(mouse.x, mouse.y, desktop_icon_menu_x, desktop_icon_menu_y, 120, 84)) {
+        desktop_icon_menu_open = false;
+        return;
+    }
+    int row = (mouse.y - desktop_icon_menu_y) / 15;
+    int target = desktop_icon_menu_target;
+    if (target < 0 || target >= DESKTOP_ICON_COUNT) {
+        desktop_icon_menu_open = false;
+        return;
+    }
+    if (row == 0 || row == 1) {
+        desktop_clipboard_valid = true;
+        desktop_clipboard_cut = row == 0;
+        desktop_clipboard_app = desktop_icon_apps[target];
+        copy_string(desktop_clipboard_name, desktop_icon_names[target], sizeof(desktop_clipboard_name));
+        if (row == 0) {
+            desktop_icon_visible[target] = false;
+            selected_desktop_icon = -1;
+        }
+    } else if (row == 2 && desktop_clipboard_valid) {
+        int slot = desktop_find_slot_for_app(desktop_clipboard_app);
+        if (slot >= 0) {
+            desktop_icon_apps[slot] = desktop_clipboard_app;
+            copy_string(desktop_icon_names[slot], desktop_clipboard_name, sizeof(desktop_icon_names[slot]));
+            desktop_icons[slot].x = clampi(desktop_icon_menu_x + 16, 0, OS_WIDTH - 56);
+            desktop_icons[slot].y = clampi(desktop_icon_menu_y + 16, 0, OS_HEIGHT - TASKBAR_H - 56);
+            desktop_icon_visible[slot] = true;
+            selected_desktop_icon = slot;
+            if (desktop_clipboard_cut) {
+                desktop_clipboard_valid = false;
+                desktop_clipboard_cut = false;
+            }
+        }
+    } else if (row == 3) {
+        desktop_begin_rename(target);
+    } else if (row == 4) {
+        desktop_icon_visible[target] = false;
+        selected_desktop_icon = -1;
+    }
+    desktop_icon_menu_open = false;
+}
+
+static void handle_start_app_menu_click(void) {
+    if (!start_app_menu_open || !mouse.left || mouse.prev_left) {
+        return;
+    }
+    if (point_in_rect(mouse.x, mouse.y, start_app_menu_x, start_app_menu_y, 154, 28)) {
+        desktop_pin_app(start_app_menu_app, 18, 24);
+    }
+    start_app_menu_open = false;
+    menu_open = false;
+}
+
 static void handle_desktop_mouse(void) {
     bool pointer_over_window = false;
     bool clicked = mouse.left && !mouse.prev_left;
 
+    if (debug_overlay_open) {
+        return;
+    }
+
     if (button_clicked(4, OS_HEIGHT - 24, 46, 18)) {
         menu_open = !menu_open;
         context_menu_open = false;
+        desktop_icon_menu_open = false;
+        start_app_menu_open = false;
         return;
     }
 
@@ -4018,8 +4978,38 @@ static void handle_desktop_mouse(void) {
         tab_x += 88;
     }
 
-    handle_start_menu_click();
-    handle_context_menu_click();
+    if (power_menu_open && (mouse.left && !mouse.prev_left)) {
+        int x = 240;
+        int y = 184;
+        if (point_in_rect(mouse.x, mouse.y, x, y, 160, 24)) {
+            shutdown_system();
+        } else if (point_in_rect(mouse.x, mouse.y, x, y + 32, 160, 24)) {
+            restart_system();
+        } else if (point_in_rect(mouse.x, mouse.y, x, y + 64, 160, 24)) {
+            cpu_halted_overlay = true;
+        } else if (point_in_rect(mouse.x, mouse.y, x, y + 92, 160, 20) ||
+                   !point_in_rect(mouse.x, mouse.y, 212, 150, 216, 158)) {
+            power_menu_open = false;
+        }
+        return;
+    }
+
+    if (desktop_icon_menu_open) {
+        handle_desktop_icon_menu_click();
+        return;
+    }
+    if (start_app_menu_open) {
+        handle_start_app_menu_click();
+        return;
+    }
+    if (menu_open) {
+        handle_start_menu_click();
+        return;
+    }
+    if (context_menu_open) {
+        handle_context_menu_click();
+        return;
+    }
 
     if (mouse.left && drag_desktop_icon >= 0 && drag_desktop_icon < DESKTOP_ICON_COUNT) {
         int box_x;
@@ -4103,8 +5093,21 @@ static void handle_desktop_mouse(void) {
     }
 
     if (!pointer_over_window && button_right_clicked(0, 0, OS_WIDTH, OS_HEIGHT - TASKBAR_H)) {
+        int hit = desktop_icon_hit_test(mouse.x, mouse.y);
+        if (hit >= 0) {
+            selected_desktop_icon = hit;
+            desktop_icon_menu_open = true;
+            desktop_icon_menu_target = hit;
+            desktop_icon_menu_x = clampi(mouse.x, 0, OS_WIDTH - 120);
+            desktop_icon_menu_y = clampi(mouse.y, 0, OS_HEIGHT - TASKBAR_H - 84);
+            menu_open = false;
+            context_menu_open = false;
+            return;
+        }
         context_menu_open = true;
         menu_open = false;
+        desktop_icon_menu_open = false;
+        start_app_menu_open = false;
         context_menu_x = clampi(mouse.x, 0, OS_WIDTH - 120);
         context_menu_y = clampi(mouse.y, 0, OS_HEIGHT - TASKBAR_H - 60);
         return;
@@ -4355,7 +5358,7 @@ static void handle_desktop_mouse(void) {
                 }
             }
         } else if (task_manager_tab == 2) {
-            int scroll_x = window->x + 150;
+            int scroll_x = window->x + 18 + GPU_GRID_W + 10;
             int track_y = window->y + 80;
             int thumb_y;
             int thumb_h;
@@ -4365,7 +5368,7 @@ static void handle_desktop_mouse(void) {
 
             if (button_clicked(scroll_x, window->y + 62, 16, 16) && gpu_palette_scroll >= GPU_GRID_COLS) {
                 gpu_palette_scroll -= GPU_GRID_COLS;
-            } else if (button_clicked(scroll_x, window->y + 178, 16, 16) && gpu_palette_scroll < gpu_palette_max_scroll()) {
+            } else if (button_clicked(scroll_x, window->y + 64 + GPU_GRID_H - 16, 16, 16) && gpu_palette_scroll < gpu_palette_max_scroll()) {
                 gpu_palette_scroll += GPU_GRID_COLS;
                 if (gpu_palette_scroll > gpu_palette_max_scroll()) {
                     gpu_palette_scroll = gpu_palette_max_scroll();
@@ -4373,7 +5376,7 @@ static void handle_desktop_mouse(void) {
             } else if (button_clicked(scroll_x + 2, thumb_y, 12, thumb_h)) {
                 task_manager_gpu_scroll_drag = true;
                 task_manager_gpu_scroll_drag_offset = mouse.y - thumb_y;
-            } else if (button_clicked(scroll_x, track_y + 16, 16, 98)) {
+            } else if (button_clicked(scroll_x, track_y + 16, 16, GPU_GRID_H - 32)) {
                 if (mouse.y < thumb_y && gpu_palette_scroll >= GPU_GRID_PAGE_ENTRIES) {
                     gpu_palette_scroll -= GPU_GRID_PAGE_ENTRIES;
                 } else if (mouse.y > thumb_y + thumb_h && gpu_palette_scroll < gpu_palette_max_scroll()) {
@@ -4421,6 +5424,18 @@ static void update_state(void) {
     }
 
     while (dequeue_key(&event)) {
+        if (system_state == STATE_DESKTOP && keyboard_ctrl && keyboard_shift && event.code == KEY_ENTER) {
+            debug_enter();
+            continue;
+        }
+        if (debug_overlay_open) {
+            debug_handle_key(event);
+            continue;
+        }
+        if (system_state == STATE_DESKTOP && keyboard_ctrl && keyboard_shift && event.code == KEY_ESC) {
+            open_window(APP_TASK_MANAGER);
+            continue;
+        }
         switch (system_state) {
             case STATE_BOOT_MENU:
                 handle_boot_menu_keys(event);
@@ -4462,6 +5477,13 @@ static void init_state(void) {
     drag_desktop_icon = -1;
     desktop_icon_drag_moved = false;
     desktop_icon_press_was_selected = false;
+    desktop_icon_menu_open = false;
+    start_app_menu_open = false;
+    power_menu_open = false;
+    desktop_clipboard_valid = false;
+    desktop_clipboard_cut = false;
+    desktop_rename_active = false;
+    desktop_rename_icon = -1;
     load_desktop_icon_positions();
     clear_boot_status();
     boot_menu_dirty = true;
@@ -4469,6 +5491,7 @@ static void init_state(void) {
     boot_terminal_last_blink = 0xFFFFFFFFu;
     last_input_tick = 0;
     keyboard_alt = false;
+    keyboard_ctrl = false;
     task_manager_tab = 0;
     task_manager_selected_process = 0;
     task_manager_confirm_kill = false;
@@ -4491,6 +5514,11 @@ static void init_state(void) {
     perf_window_ready = false;
     terminal_reset(&boot_term);
     terminal_reset(&cmd_term);
+    terminal_reset(&debug_term);
+    debug_overlay_open = false;
+    debug_pending_action = DEBUG_ACTION_NONE;
+    debug_history_count = 0;
+    debug_history_cursor = 0;
     terminal_add_line(&boot_term, "help clear cls date time boot shutdown restart halt echo");
     terminal_add_line(&cmd_term, "help clear cls date time boot shutdown restart halt echo");
     memset_local(paint_canvas, color_white, sizeof(paint_canvas));
@@ -4509,6 +5537,8 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     uint32_t frame_cycle_start = 0;
     uint32_t frame_cycle_end = 0;
 
+    serial_init();
+    serial_trace("INFO", "initialize kernel");
     boot_drive_valid = false;
     boot_drive_number = 0;
     if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & (1u << 1)) != 0) {
@@ -4518,8 +5548,13 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     ram_total_bytes = detect_total_ram_bytes(mbi);
 
     init_framebuffer(magic, mbi);
+    serial_trace("INFO", "initialize graphics");
     video_mode_switch_available = detect_video_mode_switch();
+    if (!video_mode_switch_available) {
+        serial_trace("WARNING", "video mode switch unavailable");
+    }
     init_interrupts();
+    serial_trace("INFO", "initialize interrupts");
     init_state();
     enter_boot_text_mode();
     draw_everything();

@@ -36,13 +36,19 @@ build/boot.o \
 build/interrupts.o \
 build/kernel.o \
 build/login_asset.o \
-build/desktop_asset.o \
+build/theme1_asset.o \
+build/theme2_asset.o \
 build/user_frame_asset.o \
 build/notepad_icon_asset.o \
 build/terminal_icon_asset.o \
 build/game_icon_asset.o \
 build/program_icon_asset.o \
 build/settings_icon_asset.o \
+build/explorer_icon_asset.o \
+build/taskmgr_icon_asset.o \
+build/mines_icon_asset.o \
+build/snake_icon_asset.o \
+build/guessnum_icon_asset.o \
 
 .PHONY: all clean run disk floppy install-deps FORCE
 all: check-build install-deps $(ISO)
@@ -121,7 +127,7 @@ $(CORE_FLOPPY_CFG): FORCE | build/generated
 	printf '%s\n' 'search --file /boot/grub/grub.cfg --set=root' 'set prefix=($$root)/boot/grub' 'configfile /boot/grub/grub.cfg' > $@
 
 $(DESKTOP_LAYOUT): | build/generated
-	python -c "import struct; magic=0x484C5850; positions=[(18,24),(18,104)]; checksum=magic ^ positions[0][0] ^ positions[0][1] ^ positions[1][0] ^ positions[1][1]; data=struct.pack('<IIiiii', magic, checksum, positions[0][0], positions[0][1], positions[1][0], positions[1][1]); open('$(DESKTOP_LAYOUT)', 'wb').write(data + b'\\x00' * (512 - len(data)))"
+	python -c "import struct; magic=0x484C5850; positions=[(18,24),(18,104),(18,184),(96,24),(96,104),(96,184),(174,24),(174,104),(174,184),(252,24),(252,104)]; checksum=magic; payload=[]; [payload.extend(p) for p in positions]; [globals().__setitem__('checksum', checksum ^ v) for v in payload]; data=struct.pack('<II' + 'i' * len(payload), magic, checksum, *payload); open('$(DESKTOP_LAYOUT)', 'wb').write(data + b'\\x00' * (512 - len(data)))"
 
 build/tools/png2indexed: tools/png2indexed.c | build/tools
 	$(HOSTCC) $(HOSTCFLAGS) -o $@ $< $(HOSTLIBS)
@@ -129,31 +135,52 @@ build/tools/png2indexed: tools/png2indexed.c | build/tools
 build/login.bin: src/bg/login.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/desktop.bin: src/bg/desktop.png build/tools/png2indexed | build
+build/theme1.bin: src/bg/desktop/theme1.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/theme2.bin: src/bg/desktop/theme2.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
 build/user_frame.bin: src/item/user/user-frame.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/notepad_icon.bin: src/item/notepad.png build/tools/png2indexed | build
+build/notepad_icon.bin: src/item/apps/notepad.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/terminal_icon.bin: src/item/terminal.png build/tools/png2indexed | build
+build/terminal_icon.bin: src/item/apps/terminal.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/game_icon.bin: src/item/game.png build/tools/png2indexed | build
+build/game_icon.bin: src/item/games/game.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/program_icon.bin: src/item/program.png build/tools/png2indexed | build
+build/program_icon.bin: src/item/default/program.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/settings_icon.bin: src/item/settings.png build/tools/png2indexed | build
+build/settings_icon.bin: src/item/setting/settings.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/explorer_icon.bin: src/item/apps/explorer.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/taskmgr_icon.bin: src/item/apps/taskmgr.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/mines_icon.bin: src/item/games/minesw.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/snake_icon.bin: src/item/games/snake.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/guessnum_icon.bin: src/item/games/guessnum.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
 build/login_asset.o: build/login.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
-build/desktop_asset.o: build/desktop.bin
+build/theme1_asset.o: build/theme1.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/theme2_asset.o: build/theme2.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/user_frame_asset.o: build/user_frame.bin
@@ -172,6 +199,21 @@ build/program_icon_asset.o: build/program_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/settings_icon_asset.o: build/settings_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/explorer_icon_asset.o: build/explorer_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/taskmgr_icon_asset.o: build/taskmgr_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/mines_icon_asset.o: build/mines_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/snake_icon_asset.o: build/snake_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/guessnum_icon_asset.o: build/guessnum_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/boot.o: src/boot.asm | build

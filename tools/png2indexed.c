@@ -159,6 +159,20 @@ int main(int argc, char **argv) {
             uint8_t alpha = row[x * 4 + 3];
             fwrite(&alpha, 1, 1, output);
         }
+    }
+
+    for (int y = 0; y < height; ++y) {
+        png_bytep row = rows[y];
+        for (int x = 0; x < width; ++x) {
+            png_bytep px = &row[x * 4];
+            uint16_t rgb565 = (uint16_t)(((uint16_t)(px[0] >> 3) << 11) |
+                                          ((uint16_t)(px[1] >> 2) << 5) |
+                                          (uint16_t)(px[2] >> 3));
+            fwrite(&rgb565, sizeof(rgb565), 1, output);
+        }
+    }
+
+    for (int y = 0; y < height; ++y) {
         free(rows[y]);
     }
 
