@@ -2,9 +2,9 @@
     HaloxOS - Version 1.0 Dev!
     Copyright Svh03ra (C) 2026, All rights reserved.
     Source File: kernel.c, main core.
-    Build: 22th April 2026
+    Build: 20th May 2026
 
-    Made in AI used: GPT-5.4 for Visual Code Editor at Codex.
+    Made in AI used: GPT-5.5 for Visual Code Editor at Codex.
 */
 
 /*  This repository is licensed under the GNU General Public License.
@@ -45,6 +45,11 @@ extern const uint8_t _binary_build_guessnum_icon_bin_start[];
 #define TERM_MAX_LINES 32
 #define TERM_LINE_LEN 72
 #define DEBUG_HISTORY_COUNT 8
+#define DEBUG_EDITED_RANGE_COUNT 32
+#define DEBUG_MEMORY_BYTES_PER_ROW 16
+#define DEBUG_MEMORY_VISUAL_W 430
+#define DEBUG_MEMORY_VISUAL_H 240
+#define DEBUG_MEMORY_MAX_EDIT_LENGTH 0x10000u
 #define APP_COUNT 11
 #define SNAKE_MAX_SEGMENTS 128
 #define MINES_SIZE 8
@@ -82,6 +87,8 @@ typedef enum {
     KEY_ESC,
     KEY_BACKSPACE,
     KEY_TAB,
+    KEY_F1,
+    KEY_F2,
     KEY_F4,
     KEY_UP,
     KEY_DOWN,
@@ -137,6 +144,16 @@ typedef struct {
     uint64_t length;
     uint32_t type;
 } __attribute__((packed)) MultibootMmapEntry;
+
+typedef struct {
+    uint32_t size;
+    uint8_t drive_number;
+    uint8_t drive_mode;
+    uint16_t drive_cylinders;
+    uint8_t drive_heads;
+    uint8_t drive_sectors;
+    uint16_t ports[];
+} __attribute__((packed)) MultibootDriveInfo;
 
 typedef struct {
     int x;
@@ -211,6 +228,36 @@ typedef struct {
     char input[TERM_LINE_LEN];
     int input_len;
 } Terminal;
+
+typedef enum {
+    DEBUG_MEMORY_MODE_HEX,
+    DEBUG_MEMORY_MODE_VISUAL
+} DebugMemoryMode;
+
+typedef struct {
+    uint32_t start;
+    uint32_t length;
+} DebugEditedRange;
+
+typedef struct {
+    uint32_t gs;
+    uint32_t fs;
+    uint32_t es;
+    uint32_t ds;
+    uint32_t edi;
+    uint32_t esi;
+    uint32_t ebp;
+    uint32_t esp;
+    uint32_t ebx;
+    uint32_t edx;
+    uint32_t ecx;
+    uint32_t eax;
+    uint32_t vector;
+    uint32_t error_code;
+    uint32_t eip;
+    uint32_t cs;
+    uint32_t eflags;
+} CpuExceptionFrame;
 
 typedef enum {
     DEBUG_ACTION_NONE,
@@ -374,6 +421,14 @@ static DebugAction debug_pending_action = DEBUG_ACTION_NONE;
 static char debug_history[DEBUG_HISTORY_COUNT][TERM_LINE_LEN];
 static int debug_history_count = 0;
 static int debug_history_cursor = 0;
+static bool debug_memory_view_open = false;
+static DebugMemoryMode debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
+static uint32_t debug_memory_base = 0;
+static uint32_t debug_memory_cursor = 0;
+static int debug_memory_edit_nibble = -1;
+static DebugEditedRange debug_edited_ranges[DEBUG_EDITED_RANGE_COUNT];
+static int debug_edited_range_count = 0;
+static const char *debug_forced_fault_reason = NULL;
 
 static uint8_t paint_canvas[PAINT_CANVAS_W * PAINT_CANVAS_H];
 static uint8_t paint_color = 1;
@@ -428,6 +483,12 @@ static bool cpu_has_cpuid = false;
 static bool cpu_has_tsc = false;
 static bool boot_drive_valid = false;
 static uint8_t boot_drive_number = 0;
+static bool boot_drive_info_available = false;
+static uint8_t boot_drive_mode = 0;
+static uint16_t boot_drive_cylinders = 0;
+static uint8_t boot_drive_heads = 0;
+static uint8_t boot_drive_sectors = 0;
+static uint32_t boot_drive_storage_bytes = 0;
 static bool desktop_icon_persistence_enabled = false;
 static DesktopIconPosition desktop_icons[DESKTOP_ICON_COUNT];
 static bool desktop_icon_visible[DESKTOP_ICON_COUNT];
@@ -470,6 +531,38 @@ static bool perf_window_ready = false;
 extern void irq0_stub(void);
 extern void irq_default_stub(void);
 extern void isr_default_stub(void);
+extern void isr0_stub(void);
+extern void isr1_stub(void);
+extern void isr2_stub(void);
+extern void isr3_stub(void);
+extern void isr4_stub(void);
+extern void isr5_stub(void);
+extern void isr6_stub(void);
+extern void isr7_stub(void);
+extern void isr8_stub(void);
+extern void isr9_stub(void);
+extern void isr10_stub(void);
+extern void isr11_stub(void);
+extern void isr12_stub(void);
+extern void isr13_stub(void);
+extern void isr14_stub(void);
+extern void isr15_stub(void);
+extern void isr16_stub(void);
+extern void isr17_stub(void);
+extern void isr18_stub(void);
+extern void isr19_stub(void);
+extern void isr20_stub(void);
+extern void isr21_stub(void);
+extern void isr22_stub(void);
+extern void isr23_stub(void);
+extern void isr24_stub(void);
+extern void isr25_stub(void);
+extern void isr26_stub(void);
+extern void isr27_stub(void);
+extern void isr28_stub(void);
+extern void isr29_stub(void);
+extern void isr30_stub(void);
+extern void isr31_stub(void);
 extern void idt_load(const IdtPointer *pointer);
 extern void cpu_halt_once(void);
 
@@ -556,6 +649,77 @@ static void serial_trace(const char *level, const char *text) {
     serial_write_string(level);
     serial_write_string("]: ");
     serial_write_string(text);
+    serial_write_string("\n");
+}
+
+static void serial_write_hex8(uint8_t value) {
+    static const char hex[] = "0123456789ABCDEF";
+    serial_write_char(hex[(value >> 4) & 0x0F]);
+    serial_write_char(hex[value & 0x0F]);
+}
+
+static void serial_write_hex32(uint32_t value) {
+    serial_write_string("0x");
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        static const char hex[] = "0123456789ABCDEF";
+        serial_write_char(hex[(value >> shift) & 0x0Fu]);
+    }
+}
+
+static void serial_write_uint(uint32_t value) {
+    char buffer[16];
+    int pos = 0;
+
+    if (value == 0) {
+        serial_write_char('0');
+        return;
+    }
+
+    while (value > 0 && pos < (int)sizeof(buffer)) {
+        buffer[pos++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+
+    while (pos > 0) {
+        serial_write_char(buffer[--pos]);
+    }
+}
+
+static void serial_trace_begin(const char *level) {
+    serial_write_char('[');
+    serial_write_string(level);
+    serial_write_string("]: ");
+}
+
+static void serial_trace_hex_value(const char *level, const char *label, uint32_t value) {
+    if (!debug) {
+        return;
+    }
+    serial_trace_begin(level);
+    serial_write_string(label);
+    serial_write_string(": ");
+    serial_write_hex32(value);
+    serial_write_string("\n");
+}
+
+static void serial_trace_uint_value(const char *level, const char *label, uint32_t value) {
+    if (!debug) {
+        return;
+    }
+    serial_trace_begin(level);
+    serial_write_string(label);
+    serial_write_string(": ");
+    serial_write_uint(value);
+    serial_write_string("\n");
+}
+
+static void serial_trace_concat(const char *level, const char *left, const char *right) {
+    if (!debug) {
+        return;
+    }
+    serial_trace_begin(level);
+    serial_write_string(left);
+    serial_write_string(right);
     serial_write_string("\n");
 }
 
@@ -1398,6 +1562,36 @@ static bool detect_video_mode_switch(void) {
     return video_backend == VIDEO_BACKEND_BGA || video_backend == VIDEO_BACKEND_VMWARE_SVGA;
 }
 
+static const char *video_backend_name(void) {
+    switch (video_backend) {
+        case VIDEO_BACKEND_MULTIBOOT: return "Multiboot framebuffer";
+        case VIDEO_BACKEND_BGA: return "Bochs/QEMU BGA";
+        case VIDEO_BACKEND_VMWARE_SVGA: return "VMware SVGA";
+        default: return "None";
+    }
+}
+
+static void serial_trace_video_mode(const char *label) {
+    if (!debug) {
+        return;
+    }
+    serial_trace_begin("INFO");
+    serial_write_string(label);
+    serial_write_string(": ");
+    serial_write_uint(fb.width);
+    serial_write_char('x');
+    serial_write_uint(fb.height);
+    serial_write_string("x");
+    serial_write_uint(fb.bpp);
+    serial_write_string(" pitch=");
+    serial_write_uint(fb.pitch);
+    serial_write_string(" fb=");
+    serial_write_hex32((uint32_t)(uintptr_t)fb.address);
+    serial_write_string(" backend=");
+    serial_write_string(video_backend_name());
+    serial_write_string("\n");
+}
+
 static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t bpp) {
     uint16_t actual_bpp = bpp;
 
@@ -1496,10 +1690,13 @@ static void enter_boot_text_mode(void) {
 
 static void enter_main_graphics_mode(void) {
     if (!set_framebuffer_mode_raw(OS_WIDTH, OS_HEIGHT, 8)) {
+        serial_trace("ERROR", "graphics mode unavailable");
+        serial_trace_video_mode("Graphics mode unavailable state");
         return;
     }
     boot_text_mode = false;
     program_vga_palette();
+    serial_trace_video_mode("Graphics mode entered");
 }
 
 static void set_idt_gate(uint8_t index, void (*handler)(void), uint8_t type_attr) {
@@ -1544,9 +1741,22 @@ static void init_pit(void) {
 
 static void init_interrupts(void) {
     IdtPointer pointer;
+    void (*const exception_stubs[32])(void) = {
+        isr0_stub, isr1_stub, isr2_stub, isr3_stub,
+        isr4_stub, isr5_stub, isr6_stub, isr7_stub,
+        isr8_stub, isr9_stub, isr10_stub, isr11_stub,
+        isr12_stub, isr13_stub, isr14_stub, isr15_stub,
+        isr16_stub, isr17_stub, isr18_stub, isr19_stub,
+        isr20_stub, isr21_stub, isr22_stub, isr23_stub,
+        isr24_stub, isr25_stub, isr26_stub, isr27_stub,
+        isr28_stub, isr29_stub, isr30_stub, isr31_stub
+    };
 
     for (int i = 0; i < 256; ++i) {
         set_idt_gate((uint8_t)i, isr_default_stub, 0x8E);
+    }
+    for (int i = 0; i < 32; ++i) {
+        set_idt_gate((uint8_t)i, exception_stubs[i], 0x8E);
     }
     set_idt_gate(32, irq0_stub, 0x8E);
     for (int i = 33; i <= 47; ++i) {
@@ -1559,6 +1769,142 @@ static void init_interrupts(void) {
     idt_load(&pointer);
     init_pic();
     init_pit();
+}
+
+static const char *system_state_name(void) {
+    switch (system_state) {
+        case STATE_BOOT_MENU: return "Boot Menu";
+        case STATE_BOOT_TERMINAL: return "Boot Terminal";
+        case STATE_LOGIN: return "Login";
+        case STATE_DESKTOP: return "Desktop";
+        case STATE_SHUTDOWN: return "Shutdown";
+        default: return "Unknown";
+    }
+}
+
+static const char *cpu_exception_name(uint32_t vector) {
+    static const char *names[32] = {
+        "#DE Division Error",
+        "#DB Debug",
+        "NMI Interrupt",
+        "#BP Breakpoint",
+        "#OF Overflow",
+        "#BR Bound Range Exceeded",
+        "#UD Invalid Opcode",
+        "#NM Device Not Available",
+        "#DF Double Fault",
+        "Coprocessor Segment Overrun",
+        "#TS Invalid TSS",
+        "#NP Segment Not Present",
+        "#SS Stack-Segment Fault",
+        "#GP General Protection Fault",
+        "#PF Page Fault",
+        "Reserved",
+        "#MF x87 Floating-Point Exception",
+        "#AC Alignment Check",
+        "#MC Machine Check",
+        "#XM SIMD Floating-Point Exception",
+        "#VE Virtualization Exception",
+        "#CP Control Protection Exception",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "#HV Hypervisor Injection Exception",
+        "#VC VMM Communication Exception",
+        "#SX Security Exception",
+        "Reserved"
+    };
+
+    if (vector < 32) {
+        return names[vector];
+    }
+    return "Unknown Exception";
+}
+
+static void serial_dump_cpu_exception(const char *name, const char *reason, const CpuExceptionFrame *frame) {
+    if (!debug) {
+        return;
+    }
+
+    serial_write_string("***** MACHINE CRASH!!! *****\n");
+    serial_trace_begin("ERROR");
+    serial_write_string(reason != NULL ? reason : "CPU exception");
+    serial_write_string("\n");
+
+    serial_trace_begin("ERROR");
+    serial_write_string("Exception: ");
+    serial_write_string(name);
+    if (frame != NULL) {
+        serial_write_string(" vector=");
+        serial_write_uint(frame->vector);
+        serial_write_string(" error=");
+        serial_write_hex32(frame->error_code);
+    }
+    serial_write_string("\n");
+
+    serial_trace_begin("INFO");
+    serial_write_string("System State: ");
+    serial_write_string(system_state_name());
+    serial_write_string("\n");
+
+    serial_trace_video_mode("Crash video state");
+
+    if (frame == NULL) {
+        return;
+    }
+
+    serial_write_string("[INFO]: Registers A: EAX=");
+    serial_write_hex32(frame->eax);
+    serial_write_string(" EBX=");
+    serial_write_hex32(frame->ebx);
+    serial_write_string(" ECX=");
+    serial_write_hex32(frame->ecx);
+    serial_write_string(" EDX=");
+    serial_write_hex32(frame->edx);
+    serial_write_string("\n");
+
+    serial_write_string("[INFO]: Registers B: ESI=");
+    serial_write_hex32(frame->esi);
+    serial_write_string(" EDI=");
+    serial_write_hex32(frame->edi);
+    serial_write_string(" EBP=");
+    serial_write_hex32(frame->ebp);
+    serial_write_string(" ESP=");
+    serial_write_hex32(frame->esp);
+    serial_write_string("\n");
+
+    serial_write_string("[INFO]: Control: EIP=");
+    serial_write_hex32(frame->eip);
+    serial_write_string(" CS=");
+    serial_write_hex32(frame->cs);
+    serial_write_string(" EFLAGS=");
+    serial_write_hex32(frame->eflags);
+    serial_write_string("\n");
+
+    serial_write_string("[INFO]: Segments: DS=");
+    serial_write_hex32(frame->ds);
+    serial_write_string(" ES=");
+    serial_write_hex32(frame->es);
+    serial_write_string(" FS=");
+    serial_write_hex32(frame->fs);
+    serial_write_string(" GS=");
+    serial_write_hex32(frame->gs);
+    serial_write_string("\n");
+}
+
+void cpu_exception_handler(const CpuExceptionFrame *frame) {
+    const char *reason = debug_forced_fault_reason;
+    const char *name = frame != NULL ? cpu_exception_name(frame->vector) : "CPU Exception";
+
+    serial_dump_cpu_exception(name, reason, frame);
+    debug_forced_fault_reason = NULL;
+    __asm__ volatile ("cli");
+    for (;;) {
+        __asm__ volatile ("hlt");
+    }
 }
 
 static uint8_t nearest_color(uint8_t r, uint8_t g, uint8_t b) {
@@ -2480,6 +2826,78 @@ static const char *disk_physical_type_label(void) {
     return "CD-ROM";
 }
 
+static void detect_boot_drive_info(const MultibootInfo *mbi) {
+    boot_drive_info_available = false;
+    boot_drive_mode = 0;
+    boot_drive_cylinders = 0;
+    boot_drive_heads = 0;
+    boot_drive_sectors = 0;
+    boot_drive_storage_bytes = 0;
+
+    if (mbi == NULL || (mbi->flags & (1u << 7)) == 0 || mbi->drives_addr == 0 || mbi->drives_length == 0) {
+        return;
+    }
+
+    uintptr_t cursor = (uintptr_t)mbi->drives_addr;
+    uintptr_t end = cursor + mbi->drives_length;
+    while (cursor + sizeof(MultibootDriveInfo) <= end) {
+        const MultibootDriveInfo *drive = (const MultibootDriveInfo *)cursor;
+        uint64_t storage_bytes;
+
+        if (drive->size < sizeof(MultibootDriveInfo) || cursor + drive->size > end) {
+            break;
+        }
+
+        if (!boot_drive_valid || drive->drive_number == boot_drive_number) {
+            boot_drive_info_available = true;
+            boot_drive_number = drive->drive_number;
+            boot_drive_valid = true;
+            boot_drive_mode = drive->drive_mode;
+            boot_drive_cylinders = drive->drive_cylinders;
+            boot_drive_heads = drive->drive_heads;
+            boot_drive_sectors = drive->drive_sectors;
+            storage_bytes = (uint64_t)drive->drive_cylinders *
+                            (uint64_t)drive->drive_heads *
+                            (uint64_t)drive->drive_sectors * 512u;
+            boot_drive_storage_bytes = storage_bytes > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)storage_bytes;
+            return;
+        }
+
+        cursor += drive->size;
+    }
+}
+
+static void serial_trace_disk_details(void) {
+    if (!debug) {
+        return;
+    }
+
+    serial_trace_begin("INFO");
+    serial_write_string("initialize disk: drive=");
+    serial_write_string("0x");
+    serial_write_hex8(boot_drive_number);
+    serial_write_string(" type=");
+    serial_write_string(disk_physical_type_label());
+    serial_write_string(" info=");
+    serial_write_string(boot_drive_info_available ? "available" : "limited");
+    serial_write_string("\n");
+
+    if (boot_drive_info_available) {
+        serial_trace_begin("INFO");
+        serial_write_string("disk geometry: mode=");
+        serial_write_uint(boot_drive_mode);
+        serial_write_string(" cyl=");
+        serial_write_uint(boot_drive_cylinders);
+        serial_write_string(" heads=");
+        serial_write_uint(boot_drive_heads);
+        serial_write_string(" sectors=");
+        serial_write_uint(boot_drive_sectors);
+        serial_write_string(" bytes=");
+        serial_write_uint(boot_drive_storage_bytes);
+        serial_write_string("\n");
+    }
+}
+
 static uint32_t detect_total_ram_bytes(const MultibootInfo *mbi) {
     if (mbi != NULL && (mbi->flags & (1u << 6)) != 0 && mbi->mmap_addr != 0 && mbi->mmap_length != 0) {
         uint64_t total = 0;
@@ -2528,6 +2946,9 @@ static bool desktop_should_redraw(void) {
         return true;
     }
     if (windows[APP_CMD].open && last_desktop_redraw_terminal_blink != blink_phase) {
+        return true;
+    }
+    if (debug_overlay_open && last_desktop_redraw_terminal_blink != blink_phase) {
         return true;
     }
     if (windows[APP_TASK_MANAGER].open && task_manager_tab == 2 && task_manager_gpu_scroll_drag) {
@@ -2826,6 +3247,8 @@ static void handle_scancode(uint8_t code) {
         case 0x0E: enqueue_key(KEY_BACKSPACE, 0); return;
         case 0x0F: enqueue_key(KEY_TAB, 0); return;
         case 0x1C: enqueue_key(KEY_ENTER, '\n'); return;
+        case 0x3B: enqueue_key(KEY_F1, 0); return;
+        case 0x3C: enqueue_key(KEY_F2, 0); return;
         case 0x3E: enqueue_key(KEY_F4, 0); return;
         default: {
             char ch = scancode_to_char(code, keyboard_shift);
@@ -3072,7 +3495,7 @@ static void open_window(AppId app) {
     }
 
     active_window = app;
-    serial_trace("INFO", app_titles[app]);
+    serial_trace_concat("INFO", "Application Opened - ", app_titles[app]);
 }
 
 static void set_active_window(AppId app) {
@@ -3087,6 +3510,9 @@ static void close_window(AppId app) {
     if (app == APP_POWER) {
         power_menu_open = false;
         return;
+    }
+    if (windows[app].open) {
+        serial_trace_concat("INFO", "Application Closed - ", app_titles[app]);
     }
     windows[app].open = false;
     if (app == APP_TASK_MANAGER) {
@@ -3123,17 +3549,20 @@ static void open_desktop(void) {
 }
 
 static void attempt_poweroff(void) {
+    serial_trace("INFO", "ACPI poweroff I/O sequence");
     outw(0x604, 0x2000);
     outw(0xB004, 0x2000);
     outw(0x4004, 0x3400);
 }
 
 static void shutdown_system(void) {
+    serial_trace("INFO", "shutdown requested");
     shutdown_pending = true;
     system_state = STATE_SHUTDOWN;
 }
 
 static void restart_system(void) {
+    serial_trace("INFO", "restart requested through keyboard controller");
     while (inb(0x64) & 0x02) {
     }
     outb(0x64, 0xFE);
@@ -3176,6 +3605,7 @@ static void execute_terminal_command(Terminal *term, bool boot_console) {
     } else if (streq(command, "restart")) {
         restart_system();
     } else if (streq(command, "halt")) {
+        serial_trace("INFO", "halt command requested");
         cpu_halted_overlay = true;
         terminal_reset(term);
         terminal_add_line(term, "GAME OVER!");
@@ -3231,20 +3661,349 @@ static void debug_enter(void) {
         return;
     }
     debug_overlay_open = true;
+    debug_memory_view_open = false;
+    debug_memory_edit_nibble = -1;
     terminal_reset(&debug_term);
     terminal_add_line(&debug_term, "Welcome to HaloxOS Debugger!");
-    terminal_add_line(&debug_term, "Type 'help' for show all comannds to use.");
+    terminal_add_line(&debug_term, "Type 'help' for commands. Ctrl+Shift+Enter opens debugger.");
     debug_history_cursor = debug_history_count;
     serial_trace("INFO", "Debugger opened");
+}
+
+static char ascii_lower(char ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+        return (char)(ch - 'A' + 'a');
+    }
+    return ch;
+}
+
+static void normalize_command(char *command) {
+    for (int i = 0; command[i] != '\0'; ++i) {
+        command[i] = ascii_lower(command[i]);
+    }
+}
+
+static const char *skip_spaces(const char *text) {
+    while (*text == ' ' || *text == '\t') {
+        ++text;
+    }
+    return text;
+}
+
+static const char *read_token(const char *text, char *token, size_t max_len) {
+    size_t len = 0;
+
+    text = skip_spaces(text);
+    while (*text != '\0' && *text != ' ' && *text != '\t') {
+        if (len + 1 < max_len) {
+            token[len++] = *text;
+        }
+        ++text;
+    }
+    token[len] = '\0';
+    return text;
+}
+
+static bool token_is(const char *token, const char *a, const char *b, const char *c, const char *d) {
+    return streq(token, a) ||
+           (b != NULL && streq(token, b)) ||
+           (c != NULL && streq(token, c)) ||
+           (d != NULL && streq(token, d));
+}
+
+static int parse_hex_digit_char(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool parse_bpp_token(const char *token, uint32_t *bpp_out) {
+    uint32_t value = 0;
+    if (!parse_uint_decimal(token, &value)) {
+        return false;
+    }
+    if (value != 4 && value != 8 && value != 16) {
+        return false;
+    }
+    *bpp_out = value;
+    return true;
+}
+
+static bool parse_resolution_token(const char *token, uint32_t *width_out, uint32_t *height_out) {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool any_width = false;
+    bool any_height = false;
+
+    while (*token >= '0' && *token <= '9') {
+        width = width * 10u + (uint32_t)(*token - '0');
+        any_width = true;
+        ++token;
+    }
+    if (*token != 'x' && *token != 'X') {
+        return false;
+    }
+    ++token;
+    while (*token >= '0' && *token <= '9') {
+        height = height * 10u + (uint32_t)(*token - '0');
+        any_height = true;
+        ++token;
+    }
+    if (!any_width || !any_height || *token != '\0') {
+        return false;
+    }
+    if (width == 0 || height == 0 || width > MAX_OUTPUT_WIDTH || height > MAX_OUTPUT_HEIGHT) {
+        return false;
+    }
+    *width_out = width;
+    *height_out = height;
+    return true;
+}
+
+static bool parse_hex_pattern(const char *token, uint8_t *bytes, int *count_out) {
+    char digits[8];
+    int digit_count = 0;
+    int byte_count;
+
+    if (starts_with(token, "0x")) {
+        token += 2;
+    }
+
+    while (*token != '\0') {
+        if (parse_hex_digit_char(*token) < 0 || digit_count >= 8) {
+            return false;
+        }
+        digits[digit_count++] = *token++;
+    }
+
+    if (digit_count == 0) {
+        return false;
+    }
+
+    byte_count = (digit_count + 1) / 2;
+    for (int i = 0; i < byte_count; ++i) {
+        int digit_index = digit_count - (byte_count - i) * 2;
+        int high = 0;
+        int low;
+        if (digit_index < 0) {
+            low = parse_hex_digit_char(digits[0]);
+        } else {
+            high = parse_hex_digit_char(digits[digit_index]);
+            low = parse_hex_digit_char(digits[digit_index + 1]);
+        }
+        bytes[i] = (uint8_t)((high << 4) | low);
+    }
+
+    *count_out = byte_count;
+    return true;
+}
+
+static uint32_t debug_memory_limit(void) {
+    if (ram_total_bytes >= 1024u * 1024u) {
+        return ram_total_bytes;
+    }
+    return 32u * 1024u * 1024u;
+}
+
+static bool debug_memory_address_available(uint32_t address) {
+    return address < debug_memory_limit();
+}
+
+static uint8_t debug_memory_read_byte(uint32_t address) {
+    if (!debug_memory_address_available(address)) {
+        return 0;
+    }
+    return *(volatile uint8_t *)(uintptr_t)address;
+}
+
+static void debug_memory_write_byte(uint32_t address, uint8_t value) {
+    if (!debug_memory_address_available(address)) {
+        return;
+    }
+    *(volatile uint8_t *)(uintptr_t)address = value;
+}
+
+static uint32_t debug_range_end(uint32_t start, uint32_t length) {
+    uint32_t end = start + length;
+    if (end < start) {
+        return 0xFFFFFFFFu;
+    }
+    return end;
+}
+
+static void debug_mark_memory_edited(uint32_t address, uint32_t length) {
+    uint32_t end;
+
+    if (length == 0) {
+        return;
+    }
+
+    end = debug_range_end(address, length);
+    for (int i = 0; i < debug_edited_range_count; ++i) {
+        uint32_t range_start = debug_edited_ranges[i].start;
+        uint32_t range_end = debug_range_end(range_start, debug_edited_ranges[i].length);
+        if (address <= range_end && end >= range_start) {
+            uint32_t merged_start = address < range_start ? address : range_start;
+            uint32_t merged_end = end > range_end ? end : range_end;
+            debug_edited_ranges[i].start = merged_start;
+            debug_edited_ranges[i].length = merged_end - merged_start;
+            return;
+        }
+    }
+
+    if (debug_edited_range_count < DEBUG_EDITED_RANGE_COUNT) {
+        debug_edited_ranges[debug_edited_range_count].start = address;
+        debug_edited_ranges[debug_edited_range_count].length = length;
+        ++debug_edited_range_count;
+    } else {
+        debug_edited_ranges[DEBUG_EDITED_RANGE_COUNT - 1].start = address;
+        debug_edited_ranges[DEBUG_EDITED_RANGE_COUNT - 1].length = length;
+    }
+}
+
+static bool debug_memory_address_edited(uint32_t address) {
+    for (int i = 0; i < debug_edited_range_count; ++i) {
+        uint32_t start = debug_edited_ranges[i].start;
+        uint32_t end = debug_range_end(start, debug_edited_ranges[i].length);
+        if (address >= start && address < end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int debug_memory_hex_rows(void) {
+    return 30;
+}
+
+static void debug_align_memory_view(void) {
+    uint32_t limit = debug_memory_limit();
+    uint32_t visible_bytes = (uint32_t)debug_memory_hex_rows() * DEBUG_MEMORY_BYTES_PER_ROW;
+
+    if (limit == 0) {
+        debug_memory_base = 0;
+        debug_memory_cursor = 0;
+        return;
+    }
+    if (debug_memory_cursor >= limit) {
+        debug_memory_cursor = limit - 1;
+    }
+
+    if (debug_memory_cursor < debug_memory_base) {
+        debug_memory_base = debug_memory_cursor & ~(uint32_t)(DEBUG_MEMORY_BYTES_PER_ROW - 1);
+    } else if (debug_memory_cursor >= debug_range_end(debug_memory_base, visible_bytes)) {
+        debug_memory_base = (debug_memory_cursor - visible_bytes + DEBUG_MEMORY_BYTES_PER_ROW) &
+                            ~(uint32_t)(DEBUG_MEMORY_BYTES_PER_ROW - 1);
+    }
+}
+
+static void debug_move_memory_cursor(int delta) {
+    uint32_t limit = debug_memory_limit();
+
+    if (limit == 0) {
+        return;
+    }
+    if (debug_memory_cursor >= limit) {
+        debug_memory_cursor = limit - 1;
+    }
+    debug_memory_edit_nibble = -1;
+    if (delta < 0) {
+        uint32_t amount = (uint32_t)(-delta);
+        debug_memory_cursor = debug_memory_cursor > amount ? debug_memory_cursor - amount : 0;
+    } else if (delta > 0) {
+        uint32_t amount = (uint32_t)delta;
+        if (limit > 0 && amount >= limit - debug_memory_cursor) {
+            debug_memory_cursor = limit - 1;
+        } else {
+            debug_memory_cursor += amount;
+        }
+    }
+    debug_align_memory_view();
+}
+
+static void debug_open_memory_view(uint32_t address) {
+    if (!debug_memory_address_available(address)) {
+        address = 0;
+    }
+    debug_memory_cursor = address;
+    debug_memory_base = address & ~(uint32_t)(DEBUG_MEMORY_BYTES_PER_ROW - 1);
+    debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
+    debug_memory_view_open = true;
+    debug_memory_edit_nibble = -1;
+    debug_align_memory_view();
+    serial_trace("INFO", "Debugger memory view opened");
+}
+
+static void debug_memory_handle_key(KeyEvent event) {
+    if (event.code == KEY_ESC) {
+        debug_memory_view_open = false;
+        debug_memory_edit_nibble = -1;
+        terminal_add_line(&debug_term, "Memory viewer closed.");
+        return;
+    }
+    if (event.code == KEY_F1) {
+        debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
+        debug_memory_edit_nibble = -1;
+        return;
+    }
+    if (event.code == KEY_F2) {
+        debug_memory_mode = DEBUG_MEMORY_MODE_VISUAL;
+        debug_memory_edit_nibble = -1;
+        return;
+    }
+
+    if (event.code == KEY_LEFT) {
+        debug_move_memory_cursor(-1);
+        return;
+    }
+    if (event.code == KEY_RIGHT) {
+        debug_move_memory_cursor(1);
+        return;
+    }
+    if (event.code == KEY_UP) {
+        debug_move_memory_cursor(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL ? -DEBUG_MEMORY_VISUAL_W : -DEBUG_MEMORY_BYTES_PER_ROW);
+        return;
+    }
+    if (event.code == KEY_DOWN) {
+        debug_move_memory_cursor(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL ? DEBUG_MEMORY_VISUAL_W : DEBUG_MEMORY_BYTES_PER_ROW);
+        return;
+    }
+
+    if (debug_memory_mode == DEBUG_MEMORY_MODE_HEX) {
+        int digit = parse_hex_digit_char(event.ch);
+        if (digit >= 0 && debug_memory_address_available(debug_memory_cursor)) {
+            uint8_t current = debug_memory_read_byte(debug_memory_cursor);
+            uint8_t next;
+            if (debug_memory_edit_nibble < 0) {
+                next = (uint8_t)(((uint8_t)digit << 4) | (current & 0x0Fu));
+                debug_memory_edit_nibble = 0;
+            } else {
+                next = (uint8_t)((current & 0xF0u) | (uint8_t)digit);
+                debug_memory_edit_nibble = -1;
+            }
+            debug_memory_write_byte(debug_memory_cursor, next);
+            debug_mark_memory_edited(debug_memory_cursor, 1);
+            if (debug_memory_edit_nibble < 0) {
+                debug_move_memory_cursor(1);
+            }
+        }
+    }
 }
 
 static void debug_execute_pending(void) {
     DebugAction action = debug_pending_action;
     debug_pending_action = DEBUG_ACTION_NONE;
     if (action == DEBUG_ACTION_CRASH) {
-        serial_write_string("***** MACHINE CRASH!!! *****\n");
+        debug_forced_fault_reason = "debug crash command requested";
         serial_trace("ERROR", "debug crash command requested");
-        *(volatile uint32_t *)0 = 0xDEADC0DEu;
+        __asm__ volatile(".byte 0x0F, 0x0B");
     } else if (action == DEBUG_ACTION_HALT) {
         serial_trace("INFO", "debug halt command requested");
         __asm__ volatile("cli");
@@ -3252,143 +4011,366 @@ static void debug_execute_pending(void) {
             __asm__ volatile("hlt");
         }
     } else if (action == DEBUG_ACTION_FAULT1) {
+        debug_forced_fault_reason = "debug divide fault requested";
         serial_trace("ERROR", "debug divide fault requested");
         __asm__ volatile("xor %%edx, %%edx; xor %%ecx, %%ecx; div %%ecx" : : : "eax", "ecx", "edx");
     } else if (action == DEBUG_ACTION_FAULT2) {
+        debug_forced_fault_reason = "debug invalid opcode requested";
         serial_trace("ERROR", "debug invalid opcode requested");
         __asm__ volatile(".byte 0x0F, 0x0B");
     } else if (action == DEBUG_ACTION_FAULT3) {
+        debug_forced_fault_reason = "debug triple fault requested";
         serial_trace("ERROR", "debug triple fault requested");
+        serial_dump_cpu_exception("Triple Fault", debug_forced_fault_reason, NULL);
         IdtPointer empty = {0, 0};
         idt_load(&empty);
         __asm__ volatile("int $3");
+        for (;;) {
+            __asm__ volatile("hlt");
+        }
     }
+}
+
+static void debug_append_mode_line(uint16_t width, uint16_t height, uint16_t bpp) {
+    char line[TERM_LINE_LEN] = {0};
+    size_t len = 0;
+    append_uint(line, &len, sizeof(line), width);
+    append_char(line, &len, sizeof(line), 'x');
+    append_uint(line, &len, sizeof(line), height);
+    append_char(line, &len, sizeof(line), 'x');
+    append_uint(line, &len, sizeof(line), bpp);
+    terminal_add_line(&debug_term, line);
+}
+
+static void debug_apply_background(uint32_t background) {
+    if (background != 1 && background != 2) {
+        terminal_add_line(&debug_term, "Usage: change bg 1 | change bg 2");
+        return;
+    }
+    settings_pending.background_mode = (uint8_t)(background - 1u);
+    apply_settings();
+    terminal_add_line(&debug_term, background == 1 ? "Background changed: theme1.png" : "Background changed: theme2.png");
+    serial_trace_concat("INFO", "Screen Changed as background: ", background == 1 ? "theme1.png" : "theme2.png");
+}
+
+static void debug_apply_video(bool has_resolution,
+                              uint32_t width,
+                              uint32_t height,
+                              bool has_bpp,
+                              uint32_t requested_bpp) {
+    uint16_t target_width = has_resolution ? (uint16_t)width : (uint16_t)fb.width;
+    uint16_t target_height = has_resolution ? (uint16_t)height : (uint16_t)fb.height;
+    uint16_t target_bpp = fb.bpp;
+    uint8_t target_palette = settings_applied.palette_mode;
+
+    if (has_bpp) {
+        if (requested_bpp == 4) {
+            target_palette = 1;
+            target_bpp = 8;
+        } else if (requested_bpp == 8) {
+            target_palette = 0;
+            target_bpp = 8;
+        } else if (requested_bpp == 16) {
+            target_palette = 2;
+            target_bpp = 16;
+        } else {
+            terminal_add_line(&debug_term, "Usage: change vid bpp 4|8|16");
+            return;
+        }
+    }
+
+    if (!set_framebuffer_mode_raw(target_width, target_height, target_bpp)) {
+        terminal_add_line(&debug_term, "ERROR: video mode switch unavailable.");
+        serial_trace("ERROR", "debugger video mode switch failed");
+        serial_trace_video_mode("Screen change failed");
+        return;
+    }
+
+    settings_applied.palette_mode = target_palette;
+    settings_pending.palette_mode = target_palette;
+    program_vga_palette();
+    terminal_add_line(&debug_term, "Screen changed:");
+    debug_append_mode_line((uint16_t)fb.width, (uint16_t)fb.height, fb.bpp);
+    serial_trace_video_mode("Screen Changed as resolution");
 }
 
 static void debug_change_command(const char *command) {
-    if (contains_text(command, "bg 1") || contains_text(command, "background 1")) {
-        settings_pending.background_mode = 0;
-        apply_settings();
-        terminal_add_line(&debug_term, "Background changed to Default.");
-    } else if (contains_text(command, "bg 2") || contains_text(command, "background 2")) {
-        settings_pending.background_mode = 1;
-        apply_settings();
-        terminal_add_line(&debug_term, "Background changed to Fruish.");
-    } else if (contains_text(command, "bpp 4")) {
-        settings_pending.palette_mode = 1;
-        apply_settings();
-        terminal_add_line(&debug_term, "Bit depth request: 4-bit palette emulation.");
-    } else if (contains_text(command, "bpp 8")) {
-        settings_pending.palette_mode = 0;
-        apply_settings();
-        terminal_add_line(&debug_term, "Bit depth request: 8-bit palette.");
-    } else if (contains_text(command, "bpp 16")) {
-        settings_pending.palette_mode = 2;
-        apply_settings();
-        terminal_add_line(&debug_term, "Bit depth request: 16-bit color.");
-    } else if (contains_text(command, "800x600")) {
-        if (set_framebuffer_mode_raw(800, 600, fb.bpp)) {
-            terminal_add_line(&debug_term, "Screen changed: 800x600.");
-        } else {
-            terminal_add_line(&debug_term, "ERROR: mode 800x600 unavailable.");
+    char token[24];
+    const char *cursor = command;
+
+    cursor = read_token(cursor, token, sizeof(token));
+    cursor = read_token(cursor, token, sizeof(token));
+    if (token_is(token, "b", "bg", "bac", "background")) {
+        uint32_t background = 0;
+        cursor = read_token(cursor, token, sizeof(token));
+        if (!parse_uint_decimal(token, &background)) {
+            terminal_add_line(&debug_term, "Usage: change bg 1 | change bg 2");
+            return;
         }
-    } else if (contains_text(command, "640x480")) {
-        if (set_framebuffer_mode_raw(640, 480, fb.bpp)) {
-            terminal_add_line(&debug_term, "Screen changed: 640x480.");
-        } else {
-            terminal_add_line(&debug_term, "ERROR: mode 640x480 unavailable.");
-        }
-    } else {
-        terminal_add_line(&debug_term, "Usage: change vid 640x480 | change vid bpp 16 | change bg 2");
+        debug_apply_background(background);
+        return;
     }
+
+    if (token_is(token, "v", "vid", "video", NULL)) {
+        bool has_resolution = false;
+        bool has_bpp = false;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t bpp = 0;
+
+        for (;;) {
+            cursor = read_token(cursor, token, sizeof(token));
+            if (token[0] == '\0') {
+                break;
+            }
+            if (token_is(token, "r", "res", "resolution", NULL)) {
+                cursor = read_token(cursor, token, sizeof(token));
+                if (!parse_resolution_token(token, &width, &height)) {
+                    terminal_add_line(&debug_term, "Usage: change vid 800x600");
+                    return;
+                }
+                has_resolution = true;
+            } else if (token_is(token, "b", "bpp", NULL, NULL)) {
+                cursor = read_token(cursor, token, sizeof(token));
+                if (!parse_bpp_token(token, &bpp)) {
+                    terminal_add_line(&debug_term, "Usage: change vid bpp 4|8|16");
+                    return;
+                }
+                has_bpp = true;
+            } else if (parse_resolution_token(token, &width, &height)) {
+                has_resolution = true;
+            } else {
+                terminal_add_line(&debug_term, "Usage: change vid 800x600 bpp 16 | change bg 2");
+                return;
+            }
+        }
+
+        if (!has_resolution && !has_bpp) {
+            terminal_add_line(&debug_term, "Usage: change vid 800x600 | change vid bpp 16");
+            return;
+        }
+        debug_apply_video(has_resolution, width, height, has_bpp, bpp);
+        return;
+    }
+
+    terminal_add_line(&debug_term, "Usage: change vid 800x600 bpp 16 | change bg 2");
+}
+
+static void debug_print_video_details(void) {
+    char line[TERM_LINE_LEN] = {0};
+    size_t len = 0;
+
+    terminal_add_line(&debug_term, "Video:");
+    copy_string(line, "Backend: ", sizeof(line));
+    len = strlen_local(line);
+    for (const char *name = video_backend_name(); *name != '\0'; ++name) {
+        append_char(line, &len, sizeof(line), *name);
+    }
+    terminal_add_line(&debug_term, line);
+
+    line[0] = '\0';
+    len = 0;
+    append_uint(line, &len, sizeof(line), fb.width);
+    append_char(line, &len, sizeof(line), 'x');
+    append_uint(line, &len, sizeof(line), fb.height);
+    append_char(line, &len, sizeof(line), 'x');
+    append_uint(line, &len, sizeof(line), fb.bpp);
+    terminal_add_line(&debug_term, line);
+
+    line[0] = '\0';
+    len = 0;
+    append_char(line, &len, sizeof(line), 'P');
+    append_char(line, &len, sizeof(line), 'i');
+    append_char(line, &len, sizeof(line), 't');
+    append_char(line, &len, sizeof(line), 'c');
+    append_char(line, &len, sizeof(line), 'h');
+    append_char(line, &len, sizeof(line), ':');
+    append_char(line, &len, sizeof(line), ' ');
+    append_uint(line, &len, sizeof(line), fb.pitch);
+    terminal_add_line(&debug_term, line);
+
+    line[0] = '\0';
+    len = 0;
+    append_char(line, &len, sizeof(line), 'F');
+    append_char(line, &len, sizeof(line), 'B');
+    append_char(line, &len, sizeof(line), ':');
+    append_char(line, &len, sizeof(line), ' ');
+    append_hex32(line, &len, sizeof(line), (uint32_t)(uintptr_t)fb.address);
+    terminal_add_line(&debug_term, line);
+    terminal_add_line(&debug_term, video_mode_switch_available ? "Mode switch: available" : "Mode switch: unavailable");
+}
+
+static void debug_print_disk_details(void) {
+    char line[TERM_LINE_LEN] = {0};
+    size_t len = 0;
+
+    terminal_add_line(&debug_term, "Disk:");
+    copy_string(line, "Drive: ", sizeof(line));
+    len = strlen_local(line);
+    append_hex32(line, &len, sizeof(line), boot_drive_number);
+    append_char(line, &len, sizeof(line), ' ');
+    for (const char *name = disk_physical_type_label(); *name != '\0'; ++name) {
+        append_char(line, &len, sizeof(line), *name);
+    }
+    terminal_add_line(&debug_term, line);
+
+    if (boot_drive_info_available && boot_drive_storage_bytes != 0) {
+        char storage[32] = {0};
+        format_single_memory_amount(storage, sizeof(storage), boot_drive_storage_bytes);
+        copy_string(line, "Storage: ", sizeof(line));
+        len = strlen_local(line);
+        for (int i = 0; storage[i] != '\0'; ++i) {
+            append_char(line, &len, sizeof(line), storage[i]);
+        }
+        terminal_add_line(&debug_term, line);
+    } else {
+        terminal_add_line(&debug_term, "Storage: BIOS did not report geometry");
+    }
+
+    line[0] = '\0';
+    len = 0;
+    append_char(line, &len, sizeof(line), 'I');
+    append_char(line, &len, sizeof(line), '/');
+    append_char(line, &len, sizeof(line), 'O');
+    append_char(line, &len, sizeof(line), ':');
+    append_char(line, &len, sizeof(line), ' ');
+    append_uint(line, &len, sizeof(line), disk_io_megabytes);
+    append_char(line, &len, sizeof(line), ' ');
+    append_char(line, &len, sizeof(line), 'M');
+    append_char(line, &len, sizeof(line), 'B');
+    terminal_add_line(&debug_term, line);
+    terminal_add_line(&debug_term, desktop_icon_persistence_enabled ? "Desktop layout: writable" : "Desktop layout: read-only");
 }
 
 static void debug_view_command(const char *command) {
-    char line[TERM_LINE_LEN] = {0};
-    size_t len = 0;
-    if (contains_text(command, "vid") || contains_text(command, "video")) {
-        append_uint(line, &len, sizeof(line), fb.width);
-        append_char(line, &len, sizeof(line), 'x');
-        append_uint(line, &len, sizeof(line), fb.height);
-        append_char(line, &len, sizeof(line), 'x');
-        append_uint(line, &len, sizeof(line), fb.bpp);
-        terminal_add_line(&debug_term, line);
-    } else if (contains_text(command, "disk") || contains_text(command, "drive")) {
-        terminal_add_line(&debug_term, disk_physical_type_label());
-    } else {
+    char token[24];
+    const char *cursor = command;
+
+    cursor = read_token(cursor, token, sizeof(token));
+    cursor = read_token(cursor, token, sizeof(token));
+    if (token[0] == '\0' || token_is(token, "m", "mem", "memory", NULL)) {
         uint32_t address = 0;
-        const char *cursor = command;
-        while (*cursor && *cursor != '0') {
-            ++cursor;
-        }
-        parse_uint_auto(cursor, &address);
-        append_memory_amount(line, &len, sizeof(line), ram_total_bytes);
-        terminal_add_line(&debug_term, "Memory Bytes:");
-        terminal_add_line(&debug_term, line);
-        for (int row = 0; row < 4; ++row) {
-            char hexline[TERM_LINE_LEN] = {0};
-            size_t hlen = 0;
-            uint32_t base = address + (uint32_t)row * 16u;
-            append_hex32(hexline, &hlen, sizeof(hexline), base);
-            append_char(hexline, &hlen, sizeof(hexline), ':');
-            append_char(hexline, &hlen, sizeof(hexline), ' ');
-            for (int i = 0; i < 16; ++i) {
-                append_hex8(hexline, &hlen, sizeof(hexline), *(volatile uint8_t *)(uintptr_t)(base + (uint32_t)i));
-                append_char(hexline, &hlen, sizeof(hexline), ' ');
+        cursor = read_token(cursor, token, sizeof(token));
+        if (token[0] != '\0') {
+            if (!parse_uint_auto(token, &address)) {
+                terminal_add_line(&debug_term, "Usage: view mem 0xADDR");
+                return;
             }
-            terminal_add_line(&debug_term, hexline);
         }
+        debug_open_memory_view(address);
+        return;
     }
+
+    if (token_is(token, "v", "vid", "video", NULL)) {
+        debug_print_video_details();
+        return;
+    }
+
+    if (token_is(token, "d", "disk", "drive", NULL)) {
+        debug_print_disk_details();
+        return;
+    }
+
+    terminal_add_line(&debug_term, "Usage: view mem | view vid | view disk");
 }
 
 static void debug_edit_command(const char *command) {
-    uint32_t address = 0;
-    uint32_t value = 0;
-    uint32_t length = 1;
+    char token[24];
     const char *cursor = command;
+    uint32_t address = 0;
+    uint32_t length = 0;
+    uint8_t pattern[4];
+    int pattern_len = 0;
 
-    while (*cursor && *cursor != '0') {
-        ++cursor;
-    }
-    if (!parse_uint_auto(cursor, &address)) {
-        terminal_add_line(&debug_term, "Usage: edit mem 0xADDR 0xBYTE length");
+    cursor = read_token(cursor, token, sizeof(token));
+    cursor = read_token(cursor, token, sizeof(token));
+    if (!token_is(token, "m", "mem", "memory", NULL)) {
+        terminal_add_line(&debug_term, "Usage: edit mem 0xADDR ff 0x100");
         return;
     }
-    while (*cursor && *cursor != ' ') {
-        ++cursor;
-    }
-    while (*cursor == ' ') {
-        ++cursor;
-    }
-    if (!parse_uint_auto(cursor, &value)) {
-        terminal_add_line(&debug_term, "Usage: edit mem 0xADDR 0xBYTE length");
+
+    cursor = read_token(cursor, token, sizeof(token));
+    if (!parse_uint_auto(token, &address)) {
+        terminal_add_line(&debug_term, "Usage: edit mem 0xADDR ff 0x100");
         return;
     }
-    while (*cursor && *cursor != ' ') {
-        ++cursor;
+
+    cursor = read_token(cursor, token, sizeof(token));
+    if (!parse_hex_pattern(token, pattern, &pattern_len)) {
+        terminal_add_line(&debug_term, "Usage: edit mem 0xADDR ff 0x100");
+        return;
     }
-    while (*cursor == ' ') {
-        ++cursor;
+
+    cursor = read_token(cursor, token, sizeof(token));
+    if (token[0] != '\0') {
+        if (!parse_uint_auto(token, &length)) {
+            terminal_add_line(&debug_term, "Usage: edit mem 0xADDR ff 0x100");
+            return;
+        }
+    } else {
+        length = (uint32_t)pattern_len;
     }
-    parse_uint_auto(cursor, &length);
-    if (length > 0x10000u) {
-        length = 0x10000u;
+
+    if (length == 0) {
+        terminal_add_line(&debug_term, "ERROR: edit length is zero.");
+        return;
+    }
+    if (length > DEBUG_MEMORY_MAX_EDIT_LENGTH) {
+        length = DEBUG_MEMORY_MAX_EDIT_LENGTH;
+    }
+    if (!debug_memory_address_available(address)) {
+        terminal_add_line(&debug_term, "ERROR: address outside reported RAM.");
+        return;
+    }
+    if (length > debug_memory_limit() - address) {
+        length = debug_memory_limit() - address;
     }
     for (uint32_t i = 0; i < length; ++i) {
-        *(volatile uint8_t *)(uintptr_t)(address + i) = (uint8_t)value;
+        debug_memory_write_byte(address + i, pattern[i % (uint32_t)pattern_len]);
     }
+    debug_mark_memory_edited(address, length);
     terminal_add_line(&debug_term, "Memory bytes edited.");
+    serial_trace_hex_value("INFO", "Debugger edited memory at", address);
+    serial_trace_uint_value("INFO", "Debugger edited byte count", length);
 }
 
-static void debug_execute_command(void) {
-    char command[TERM_LINE_LEN];
-    copy_string(command, debug_term.input, sizeof(command));
-    debug_term.input_len = 0;
-    debug_term.input[0] = '\0';
-    if (command[0] == '\0') {
-        return;
+static void debug_help_command(const char *command) {
+    char token[24];
+    const char *cursor = command;
+
+    cursor = read_token(cursor, token, sizeof(token));
+    cursor = read_token(cursor, token, sizeof(token));
+
+    if (token[0] == '\0') {
+        terminal_add_line(&debug_term, "help edit | help exception | help fault");
+        terminal_add_line(&debug_term, "edit view change crash halt fault continue");
+    } else if (token_is(token, "e", "edit", NULL, NULL)) {
+        terminal_add_line(&debug_term, "edit mem 0xADDR ff 0x100");
+        terminal_add_line(&debug_term, "view mem [0xADDR] | view vid | view disk");
+        terminal_add_line(&debug_term, "change vid 800x600 bpp 16 | change bg 2");
+    } else if (token_is(token, "ex", "except", "exception", "exceptions")) {
+        terminal_add_line(&debug_term, "crash | halt | fault 1 | fault 2 | fault 3");
+        terminal_add_line(&debug_term, "continue runs armed crash/halt/fault actions.");
+    } else if (token_is(token, "crash", NULL, NULL, NULL)) {
+        terminal_add_line(&debug_term, "crash: arm a real kernel crash, then continue.");
+    } else if (token_is(token, "halt", NULL, NULL, NULL)) {
+        terminal_add_line(&debug_term, "halt: arm silent CPU halt, then continue.");
+    } else if (token_is(token, "f", "fault", NULL, NULL)) {
+        terminal_add_line(&debug_term, "fault 1=divide, 2=invalid opcode, 3=triple fault");
+    } else if (token_is(token, "view", "v", NULL, NULL)) {
+        terminal_add_line(&debug_term, "view mem [0xADDR] opens hex/visual memory viewer.");
+        terminal_add_line(&debug_term, "F1 hex, F2 visual, arrows move, ESC exits viewer.");
+    } else if (token_is(token, "change", "ch", NULL, NULL)) {
+        terminal_add_line(&debug_term, "change vid 800x600 | change vid bpp 4|8|16");
+        terminal_add_line(&debug_term, "change bg 1 | change bg 2");
+    } else if (token_is(token, "continue", "con", "c", NULL)) {
+        terminal_add_line(&debug_term, "continue: close debugger and resume desktop.");
+    } else {
+        terminal_add_line(&debug_term, "No help for that command.");
     }
-    terminal_add_line(&debug_term, command);
+}
+
+static void debug_add_history(const char *command) {
     if (debug_history_count < DEBUG_HISTORY_COUNT) {
         copy_string(debug_history[debug_history_count++], command, TERM_LINE_LEN);
     } else {
@@ -3398,15 +4380,26 @@ static void debug_execute_command(void) {
         copy_string(debug_history[DEBUG_HISTORY_COUNT - 1], command, TERM_LINE_LEN);
     }
     debug_history_cursor = debug_history_count;
+}
 
-    if (streq(command, "help")) {
-        terminal_add_line(&debug_term, "edit view change crash halt fault continue");
-    } else if (starts_with(command, "help e")) {
-        terminal_add_line(&debug_term, "edit, view, change");
-    } else if (starts_with(command, "help ex") || starts_with(command, "help fault")) {
-        terminal_add_line(&debug_term, "crash, halt, fault 1|2|3");
+static void debug_execute_command(void) {
+    char command[TERM_LINE_LEN];
+    copy_string(command, debug_term.input, sizeof(command));
+    normalize_command(command);
+    debug_term.input_len = 0;
+    debug_term.input[0] = '\0';
+    if (command[0] == '\0') {
+        return;
+    }
+    terminal_add_line(&debug_term, command);
+    debug_add_history(command);
+    serial_trace_concat("INFO", "DBG command: ", command);
+
+    if (streq(command, "help") || starts_with(command, "help ")) {
+        debug_help_command(command);
     } else if (streq(command, "c") || streq(command, "con") || streq(command, "continue")) {
         debug_overlay_open = false;
+        debug_memory_view_open = false;
         serial_trace("INFO", "Debugger continued");
         debug_execute_pending();
     } else if (streq(command, "crash")) {
@@ -3415,15 +4408,20 @@ static void debug_execute_command(void) {
     } else if (streq(command, "halt")) {
         debug_pending_action = DEBUG_ACTION_HALT;
         terminal_add_line(&debug_term, "Halt armed. Type continue.");
-    } else if (starts_with(command, "f ") || starts_with(command, "fault ")) {
+    } else if (streq(command, "f") || streq(command, "fault") || starts_with(command, "f ") || starts_with(command, "fault ")) {
         uint32_t fault = 1;
-        const char *arg = starts_with(command, "f ") ? command + 2 : command + 6;
-        parse_uint_decimal(arg, &fault);
+        if (starts_with(command, "f ") || starts_with(command, "fault ")) {
+            const char *arg = starts_with(command, "f ") ? command + 2 : command + 6;
+            if (!parse_uint_decimal(skip_spaces(arg), &fault) || fault < 1 || fault > 3) {
+                terminal_add_line(&debug_term, "Usage: fault 1|2|3");
+                return;
+            }
+        }
         debug_pending_action = fault == 3 ? DEBUG_ACTION_FAULT3 : (fault == 2 ? DEBUG_ACTION_FAULT2 : DEBUG_ACTION_FAULT1);
         terminal_add_line(&debug_term, "Fault armed. Type continue.");
     } else if (starts_with(command, "change ") || starts_with(command, "ch ")) {
         debug_change_command(command);
-    } else if (starts_with(command, "view ") || starts_with(command, "v ")) {
+    } else if (streq(command, "view") || streq(command, "v") || starts_with(command, "view ") || starts_with(command, "v ")) {
         debug_view_command(command);
     } else if (starts_with(command, "edit ")) {
         debug_edit_command(command);
@@ -3433,6 +4431,11 @@ static void debug_execute_command(void) {
 }
 
 static void debug_handle_key(KeyEvent event) {
+    if (debug_memory_view_open) {
+        debug_memory_handle_key(event);
+        return;
+    }
+
     if (event.code == KEY_UP && debug_history_count > 0) {
         if (debug_history_cursor > 0) {
             --debug_history_cursor;
@@ -3472,6 +4475,7 @@ static void apply_settings(void) {
 
     if (video_changed && !set_output_mode(&next)) {
         serial_trace("ERROR", "video mode switch failed");
+        serial_trace_video_mode("Screen change failed");
         next.palette_mode = settings_applied.palette_mode;
         next.resolution_mode = settings_applied.resolution_mode;
         next.widescreen = settings_applied.widescreen;
@@ -3480,7 +4484,7 @@ static void apply_settings(void) {
     settings_applied = next;
     settings_pending = next;
     program_vga_palette();
-    serial_trace("INFO", "Screen Changed");
+    serial_trace_video_mode("Screen Changed");
 }
 
 static bool settings_dirty(void) {
@@ -4494,6 +5498,191 @@ static void render_start_app_menu(void) {
     draw_text(start_app_menu_x + 8, start_app_menu_y + 10, "Pin to Desktop Icon", color_black, color_gray_light, true);
 }
 
+static uint8_t debug_terminal_line_color(int index, const char *line) {
+    if (index == 0) {
+        return color_blue_dark;
+    }
+    if (index == 1) {
+        return color_gray_dark;
+    }
+    if (starts_with(line, "error")) {
+        return color_red;
+    }
+    if (starts_with(line, "warning")) {
+        return color_orange;
+    }
+    if (contains_text(line, "edited")) {
+        return color_red;
+    }
+    return color_black;
+}
+
+static void render_debug_memory_hex(int x, int y, int w, int h) {
+    uint32_t limit = debug_memory_limit();
+    int rows = debug_memory_hex_rows();
+    int row_y = y + 42;
+    (void)h;
+
+    draw_text(x + 10, y + 28, "Address      00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F", color_gray_dark, color_white, true);
+    for (int row = 0; row < rows; ++row) {
+        uint32_t base = debug_memory_base + (uint32_t)row * DEBUG_MEMORY_BYTES_PER_ROW;
+        char address_text[16] = {0};
+        size_t len = 0;
+
+        if (base >= limit) {
+            break;
+        }
+
+        append_hex32(address_text, &len, sizeof(address_text), base);
+        append_char(address_text, &len, sizeof(address_text), ':');
+        draw_text(x + 10, row_y, address_text, color_blue_dark, color_white, true);
+
+        for (int col = 0; col < DEBUG_MEMORY_BYTES_PER_ROW; ++col) {
+            uint32_t address = base + (uint32_t)col;
+            int byte_x = x + 106 + col * 24;
+            char byte_text[3] = {0};
+            size_t blen = 0;
+            uint8_t text_color = color_black;
+            bool selected = address == debug_memory_cursor;
+            bool edited = debug_memory_address_edited(address);
+
+            if (address >= limit) {
+                draw_text(byte_x, row_y, "--", color_gray_dark, color_white, true);
+                continue;
+            }
+
+            append_hex8(byte_text, &blen, sizeof(byte_text), debug_memory_read_byte(address));
+            if (selected) {
+                fill_rect(byte_x - 2, row_y - 1, 20, 10, color_blue);
+                text_color = edited ? color_red : color_white;
+            } else if (edited) {
+                text_color = color_red;
+            }
+            draw_text(byte_x, row_y, byte_text, text_color, selected ? color_blue : color_white, true);
+        }
+        row_y += 10;
+    }
+
+    {
+        char selected[TERM_LINE_LEN] = {0};
+        size_t len = 0;
+        append_char(selected, &len, sizeof(selected), 'S');
+        append_char(selected, &len, sizeof(selected), 'e');
+        append_char(selected, &len, sizeof(selected), 'l');
+        append_char(selected, &len, sizeof(selected), ':');
+        append_char(selected, &len, sizeof(selected), ' ');
+        append_hex32(selected, &len, sizeof(selected), debug_memory_cursor);
+        append_char(selected, &len, sizeof(selected), ' ');
+        append_char(selected, &len, sizeof(selected), '=');
+        append_char(selected, &len, sizeof(selected), ' ');
+        append_char(selected, &len, sizeof(selected), '0');
+        append_char(selected, &len, sizeof(selected), 'x');
+        append_hex8(selected, &len, sizeof(selected), debug_memory_read_byte(debug_memory_cursor));
+        draw_text_clipped(x + 10, y + h - 38, w - 20, selected,
+                          debug_memory_address_edited(debug_memory_cursor) ? color_red : color_blue_dark,
+                          color_white,
+                          true);
+    }
+}
+
+static void render_debug_memory_visual(int x, int y, int w, int h) {
+    uint32_t limit = debug_memory_limit();
+    int vx = x + (w - DEBUG_MEMORY_VISUAL_W) / 2;
+    int vy = y + 54;
+    uint32_t visible = (uint32_t)DEBUG_MEMORY_VISUAL_W * DEBUG_MEMORY_VISUAL_H;
+    (void)h;
+
+    if (debug_memory_cursor < debug_memory_base) {
+        debug_memory_base = debug_memory_cursor;
+    } else if (debug_memory_cursor >= debug_range_end(debug_memory_base, visible)) {
+        debug_memory_base = debug_memory_cursor - visible + 1;
+    }
+
+    fill_rect(vx - 1, vy - 1, DEBUG_MEMORY_VISUAL_W + 2, DEBUG_MEMORY_VISUAL_H + 2, color_black);
+    for (int py = 0; py < DEBUG_MEMORY_VISUAL_H; ++py) {
+        for (int px = 0; px < DEBUG_MEMORY_VISUAL_W; ++px) {
+            uint32_t address = debug_memory_base + (uint32_t)py * DEBUG_MEMORY_VISUAL_W + (uint32_t)px;
+            draw_pixel(vx + px, vy + py, address < limit ? debug_memory_read_byte(address) : color_black);
+        }
+    }
+
+    if (debug_memory_cursor >= debug_memory_base && debug_memory_cursor < debug_memory_base + visible) {
+        uint32_t offset = debug_memory_cursor - debug_memory_base;
+        int cx = vx + (int)(offset % DEBUG_MEMORY_VISUAL_W);
+        int cy = vy + (int)(offset / DEBUG_MEMORY_VISUAL_W);
+        draw_rect(cx - 2, cy - 2, 5, 5, color_blue);
+        draw_pixel(cx, cy, debug_memory_address_edited(debug_memory_cursor) ? color_red : color_white);
+    }
+}
+
+static void render_debug_memory_view(void) {
+    int x = 16;
+    int y = 26;
+    int w = OS_WIDTH - 32;
+    int h = OS_HEIGHT - 54;
+    char memory_text[64] = {0};
+    char footer[TERM_LINE_LEN] = {0};
+    size_t len = 0;
+
+    fill_rect(x, y, w, h, color_white);
+    draw_rect(x, y, w, h, color_black);
+    draw_text(x + 10, y + 10, "Modes |", color_black, color_white, true);
+    draw_text(x + 74, y + 10, debug_memory_mode == DEBUG_MEMORY_MODE_HEX ? "[Hex]" : "Hex",
+              debug_memory_mode == DEBUG_MEMORY_MODE_HEX ? color_blue_dark : color_gray_dark,
+              color_white,
+              true);
+    draw_text(x + 130, y + 10, debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL ? "[Visual]" : "Visual",
+              debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL ? color_blue_dark : color_gray_dark,
+              color_white,
+              true);
+    draw_text(x + 220, y + 10, "F1=Hex F2=Visual", color_gray_dark, color_white, true);
+
+    if (debug_memory_mode == DEBUG_MEMORY_MODE_HEX) {
+        render_debug_memory_hex(x, y, w, h);
+    } else {
+        render_debug_memory_visual(x, y, w, h);
+    }
+
+    format_single_memory_amount(memory_text, sizeof(memory_text), debug_memory_limit());
+    append_char(footer, &len, sizeof(footer), 'M');
+    append_char(footer, &len, sizeof(footer), 'e');
+    append_char(footer, &len, sizeof(footer), 'm');
+    append_char(footer, &len, sizeof(footer), 'o');
+    append_char(footer, &len, sizeof(footer), 'r');
+    append_char(footer, &len, sizeof(footer), 'y');
+    append_char(footer, &len, sizeof(footer), ' ');
+    append_char(footer, &len, sizeof(footer), 'B');
+    append_char(footer, &len, sizeof(footer), 'y');
+    append_char(footer, &len, sizeof(footer), 't');
+    append_char(footer, &len, sizeof(footer), 'e');
+    append_char(footer, &len, sizeof(footer), 's');
+    append_char(footer, &len, sizeof(footer), ':');
+    append_char(footer, &len, sizeof(footer), ' ');
+    for (int i = 0; memory_text[i] != '\0'; ++i) {
+        append_char(footer, &len, sizeof(footer), memory_text[i]);
+    }
+    append_char(footer, &len, sizeof(footer), ' ');
+    append_char(footer, &len, sizeof(footer), 'P');
+    append_char(footer, &len, sizeof(footer), 'r');
+    append_char(footer, &len, sizeof(footer), 'e');
+    append_char(footer, &len, sizeof(footer), 's');
+    append_char(footer, &len, sizeof(footer), 's');
+    append_char(footer, &len, sizeof(footer), ' ');
+    append_char(footer, &len, sizeof(footer), 'E');
+    append_char(footer, &len, sizeof(footer), 'S');
+    append_char(footer, &len, sizeof(footer), 'C');
+    append_char(footer, &len, sizeof(footer), ' ');
+    append_char(footer, &len, sizeof(footer), 't');
+    append_char(footer, &len, sizeof(footer), 'o');
+    append_char(footer, &len, sizeof(footer), ' ');
+    append_char(footer, &len, sizeof(footer), 'e');
+    append_char(footer, &len, sizeof(footer), 'x');
+    append_char(footer, &len, sizeof(footer), 'i');
+    append_char(footer, &len, sizeof(footer), 't');
+    append_char(footer, &len, sizeof(footer), '.');
+    draw_text_clipped(x + 10, y + h - 18, w - 20, footer, color_gray_dark, color_white, true);
+}
+
 static void render_debug_overlay(void) {
     int x = 42;
     int y = 46;
@@ -4507,18 +5696,33 @@ static void render_debug_overlay(void) {
         return;
     }
 
+    if (debug_memory_view_open) {
+        render_debug_memory_view();
+        return;
+    }
+
     fill_rect(x, y, w, h, color_white);
     draw_rect(x, y, w, h, color_black);
     draw_text(x + 10, y + 10, "HaloxOS Debugger", color_blue_dark, color_white, true);
     for (int i = start; i < debug_term.line_count; ++i) {
-        uint8_t text_color = i < 2 ? (i == 0 ? color_blue_dark : color_gray_dark) : color_black;
+        uint8_t text_color = debug_terminal_line_color(i, debug_term.lines[i]);
         draw_text_clipped(x + 10, line_y, w - 20, debug_term.lines[i], text_color, color_white, true);
         line_y += 10;
     }
     draw_text(x + 10, y + h - 18, "DBG:", color_black, color_white, true);
-    draw_text_clipped(x + 48, y + h - 18, w - 60, debug_term.input, color_black, color_white, true);
-    if (((timer_ticks / TERMINAL_CURSOR_BLINK_TICKS) & 1u) == 0) {
-        draw_text(x + 48 + debug_term.input_len * 8, y + h - 18, "_", color_black, color_white, true);
+    {
+        int prompt_w = 48;
+        int input_w = w - prompt_w - 12;
+        int max_chars = input_w / 8;
+        int input_start = debug_term.input_len > max_chars ? debug_term.input_len - max_chars : 0;
+        draw_text_clipped(x + prompt_w, y + h - 18, input_w, &debug_term.input[input_start], color_black, color_white, true);
+        if (((timer_ticks / TERMINAL_CURSOR_BLINK_TICKS) & 1u) == 0) {
+            int cursor_chars = debug_term.input_len - input_start;
+            if (cursor_chars > max_chars) {
+                cursor_chars = max_chars;
+            }
+            draw_text(x + prompt_w + cursor_chars * 8, y + h - 18, "_", color_black, color_white, true);
+        }
     }
 }
 
@@ -4585,20 +5789,42 @@ static void render_cursor(void) {
     };
 
     if (hand) {
-        int x = mouse.x;
-        int y = mouse.y;
+        static const char hand_cursor[20][21] = {
+            "....XXXXX...........",
+            "...XOOOOOX..........",
+            "...XOOOOOX..........",
+            "...XOOOOOX..........",
+            "...XOOOOOX..........",
+            "...XOOOOOX..........",
+            "...XOOOOOX..........",
+            "...XOOOOOX.XXX......",
+            "...XOOOOOXXOOOX.....",
+            "...XOOOOOXXOOOX.XX..",
+            "...XOOOOOXXOOOXXOOX.",
+            "...XOOOOOXXOOOXXOOX.",
+            "XX.XOOOOOXXOOOXXOOX.",
+            "XOOXOOOOOOXOOOOOOOX.",
+            "XOOOOOOOOOOOOOOOOOX.",
+            ".XOOOOOOOOOOOOOOOX..",
+            "..XOOOOOOOOOOOOOX...",
+            "...XOOOOOOOOOOOX....",
+            "....XOOOOOOOOX......",
+            ".....XXXXXXXX......."
+        };
         int press = mouse.left ? 1 : 0;
-        fill_rect(x + 6, y + press, 6, 11, color_black);
-        fill_rect(x + 7, y + 1 + press, 4, 9, color_white);
-        fill_rect(x + 4, y + 8 + press, 11, 8, color_black);
-        fill_rect(x + 5, y + 9 + press, 9, 6, color_white);
-        fill_rect(x + 2, y + 9 + press, 5, 5, color_black);
-        fill_rect(x + 3, y + 10 + press, 4, 3, color_white);
-        fill_rect(x + 10, y + 5 + press, 4, 8, color_black);
-        fill_rect(x + 11, y + 6 + press, 2, 6, color_white);
-        fill_rect(x + 13, y + 7 + press, 4, 7, color_black);
-        fill_rect(x + 14, y + 8 + press, 2, 5, color_white);
-        draw_pixel(x + 8, y + press, color_white);
+        int x = mouse.x - 6;
+        int y = mouse.y + press;
+
+        for (int row = 0; row < 20; ++row) {
+            for (int col = 0; col < 20; ++col) {
+                char pixel = hand_cursor[row][col];
+                if (pixel == 'X') {
+                    draw_pixel(x + col, y + row, color_black);
+                } else if (pixel == 'O') {
+                    draw_pixel(x + col, y + row, color_white);
+                }
+            }
+        }
         return;
     }
 
@@ -4986,6 +6212,7 @@ static void handle_desktop_mouse(void) {
         } else if (point_in_rect(mouse.x, mouse.y, x, y + 32, 160, 24)) {
             restart_system();
         } else if (point_in_rect(mouse.x, mouse.y, x, y + 64, 160, 24)) {
+            serial_trace("INFO", "power menu halt requested");
             cpu_halted_overlay = true;
         } else if (point_in_rect(mouse.x, mouse.y, x, y + 92, 160, 20) ||
                    !point_in_rect(mouse.x, mouse.y, 212, 150, 216, 158)) {
@@ -5268,6 +6495,7 @@ static void handle_desktop_mouse(void) {
         } else if (point_in_rect(mouse.x, mouse.y, x, y + 32, 160, 24)) {
             restart_system();
         } else if (point_in_rect(mouse.x, mouse.y, x, y + 64, 160, 24)) {
+            serial_trace("INFO", "power window halt requested");
             cpu_halted_overlay = true;
         } else if (point_in_rect(mouse.x, mouse.y, x, y + 96, 160, 24)) {
             close_window(APP_POWER);
@@ -5519,6 +6747,13 @@ static void init_state(void) {
     debug_pending_action = DEBUG_ACTION_NONE;
     debug_history_count = 0;
     debug_history_cursor = 0;
+    debug_memory_view_open = false;
+    debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
+    debug_memory_base = 0;
+    debug_memory_cursor = 0;
+    debug_memory_edit_nibble = -1;
+    debug_edited_range_count = 0;
+    debug_forced_fault_reason = NULL;
     terminal_add_line(&boot_term, "help clear cls date time boot shutdown restart halt echo");
     terminal_add_line(&cmd_term, "help clear cls date time boot shutdown restart halt echo");
     memset_local(paint_canvas, color_white, sizeof(paint_canvas));
@@ -5539,19 +6774,24 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
 
     serial_init();
     serial_trace("INFO", "initialize kernel");
+    serial_trace_hex_value("INFO", "kernel multiboot magic", magic);
+    serial_trace_hex_value("INFO", "kernel entry address", (uint32_t)(uintptr_t)&kernel_main);
     boot_drive_valid = false;
     boot_drive_number = 0;
     if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & (1u << 1)) != 0) {
         boot_drive_valid = true;
         boot_drive_number = (uint8_t)(mbi->boot_device & 0xFFu);
     }
+    detect_boot_drive_info(mbi);
+    serial_trace_disk_details();
     ram_total_bytes = detect_total_ram_bytes(mbi);
+    serial_trace_uint_value("INFO", "RAM total bytes", ram_total_bytes);
 
     init_framebuffer(magic, mbi);
-    serial_trace("INFO", "initialize graphics");
+    serial_trace_video_mode("initialize graphics");
     video_mode_switch_available = detect_video_mode_switch();
     if (!video_mode_switch_available) {
-        serial_trace("WARNING", "video mode switch unavailable");
+        serial_trace_concat("WARNING", "video mode switch unavailable on ", video_backend_name());
     }
     init_interrupts();
     serial_trace("INFO", "initialize interrupts");
@@ -5562,7 +6802,10 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     init_mouse();
     __asm__ volatile ("sti");
     init_cpu_monitoring();
+    serial_trace("INFO", cpu_has_cpuid ? "CPU CPUID available" : "CPU CPUID unavailable");
+    serial_trace("INFO", cpu_has_tsc ? "CPU TSC available" : "CPU TSC unavailable");
     calibrate_cpu_speed();
+    serial_trace_uint_value("INFO", "CPU speed MHz", cpu_speed_mhz);
     if (cpu_has_tsc) {
         perf_window_start_cycles = (uint32_t)rdtsc_read();
         perf_busy_cycle_accum = 0;

@@ -10,6 +10,10 @@ CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-
 LDFLAGS := -T linker.ld
 HOSTCFLAGS := -std=c11 -O2 -Wall -Wextra $(shell pkg-config --cflags libpng)
 HOSTLIBS := $(shell pkg-config --libs libpng)
+QEMU_ARGS = -cdrom $(ISO) -m 128 -vga std
+ifneq ($(filter serial,$(MAKECMDGOALS)),)
+QEMU_ARGS += -serial stdio -monitor none
+endif
 
 BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 ISO := build/os.iso
@@ -50,7 +54,7 @@ build/mines_icon_asset.o \
 build/snake_icon_asset.o \
 build/guessnum_icon_asset.o \
 
-.PHONY: all clean run disk floppy install-deps FORCE
+.PHONY: all clean run serial disk floppy install-deps FORCE
 all: check-build install-deps $(ISO)
 
 disk: check-build install-deps $(DISK)
@@ -278,7 +282,10 @@ $(FLOPPY): $(KERNEL_GZ) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
 	@echo -e "\nFloppy Image Finished!"
 
 run: $(ISO)
-	qemu-system-i386 -cdrom $(ISO) -m 128 -vga std
+	qemu-system-i386 $(QEMU_ARGS)
+
+serial:
+	@:
 
 clean:
 	rm -rf build
