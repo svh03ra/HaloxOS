@@ -34,8 +34,8 @@ Let’s take a look at some requirements you may need for _pinchy salt_!
 
 **Minimum Requirements:**
 - **CPU:** `Intel i386(?)` or Fewer
-- **RAM:** `5 MB` _(Required to boot from the GRUB bootloader)_
-- **VRAM:** `1 MB` or Fewer
+- **RAM:** `8 MB` _(Required to boot from the GRUB bootloader)_
+- **VRAM:** `2 MB` or Fewer
 - **Run as Boot:** `CDROM` _(ISO)_ Only, not the disk.
 - **Architecture:** `32-Bit` _(x86)_ Only, x64 can run as well.
 
@@ -85,6 +85,9 @@ First of all, you need to understand what you will do in order to follow the ins
 
 **- Quick Targets:**
 - For using `make run` command to test via QEMU to ensure everything is OK.
+- For use the `make run serial` command for debugging:
+
+_Remember to remind this, make sure the `HALOXOS_CONFIG_DEBUG` variable is enabled in `src/config.config.h` before running it to be ready!_
 - To use `make clean` command to remove build artifacts for quick recovery.
 
 ## ⚖️ License:

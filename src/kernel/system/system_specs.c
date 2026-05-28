@@ -1,5 +1,6 @@
 // Copyright Svh03ra (C) 2026, All rights reserved
 // Source File: system_specs.c, system specifications handling.
+
 // This repository is licensed under the GNU General Public License.
 
 static uint32_t detect_total_ram_bytes(const MultibootInfo *mbi) {
