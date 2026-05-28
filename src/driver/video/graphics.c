@@ -1,0 +1,477 @@
+static uint8_t nearest_color(uint8_t r, uint8_t g, uint8_t b) {
+    uint32_t best_distance = 0xFFFFFFFFu;
+    uint8_t best_index = 0;
+
+    for (int i = 0; i < 256; ++i) {
+        int dr = (int)palette[i].r - r;
+        int dg = (int)palette[i].g - g;
+        int db = (int)palette[i].b - b;
+        uint32_t distance = (uint32_t)(dr * dr + dg * dg + db * db);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_index = (uint8_t)i;
+        }
+    }
+
+    return best_index;
+}
+
+static void init_theme_colors(void) {
+    color_black = nearest_color(0, 0, 0);
+    color_white = nearest_color(255, 255, 255);
+    color_gray_dark = nearest_color(64, 64, 64);
+    color_gray = nearest_color(128, 128, 128);
+    color_gray_light = nearest_color(210, 210, 210);
+    color_green = nearest_color(0, 170, 0);
+    color_green_dark = nearest_color(0, 100, 0);
+    color_blue = nearest_color(60, 110, 220);
+    color_blue_dark = nearest_color(20, 40, 100);
+    color_red = nearest_color(180, 40, 40);
+    color_yellow = nearest_color(230, 210, 40);
+    color_orange = nearest_color(230, 130, 40);
+    color_pink = nearest_color(220, 140, 180);
+    color_desktop_icon = nearest_color(245, 245, 245);
+    paint_color = color_black;
+}
+
+static void program_vga_palette(void) {
+    if (fb.bpp != 8) {
+        return;
+    }
+
+    if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+        for (int i = 0; i < 256; ++i) {
+            Color output = settings_applied.palette_mode == 1 ? quantize_color_16(palette[i]) : palette[i];
+            vmware_write_reg(SVGA_PALETTE_BASE + i * 3 + 0, output.r);
+            vmware_write_reg(SVGA_PALETTE_BASE + i * 3 + 1, output.g);
+            vmware_write_reg(SVGA_PALETTE_BASE + i * 3 + 2, output.b);
+        }
+        return;
+    }
+
+    outb(0x3C8, 0);
+    for (int i = 0; i < 256; ++i) {
+        Color output = settings_applied.palette_mode == 1 ? quantize_color_16(palette[i]) : palette[i];
+        outb(0x3C9, output.r / 4);
+        outb(0x3C9, output.g / 4);
+        outb(0x3C9, output.b / 4);
+    }
+}
+
+static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
+    uint32_t bar0 = 0;
+
+    memset_local(&fb, 0, sizeof(fb));
+    video_backend = VIDEO_BACKEND_NONE;
+    memset_local(&vmware_svga, 0, sizeof(vmware_svga));
+
+    if (magic != 0x2BADB002 || mbi == NULL) {
+        return true;
+    }
+
+    if ((mbi->flags & (1u << 12)) != 0) {
+        fb.address = (uint8_t *)(uintptr_t)mbi->framebuffer_addr;
+        fb.width = mbi->framebuffer_width;
+        fb.height = mbi->framebuffer_height;
+        fb.pitch = mbi->framebuffer_pitch;
+        fb.bpp = mbi->framebuffer_bpp;
+        if (fb.address != NULL &&
+            fb.width >= OS_WIDTH &&
+            fb.height >= OS_HEIGHT &&
+            fb.width <= MAX_OUTPUT_WIDTH &&
+            fb.height <= MAX_OUTPUT_HEIGHT) {
+            video_backend = VIDEO_BACKEND_MULTIBOOT;
+            update_present_maps();
+            return true;
+        }
+    }
+
+    if (init_vmware_svga_backend()) {
+        return true;
+    }
+
+    if (!detect_bga_backend()) {
+        return true;
+    }
+
+    if (!find_vga_framebuffer_bar(&bar0)) {
+        return true;
+    }
+
+    fb.address = (uint8_t *)(uintptr_t)bar0;
+    fb.width = OS_WIDTH;
+    fb.height = OS_HEIGHT;
+    fb.pitch = OS_WIDTH;
+    fb.bpp = 8;
+    video_backend = VIDEO_BACKEND_BGA;
+    update_present_maps();
+    return true;
+}
+
+static void present(void) {
+    if (boot_text_mode) {
+        return;
+    }
+
+    if (fb.bpp == 8 && fb.width == OS_WIDTH && fb.height == OS_HEIGHT) {
+        for (int y = 0; y < OS_HEIGHT; ++y) {
+            uint8_t *dest = fb.address + (size_t)y * fb.pitch;
+            memcpy_local(dest, &backbuffer[y * OS_WIDTH], OS_WIDTH);
+        }
+        if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+            vmware_update_screen();
+        }
+        return;
+    }
+
+    for (uint32_t y = 0; y < fb.height; ++y) {
+        uint16_t sy = present_y_map[y];
+        const uint8_t *src = &backbuffer[sy * OS_WIDTH];
+
+        if (fb.bpp == 8) {
+            uint8_t *dest = fb.address + (size_t)y * fb.pitch;
+            for (uint32_t x = 0; x < fb.width; ++x) {
+                dest[x] = src[present_x_map[x]];
+            }
+            continue;
+        }
+
+        if (fb.bpp == 16) {
+            uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
+            for (uint32_t x = 0; x < fb.width; ++x) {
+                dest[x] = backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]];
+            }
+            continue;
+        }
+
+        if (fb.bpp == 24) {
+            uint8_t *dest = fb.address + (size_t)y * fb.pitch;
+            for (uint32_t x = 0; x < fb.width; ++x) {
+                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
+                dest[x * 3 + 0] = c.b;
+                dest[x * 3 + 1] = c.g;
+                dest[x * 3 + 2] = c.r;
+            }
+            continue;
+        }
+
+        {
+            uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
+            for (uint32_t x = 0; x < fb.width; ++x) {
+                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
+                dest[x] = ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b;
+            }
+        }
+    }
+
+    if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+        vmware_update_screen();
+    }
+}
+
+static void clear_screen(uint8_t color) {
+    memset_local(backbuffer, color, sizeof(backbuffer));
+    {
+        uint16_t rgb = palette_rgb565(color);
+        for (int i = 0; i < OS_WIDTH * OS_HEIGHT; ++i) {
+            backbuffer_rgb565[i] = rgb;
+        }
+    }
+}
+
+static void draw_pixel(int x, int y, uint8_t color) {
+    if (x < 0 || y < 0 || x >= OS_WIDTH || y >= OS_HEIGHT) {
+        return;
+    }
+    backbuffer[y * OS_WIDTH + x] = color;
+    backbuffer_rgb565[y * OS_WIDTH + x] = palette_rgb565(color);
+}
+
+static void fill_rect(int x, int y, int w, int h, uint8_t color) {
+    int x0 = clampi(x, 0, OS_WIDTH);
+    int y0 = clampi(y, 0, OS_HEIGHT);
+    int x1 = clampi(x + w, 0, OS_WIDTH);
+    int y1 = clampi(y + h, 0, OS_HEIGHT);
+
+    for (int py = y0; py < y1; ++py) {
+        for (int px = x0; px < x1; ++px) {
+            backbuffer[py * OS_WIDTH + px] = color;
+            backbuffer_rgb565[py * OS_WIDTH + px] = palette_rgb565(color);
+        }
+    }
+}
+
+static void draw_rect(int x, int y, int w, int h, uint8_t color) {
+    fill_rect(x, y, w, 1, color);
+    fill_rect(x, y + h - 1, w, 1, color);
+    fill_rect(x, y, 1, h, color);
+    fill_rect(x + w - 1, y, 1, h, color);
+}
+
+static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transparent) {
+    uint8_t glyph_index;
+
+    if ((unsigned char)ch < 32 || (unsigned char)ch > 127) {
+        glyph_index = 0;
+    } else {
+        glyph_index = (uint8_t)((unsigned char)ch - 32);
+    }
+
+    for (int row = 0; row < 8; ++row) {
+        uint8_t bits = font8x8_basic[glyph_index][row];
+        for (int col = 0; col < 8; ++col) {
+            if ((bits >> col) & 1u) {
+                draw_pixel(x + col, y + row, fg);
+            } else if (!transparent) {
+                draw_pixel(x + col, y + row, bg);
+            }
+        }
+    }
+}
+
+static void draw_char_scaled(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transparent, int scale) {
+    uint8_t glyph_index;
+    if (scale < 1) {
+        scale = 1;
+    }
+
+    if ((unsigned char)ch < 32 || (unsigned char)ch > 127) {
+        glyph_index = 0;
+    } else {
+        glyph_index = (uint8_t)((unsigned char)ch - 32);
+    }
+
+    for (int row = 0; row < 8; ++row) {
+        uint8_t bits = font8x8_basic[glyph_index][row];
+        for (int col = 0; col < 8; ++col) {
+            bool set = ((bits >> col) & 1u) != 0;
+            for (int sy = 0; sy < scale; ++sy) {
+                for (int sx = 0; sx < scale; ++sx) {
+                    if (set) {
+                        draw_pixel(x + col * scale + sx, y + row * scale + sy, fg);
+                    } else if (!transparent) {
+                        draw_pixel(x + col * scale + sx, y + row * scale + sy, bg);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void draw_text(int x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent) {
+    int cursor_x = x;
+    int cursor_y = y;
+    for (size_t i = 0; text[i] != '\0'; ++i) {
+        if (text[i] == '\n') {
+            cursor_x = x;
+            cursor_y += 10;
+            continue;
+        }
+        draw_char(cursor_x, cursor_y, text[i], fg, bg, transparent);
+        cursor_x += 8;
+    }
+}
+
+static void draw_text_scaled(int x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent, int scale) {
+    int cursor_x = x;
+    int cursor_y = y;
+
+    if (scale < 1) {
+        scale = 1;
+    }
+
+    for (size_t i = 0; text[i] != '\0'; ++i) {
+        if (text[i] == '\n') {
+            cursor_x = x;
+            cursor_y += 10 * scale;
+            continue;
+        }
+        draw_char_scaled(cursor_x, cursor_y, text[i], fg, bg, transparent, scale);
+        cursor_x += 8 * scale;
+    }
+}
+
+static void draw_text_center(int center_x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent) {
+    int x = center_x - (int)(strlen_local(text) * 8) / 2;
+    draw_text(x, y, text, fg, bg, transparent);
+}
+
+static void draw_text_center_scaled(int center_x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent, int scale) {
+    if (scale < 1) {
+        scale = 1;
+    }
+    int x = center_x - (int)(strlen_local(text) * 8 * scale) / 2;
+    draw_text_scaled(x, y, text, fg, bg, transparent, scale);
+}
+
+static void vga_text_write_at(int col, int row, const char *text, uint8_t attr) {
+    if (row < 0 || row >= VGA_TEXT_ROWS || col >= VGA_TEXT_COLS) {
+        return;
+    }
+
+    if (col < 0) {
+        text -= col;
+        col = 0;
+    }
+
+    for (int i = 0; text[i] != '\0' && col + i < VGA_TEXT_COLS; ++i) {
+        vga_text_buffer[row * VGA_TEXT_COLS + col + i] = ((uint16_t)attr << 8) | (uint8_t)text[i];
+    }
+}
+
+static void vga_text_clear(uint8_t attr) {
+    for (int i = 0; i < VGA_TEXT_COLS * VGA_TEXT_ROWS; ++i) {
+        vga_text_buffer[i] = ((uint16_t)attr << 8) | ' ';
+    }
+}
+
+static void vga_text_disable_cursor(void) {
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x20);
+}
+
+static void vga_text_enable_cursor(uint8_t cursor_start, uint8_t cursor_end) {
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, (uint8_t)((inb(0x3D5) & 0xC0) | cursor_start));
+    outb(0x3D4, 0x0B);
+    outb(0x3D5, (uint8_t)((inb(0x3D5) & 0xE0) | cursor_end));
+}
+
+static void vga_text_set_cursor(int col, int row) {
+    uint16_t pos = (uint16_t)(row * VGA_TEXT_COLS + col);
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t)(pos & 0xFFu));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFFu));
+}
+
+static void draw_text_mode_row(int row, int col, const char *text, uint8_t attr) {
+    vga_text_write_at(col, row, text, attr);
+}
+
+static void draw_text_mode_center(int row, const char *text, uint8_t attr) {
+    int col = (VGA_TEXT_COLS - (int)strlen_local(text)) / 2;
+    if (col < 0) {
+        col = 0;
+    }
+    vga_text_write_at(col, row, text, attr);
+}
+
+static void draw_text_clipped(int x, int y, int max_w, const char *text, uint8_t fg, uint8_t bg, bool transparent) {
+    int max_chars = max_w / 8;
+    int cursor_x = x;
+
+    if (max_chars <= 0) {
+        return;
+    }
+
+    for (int i = 0; text[i] != '\0' && i < max_chars; ++i) {
+        draw_char(cursor_x, y, text[i], fg, bg, transparent);
+        cursor_x += 8;
+    }
+}
+
+static void draw_text_block(int x, int y, int w, int h, const char *text, uint8_t fg, uint8_t bg, bool transparent) {
+    int max_cols = w / 8;
+    int max_rows = h / 10;
+    int row = 0;
+    int col = 0;
+
+    if (max_cols <= 0 || max_rows <= 0) {
+        return;
+    }
+
+    for (int i = 0; text[i] != '\0'; ++i) {
+        char ch = text[i];
+        if (ch == '\n') {
+            ++row;
+            col = 0;
+            if (row >= max_rows) {
+                break;
+            }
+            continue;
+        }
+
+        if (col >= max_cols) {
+            ++row;
+            col = 0;
+            if (row >= max_rows) {
+                break;
+            }
+        }
+
+        draw_char(x + col * 8, y + row * 10, ch, fg, bg, transparent);
+        ++col;
+    }
+}
+
+static bool point_in_rect(int x, int y, int rx, int ry, int rw, int rh) {
+    return x >= rx && y >= ry && x < rx + rw && y < ry + rh;
+}
+
+static uint16_t image_width(const uint8_t *image) {
+    return (uint16_t)(image[0] | ((uint16_t)image[1] << 8));
+}
+
+static uint16_t image_height(const uint8_t *image) {
+    return (uint16_t)(image[2] | ((uint16_t)image[3] << 8));
+}
+
+static const uint8_t *image_pixels(const uint8_t *image) {
+    return image + 4;
+}
+
+static const uint8_t *image_alpha(const uint8_t *image) {
+    size_t count = (size_t)image_width(image) * image_height(image);
+    return image + 4 + count;
+}
+
+static const uint16_t *image_rgb565(const uint8_t *image) {
+    size_t count = (size_t)image_width(image) * image_height(image);
+    return (const uint16_t *)(const void *)(image + 4 + count + count);
+}
+
+static uint16_t palette_rgb565(uint8_t color) {
+    Color c = palette[color];
+    return (uint16_t)(((uint16_t)(c.r >> 3) << 11) |
+                      ((uint16_t)(c.g >> 2) << 5) |
+                      (uint16_t)(c.b >> 3));
+}
+
+static Color rgb565_to_color(uint16_t value) {
+    Color c;
+    c.r = (uint8_t)((((value >> 11) & 0x1Fu) * 255u) / 31u);
+    c.g = (uint8_t)((((value >> 5) & 0x3Fu) * 255u) / 63u);
+    c.b = (uint8_t)(((value & 0x1Fu) * 255u) / 31u);
+    return c;
+}
+
+static int text_pixel_width(const char *text) {
+    return (int)strlen_local(text) * 8;
+}
+
+static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) {
+    uint16_t width = image_width(image);
+    uint16_t height = image_height(image);
+    const uint8_t *pixels = image_pixels(image);
+    const uint8_t *alpha = image_alpha(image);
+    const uint16_t *rgb565 = image_rgb565(image);
+
+    for (uint16_t py = 0; py < height; ++py) {
+        for (uint16_t px = 0; px < width; ++px) {
+            size_t index = (size_t)py * width + px;
+            if (!transparent || alpha[index] >= 128) {
+                int dx = x + px;
+                int dy = y + py;
+                if (dx >= 0 && dy >= 0 && dx < OS_WIDTH && dy < OS_HEIGHT) {
+                    backbuffer[dy * OS_WIDTH + dx] = pixels[index];
+                    backbuffer_rgb565[dy * OS_WIDTH + dx] = rgb565[index];
+                }
+            }
+        }
+    }
+}
+
+static void draw_image(const uint8_t *image) {
+    draw_image_at(image, 0, 0, false);
+}

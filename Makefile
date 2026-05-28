@@ -54,6 +54,11 @@ build/mines_icon_asset.o \
 build/snake_icon_asset.o \
 build/guessnum_icon_asset.o \
 
+KERNEL_ENTRY := src/kernel/system/kernel.c
+KERNEL_FRAGMENTS := $(shell find src/driver src/kernel src/modes -name '*.c' ! -path '$(KERNEL_ENTRY)' | sort)
+KERNEL_HEADERS := src/config/config.h
+KERNEL_SRC := $(KERNEL_ENTRY) $(KERNEL_FRAGMENTS) $(KERNEL_HEADERS)
+
 .PHONY: all clean run serial disk floppy install-deps FORCE
 all: check-build install-deps $(ISO)
 
@@ -136,46 +141,46 @@ $(DESKTOP_LAYOUT): | build/generated
 build/tools/png2indexed: tools/png2indexed.c | build/tools
 	$(HOSTCC) $(HOSTCFLAGS) -o $@ $< $(HOSTLIBS)
 
-build/login.bin: src/bg/login.png build/tools/png2indexed | build
+build/login.bin: src/modes/states/graphical/login/ui/login.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/theme1.bin: src/bg/desktop/theme1.png build/tools/png2indexed | build
+build/theme1.bin: src/modes/states/graphical/desktop/ui/backgrounds/theme1.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/theme2.bin: src/bg/desktop/theme2.png build/tools/png2indexed | build
+build/theme2.bin: src/modes/states/graphical/desktop/ui/backgrounds/theme2.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/user_frame.bin: src/item/user/user-frame.png build/tools/png2indexed | build
+build/user_frame.bin: src/modes/states/graphical/login/ui/user-frame.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/notepad_icon.bin: src/item/apps/notepad.png build/tools/png2indexed | build
+build/notepad_icon.bin: src/modes/states/graphical/desktop/apps/notepad/notepad.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/terminal_icon.bin: src/item/apps/terminal.png build/tools/png2indexed | build
+build/terminal_icon.bin: src/modes/states/graphical/desktop/apps/terminal/terminal.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/game_icon.bin: src/item/games/game.png build/tools/png2indexed | build
+build/game_icon.bin: src/modes/states/graphical/desktop/apps/game_center/game.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/program_icon.bin: src/item/default/program.png build/tools/png2indexed | build
+build/program_icon.bin: src/modes/states/graphical/desktop/ui/icons/program.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/settings_icon.bin: src/item/setting/settings.png build/tools/png2indexed | build
+build/settings_icon.bin: src/modes/states/graphical/desktop/apps/settings/settings.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/explorer_icon.bin: src/item/apps/explorer.png build/tools/png2indexed | build
+build/explorer_icon.bin: src/modes/states/graphical/desktop/apps/explorer/explorer.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/taskmgr_icon.bin: src/item/apps/taskmgr.png build/tools/png2indexed | build
+build/taskmgr_icon.bin: src/modes/states/graphical/desktop/apps/task_manager/taskmgr.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/mines_icon.bin: src/item/games/minesw.png build/tools/png2indexed | build
+build/mines_icon.bin: src/modes/states/graphical/desktop/apps/mines/minesw.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/snake_icon.bin: src/item/games/snake.png build/tools/png2indexed | build
+build/snake_icon.bin: src/modes/states/graphical/desktop/apps/snake/snake.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
-build/guessnum_icon.bin: src/item/games/guessnum.png build/tools/png2indexed | build
+build/guessnum_icon.bin: src/modes/states/graphical/desktop/apps/guess_number/guessnum.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
 build/login_asset.o: build/login.bin
@@ -220,13 +225,13 @@ build/snake_icon_asset.o: build/snake_icon.bin
 build/guessnum_icon_asset.o: build/guessnum_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
-build/boot.o: src/boot.asm | build
+build/boot.o: src/kernel/system/boot.asm | build
 	$(AS) -f elf32 -o $@ $<
 
-build/interrupts.o: src/interrupts.asm | build
+build/interrupts.o: src/kernel/system/interrupts.asm | build
 	$(AS) -f elf32 -o $@ $<
 
-build/kernel.o: src/kernel.c $(BUILD_INFO) | build
+build/kernel.o: $(KERNEL_SRC) $(BUILD_INFO) | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(KERNEL_GZ): $(KERNEL) | build

@@ -8,6 +8,27 @@ _<sup>(Graphical Demonstration included)</sup>_
 This was actually made in VS Code with Codex while I was developing my own OS.
 I’ve been handling things carefully and delicately for progress... So what’s going to be build lads?
 
+## 🧭 Source Layout
+The source tree is arranged around the OS parts that own the behavior:
+
+```
+src/
+├── config/                 # build-time toggles for debug and default video mode
+├── driver/                 # video, input, and other hardware drivers
+├── kernel/                 # system core and debug support
+└── modes/states/
+    ├── boot/               # boot menu and boot terminal state
+    └── graphical/
+        ├── login/ui/       # graphical login UI assets and code
+        └── desktop/
+            ├── apps/       # desktop app UI/handling ownership
+            └── ui/         # desktop shell, menus, overlays, icons, backgrounds
+```
+
+`src/kernel/system/kernel.c` keeps the shared kernel types and state, then includes the split implementation fragments from the ownership folders. This keeps the original base-code behavior while letting driver, kernel, boot, login, desktop UI, and app code live on their new sides.
+
+Build-time defaults live in `src/config/config.h`, including debug mode, default screen resolution, and BPP.
+
 ## 📝 System Requirements
 Let’s take a look at some requirements you may need for _pinchy salt_!
 
