@@ -1,6 +1,6 @@
 static void render_desktop_icons(void) {
     for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
-        draw_desktop_icon(i, i == selected_desktop_icon);
+        draw_desktop_icon(i, i == selected_desktop_icon || desktop_icon_multi_selected[i]);
     }
 }
 
@@ -8,10 +8,10 @@ static bool cursor_over_clickable(void) {
     if (cursor_hand_hint || desktop_icon_hit_test(mouse.x, mouse.y) >= 0) {
         return true;
     }
-    if (context_menu_open && point_in_rect(mouse.x, mouse.y, context_menu_x, context_menu_y, 120, 60)) {
+    if (context_menu_open && point_in_rect(mouse.x, mouse.y, context_menu_x, context_menu_y, 120, 64)) {
         return true;
     }
-    if (desktop_icon_menu_open && point_in_rect(mouse.x, mouse.y, desktop_icon_menu_x, desktop_icon_menu_y, 120, 84)) {
+    if (desktop_icon_menu_open && point_in_rect(mouse.x, mouse.y, desktop_icon_menu_x, desktop_icon_menu_y, 120, 75)) {
         return true;
     }
     if (start_app_menu_open && point_in_rect(mouse.x, mouse.y, start_app_menu_x, start_app_menu_y, 154, 28)) {

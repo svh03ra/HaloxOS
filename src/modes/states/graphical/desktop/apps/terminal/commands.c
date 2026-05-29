@@ -25,8 +25,10 @@ static void execute_terminal_command(Terminal *term, bool boot_console) {
                 terminal_add_line(term, "ERROR: Graphics mode unavailable!!!");
                 return;
             }
+            system_state = STATE_LOGIN;
+        } else {
+            open_desktop();
         }
-        open_desktop();
     } else if (streq(command, "shutdown")) {
         shutdown_system();
     } else if (streq(command, "restart")) {

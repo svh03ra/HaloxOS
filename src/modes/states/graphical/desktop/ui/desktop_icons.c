@@ -1,6 +1,8 @@
 static const uint8_t *app_icon_image(AppId app) {
     switch (app) {
         case APP_NOTEPAD: return _binary_build_notepad_icon_bin_start;
+        case APP_PAINT: return _binary_build_paint_icon_bin_start;
+        case APP_POWER: return _binary_build_power_icon_bin_start;
         case APP_CMD: return _binary_build_terminal_icon_bin_start;
         case APP_EXPLORER: return _binary_build_explorer_icon_bin_start;
         case APP_GAME_CENTER: return _binary_build_game_icon_bin_start;
@@ -157,10 +159,16 @@ static void draw_desktop_icon(int index, bool selected) {
     label_y = box_y + image_height(image) + 10;
 
     if (desktop_rename_active && desktop_rename_icon == index) {
-        draw_dither_rect(box_x - 2, box_y - 2, box_w + 4, image_height(image) + 6, color_blue, color_blue_dark);
-        fill_rect(label_x - 6, label_y - 3, box_w + 4, 14, color_blue);
-        draw_rect(label_x - 6, label_y - 3, box_w + 4, 14, color_white);
-        draw_text_clipped(label_x - 2, label_y, box_w, desktop_rename_buffer, color_white, color_blue, true);
+        int rename_w = text_pixel_width(desktop_rename_buffer);
+        int rn_box_w = (rename_w > icon_w ? rename_w : icon_w) + 8;
+        int rn_label_x = box_x + (rn_box_w - rename_w) / 2;
+        draw_dither_rect(box_x - 2, box_y - 2, rn_box_w > box_w ? rn_box_w + 4 : box_w + 4, image_height(image) + 6, color_blue, color_blue_dark);
+        fill_rect(rn_label_x - 4, label_y - 3, rename_w + 8, 14, color_blue);
+        draw_rect(rn_label_x - 4, label_y - 3, rename_w + 8, 14, color_white);
+        draw_text(rn_label_x, label_y, desktop_rename_buffer, color_white, color_blue, true);
+        if ((timer_ticks / 15) & 1) {
+            draw_char(rn_label_x + rename_w, label_y, '_', color_white, color_blue, true);
+        }
     } else if (selected) {
         draw_dither_rect(box_x - 2, box_y - 2, box_w + 4, image_height(image) + 6, color_blue, color_blue_dark);
         fill_rect(label_x - 4, label_y - 2, label_w + 8, 12, color_blue);
@@ -170,6 +178,17 @@ static void draw_desktop_icon(int index, bool selected) {
     }
 
     draw_image_at(image, icon_x, box_y, true);
+}
+
+static bool desktop_icon_intersects_rect(int idx, int rx, int ry, int rw, int rh) {
+    if (idx < 0 || idx >= DESKTOP_ICON_COUNT || !desktop_icon_visible[idx]) {
+        return false;
+    }
+    int ix, iy, iw, ih;
+    desktop_icon_bounds(desktop_icons[idx].x, desktop_icons[idx].y,
+                        desktop_icon_image(idx), desktop_icon_label(idx),
+                        &ix, &iy, &iw, &ih);
+    return ix < rx + rw && ix + iw > rx && iy < ry + rh && iy + ih > ry;
 }
 
 static int desktop_icon_hit_test(int x, int y) {
@@ -205,6 +224,46 @@ static uint8_t solid_color_index(uint8_t mode) {
         case 9: return color_black;
         default: return color_blue_dark;
     }
+}
+
+static void desktop_auto_grid_icons(void) {
+    if (!desktop_auto_grid) {
+        return;
+    }
+    bool messy = false;
+    for (int i = 0; i < DESKTOP_ICON_COUNT && !messy; ++i) {
+        if (!desktop_icon_visible[i]) continue;
+        int ax, ay, aw, ah;
+        desktop_icon_bounds(desktop_icons[i].x, desktop_icons[i].y,
+                            desktop_icon_image(i), desktop_icon_label(i),
+                            &ax, &ay, &aw, &ah);
+        if (ax + aw > OS_WIDTH || ay + ah > OS_HEIGHT - TASKBAR_H) {
+            messy = true;
+            break;
+        }
+        for (int j = i + 1; j < DESKTOP_ICON_COUNT; ++j) {
+            if (!desktop_icon_visible[j]) continue;
+            int bx, by, bw, bh;
+            desktop_icon_bounds(desktop_icons[j].x, desktop_icons[j].y,
+                                desktop_icon_image(j), desktop_icon_label(j),
+                                &bx, &by, &bw, &bh);
+            if (ax + aw > bx && bx + bw > ax && ay + ah > by && by + bh > ay) {
+                messy = true;
+                break;
+            }
+        }
+    }
+    if (!messy) return;
+
+    int idx = 0;
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        if (desktop_icon_visible[i]) {
+            desktop_icons[i].x = 18 + (idx / 3) * 78;
+            desktop_icons[i].y = 24 + (idx % 3) * 80;
+            ++idx;
+        }
+    }
+    save_desktop_icon_positions();
 }
 
 static void draw_desktop_background(void) {

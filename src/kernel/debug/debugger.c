@@ -690,7 +690,7 @@ static void debug_help_command(const char *command) {
 
     if (token[0] == '\0') {
         terminal_add_line(&debug_term, "help edit | help exception | help fault");
-        terminal_add_line(&debug_term, "edit view change crash halt fault continue");
+        terminal_add_line(&debug_term, "edit view change crash halt fault continue test");
     } else if (token_is(token, "e", "edit", NULL, NULL)) {
         terminal_add_line(&debug_term, "edit mem 0xADDR ff 0x100");
         terminal_add_line(&debug_term, "view mem [0xADDR] | view vid | view disk");
@@ -712,6 +712,10 @@ static void debug_help_command(const char *command) {
         terminal_add_line(&debug_term, "change bg 1 | change bg 2");
     } else if (token_is(token, "continue", "con", "c", NULL)) {
         terminal_add_line(&debug_term, "continue: close debugger and resume desktop.");
+    } else if (token_is(token, "t", "test", NULL, NULL)) {
+        terminal_add_line(&debug_term, "test window [amount]");
+        terminal_add_line(&debug_term, "Creates cascading test windows on the desktop.");
+        terminal_add_line(&debug_term, "amount: number of windows (max 1000)");
     } else {
         terminal_add_line(&debug_term, "No help for that command.");
     }
@@ -770,8 +774,50 @@ static void debug_execute_command(void) {
         debug_change_command(command);
     } else if (streq(command, "view") || streq(command, "v") || starts_with(command, "view ") || starts_with(command, "v ")) {
         debug_view_command(command);
-    } else if (starts_with(command, "edit ")) {
+    } else if (streq(command, "edit ") || starts_with(command, "edit ")) {
         debug_edit_command(command);
+    } else if (starts_with(command, "test ")) {
+        char subcmd[24];
+        const char *cursor = command;
+        cursor = read_token(cursor, subcmd, sizeof(subcmd)); // consume open/test
+        cursor = read_token(cursor, subcmd, sizeof(subcmd));
+        if (token_is(subcmd, "w", "win", "window", NULL)) {
+            uint32_t amount = 10;
+            cursor = read_token(cursor, subcmd, sizeof(subcmd));
+            if (subcmd[0] != '\0') {
+                if (!parse_uint_decimal(subcmd, &amount) || amount > 65536) {
+                    terminal_add_line(&debug_term, "Usage: test window [amount (max 65536)]");
+                    return;
+                }
+            }
+            if (amount > MAX_TEST_WINDOWS) amount = MAX_TEST_WINDOWS;
+            test_window_count = (int)amount;
+            active_test_window = -1;
+            for (int i = 0; i < test_window_count; ++i) {
+                test_windows[i].open = true;
+                test_windows[i].x = 20 + (i % 30) * 6;
+                test_windows[i].y = 30 + (i % 20) * 6;
+                test_windows[i].w = 200;
+                test_windows[i].h = 120;
+                size_t nlen = 0;
+                memcpy_local(test_window_titles[i], "Window ", 8);
+                nlen = 7;
+                append_uint(test_window_titles[i], &nlen, sizeof(test_window_titles[i]), (uint32_t)(i + 1));
+                test_window_titles[i][nlen] = '\0';
+                test_windows[i].title = test_window_titles[i];
+            }
+            {
+                char msg[TERM_LINE_LEN];
+                int len = 0;
+                copy_string(msg, "Opened ", sizeof(msg));
+                len = (int)strlen_local(msg);
+                append_uint(msg, (size_t *)&len, sizeof(msg), amount);
+                copy_string(msg + len, " test windows.", sizeof(msg) - (size_t)len);
+                terminal_add_line(&debug_term, msg);
+            }
+        } else {
+            terminal_add_line(&debug_term, "Usage: test window [amount]");
+        }
     } else {
         terminal_add_line(&debug_term, "Unknown debugger command.");
     }

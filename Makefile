@@ -53,6 +53,8 @@ build/taskmgr_icon_asset.o \
 build/mines_icon_asset.o \
 build/snake_icon_asset.o \
 build/guessnum_icon_asset.o \
+build/paint_icon_asset.o \
+build/power_icon_asset.o \
 
 KERNEL_ENTRY := src/kernel/system/kernel.c
 KERNEL_FRAGMENTS := $(shell find src/driver src/kernel src/modes -name '*.c' ! -path '$(KERNEL_ENTRY)' | sort)
@@ -183,6 +185,12 @@ build/snake_icon.bin: src/modes/states/graphical/desktop/apps/snake/snake.png bu
 build/guessnum_icon.bin: src/modes/states/graphical/desktop/apps/guess_number/guessnum.png build/tools/png2indexed | build
 	build/tools/png2indexed $< $@
 
+build/paint_icon.bin: src/modes/states/graphical/desktop/apps/paint/paint.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
+build/power_icon.bin: src/modes/states/graphical/desktop/apps/power/power.png build/tools/png2indexed | build
+	build/tools/png2indexed $< $@
+
 build/login_asset.o: build/login.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
@@ -223,6 +231,12 @@ build/snake_icon_asset.o: build/snake_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/guessnum_icon_asset.o: build/guessnum_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/paint_icon_asset.o: build/paint_icon.bin
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+
+build/power_icon_asset.o: build/power_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/boot.o: src/kernel/system/boot.asm | build

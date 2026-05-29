@@ -1,3 +1,30 @@
+static void desktop_finish_rename(bool commit);
+static void desktop_copy_selected(int primary, bool cut);
+static void desktop_delete_selected(int primary);
+
+static void save_desktop_undo_state(void) {
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        desktop_undo_visible[i] = desktop_icon_visible[i];
+        desktop_undo_x[i] = desktop_icons[i].x;
+        desktop_undo_y[i] = desktop_icons[i].y;
+        copy_string(desktop_undo_names[i], desktop_icon_names[i], DESKTOP_ICON_NAME_MAX + 1);
+    }
+    desktop_undo_valid = true;
+}
+
+static void desktop_undo(void) {
+    if (!desktop_undo_valid) return;
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        desktop_icon_visible[i] = desktop_undo_visible[i];
+        desktop_icons[i].x = desktop_undo_x[i];
+        desktop_icons[i].y = desktop_undo_y[i];
+        copy_string(desktop_icon_names[i], desktop_undo_names[i], DESKTOP_ICON_NAME_MAX + 1);
+    }
+    selected_desktop_icon = -1;
+    memset_local(desktop_icon_multi_selected, 0, sizeof(desktop_icon_multi_selected));
+    desktop_undo_valid = false;
+}
+
 static int desktop_find_slot_for_app(AppId app) {
     for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
         if (!desktop_icon_visible[i] && desktop_icon_apps[i] == app) {
@@ -48,11 +75,78 @@ static void desktop_finish_rename(bool commit) {
     desktop_rename_len = 0;
 }
 
+static void desktop_paste_from_clipboard(int px, int py) {
+    if (!desktop_clipboard_valid || desktop_clipboard_count <= 0) {
+        return;
+    }
+    save_desktop_undo_state();
+    int pasted = 0;
+    for (int ci = 0; ci < desktop_clipboard_count; ++ci) {
+        int slot = desktop_find_slot_for_app(desktop_clipboard_apps[ci]);
+        if (slot >= 0) {
+            desktop_icon_apps[slot] = desktop_clipboard_apps[ci];
+            copy_string(desktop_icon_names[slot], desktop_clipboard_names[ci], sizeof(desktop_icon_names[slot]));
+            desktop_icons[slot].x = clampi(px, 0, OS_WIDTH - 56);
+            desktop_icons[slot].y = clampi(py + pasted * 28, 0, OS_HEIGHT - TASKBAR_H - 56);
+            desktop_icon_visible[slot] = true;
+            selected_desktop_icon = slot;
+            ++pasted;
+        }
+    }
+    if (desktop_clipboard_cut) {
+        desktop_clipboard_valid = false;
+        desktop_clipboard_cut = false;
+        desktop_clipboard_count = 0;
+    }
+    desktop_auto_grid_icons();
+}
+
+static void desktop_copy_selected(int primary, bool cut) {
+    if (primary < 0 || primary >= DESKTOP_ICON_COUNT) return;
+    desktop_clipboard_valid = true;
+    desktop_clipboard_cut = cut;
+    desktop_clipboard_count = 0;
+    desktop_clipboard_apps[desktop_clipboard_count] = desktop_icon_apps[primary];
+    copy_string(desktop_clipboard_names[desktop_clipboard_count], desktop_icon_names[primary], DESKTOP_ICON_NAME_MAX + 1);
+    ++desktop_clipboard_count;
+    for (int i = 0; i < DESKTOP_ICON_COUNT && desktop_clipboard_count < DESKTOP_ICON_COUNT; ++i) {
+        if (i != primary && desktop_icon_multi_selected[i] && desktop_icon_visible[i]) {
+            desktop_clipboard_apps[desktop_clipboard_count] = desktop_icon_apps[i];
+            copy_string(desktop_clipboard_names[desktop_clipboard_count], desktop_icon_names[i], DESKTOP_ICON_NAME_MAX + 1);
+            ++desktop_clipboard_count;
+        }
+    }
+    if (cut) {
+        save_desktop_undo_state();
+        for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+            if (i == primary || desktop_icon_multi_selected[i]) {
+                desktop_icon_visible[i] = false;
+            }
+        }
+        selected_desktop_icon = -1;
+        memset_local(desktop_icon_multi_selected, 0, sizeof(desktop_icon_multi_selected));
+        desktop_auto_grid_icons();
+    }
+}
+
+static void desktop_delete_selected(int primary) {
+    if (primary < 0 || primary >= DESKTOP_ICON_COUNT) return;
+    save_desktop_undo_state();
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        if (i == primary || desktop_icon_multi_selected[i]) {
+            desktop_icon_visible[i] = false;
+        }
+    }
+    selected_desktop_icon = -1;
+    memset_local(desktop_icon_multi_selected, 0, sizeof(desktop_icon_multi_selected));
+    desktop_auto_grid_icons();
+}
+
 static void handle_desktop_icon_menu_click(void) {
     if (!desktop_icon_menu_open || !mouse.left || mouse.prev_left) {
         return;
     }
-    if (!point_in_rect(mouse.x, mouse.y, desktop_icon_menu_x, desktop_icon_menu_y, 120, 84)) {
+    if (!point_in_rect(mouse.x, mouse.y, desktop_icon_menu_x, desktop_icon_menu_y, 120, 75)) {
         desktop_icon_menu_open = false;
         return;
     }
@@ -63,35 +157,16 @@ static void handle_desktop_icon_menu_click(void) {
         return;
     }
     if (row == 0 || row == 1) {
-        desktop_clipboard_valid = true;
-        desktop_clipboard_cut = row == 0;
-        desktop_clipboard_app = desktop_icon_apps[target];
-        copy_string(desktop_clipboard_name, desktop_icon_names[target], sizeof(desktop_clipboard_name));
-        if (row == 0) {
-            desktop_icon_visible[target] = false;
-            selected_desktop_icon = -1;
-        }
+        desktop_copy_selected(target, row == 0);
     } else if (row == 2 && desktop_clipboard_valid) {
-        int slot = desktop_find_slot_for_app(desktop_clipboard_app);
-        if (slot >= 0) {
-            desktop_icon_apps[slot] = desktop_clipboard_app;
-            copy_string(desktop_icon_names[slot], desktop_clipboard_name, sizeof(desktop_icon_names[slot]));
-            desktop_icons[slot].x = clampi(desktop_icon_menu_x + 16, 0, OS_WIDTH - 56);
-            desktop_icons[slot].y = clampi(desktop_icon_menu_y + 16, 0, OS_HEIGHT - TASKBAR_H - 56);
-            desktop_icon_visible[slot] = true;
-            selected_desktop_icon = slot;
-            if (desktop_clipboard_cut) {
-                desktop_clipboard_valid = false;
-                desktop_clipboard_cut = false;
-            }
-        }
+        desktop_paste_from_clipboard(desktop_icon_menu_x + 16, desktop_icon_menu_y + 16);
     } else if (row == 3) {
         desktop_begin_rename(target);
     } else if (row == 4) {
-        desktop_icon_visible[target] = false;
-        selected_desktop_icon = -1;
+        desktop_delete_selected(target);
     }
     desktop_icon_menu_open = false;
+    desktop_auto_grid_icons();
 }
 
 static void handle_start_app_menu_click(void) {
@@ -100,6 +175,7 @@ static void handle_start_app_menu_click(void) {
     }
     if (point_in_rect(mouse.x, mouse.y, start_app_menu_x, start_app_menu_y, 154, 28)) {
         desktop_pin_app(start_app_menu_app, 18, 24);
+        desktop_auto_grid_icons();
     }
     start_app_menu_open = false;
     menu_open = false;

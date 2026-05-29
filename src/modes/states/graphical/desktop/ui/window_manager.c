@@ -19,14 +19,15 @@ static void open_window(AppId app) {
                     (app == APP_TASK_MANAGER ? 440 :
                     (app == APP_POWER ? 220 :
                     (app == APP_GAME_CENTER ? 360 :
-                    (app == APP_PAINT ? 340 :
-                    (app == APP_EXPLORER ? 336 : 300)))));
+                    (app == APP_PAINT ? 368 :
+                    (app == APP_EXPLORER ? 336 :
+                    (app == APP_CMD ? 420 : 300))))));
         window->h = (app == APP_SETTINGS) ? 260 :
                     (app == APP_TASK_MANAGER ? 360 :
                     (app == APP_POWER ? 160 :
                     (app == APP_GAME_CENTER ? 230 :
                     (app == APP_MINES ? 250 :
-                    (app == APP_PAINT ? 240 :
+                    (app == APP_PAINT ? 290 :
                     (app == APP_EXPLORER ? 220 : 200))))));
         window->x = 70 + app * 18;
         window->y = 40 + app * 12;
@@ -70,6 +71,15 @@ static void close_window(AppId app) {
     if (app == APP_POWER) {
         power_menu_open = false;
         return;
+    }
+    if (windows[app].open && settings_applied.window_fade && app != APP_SETTINGS) {
+        window_fade_active = true;
+        window_fade_app = app;
+        window_fade_tick = timer_ticks;
+        window_fade_x = windows[app].x;
+        window_fade_y = windows[app].y;
+        window_fade_w = windows[app].w;
+        window_fade_h = windows[app].h;
     }
     if (windows[app].open) {
         serial_trace_concat("INFO", "Application Closed - ", app_titles[app]);

@@ -78,6 +78,7 @@ static void handle_scancode(uint8_t code) {
             case 0x50: enqueue_key(KEY_DOWN, 0); return;
             case 0x4B: enqueue_key(KEY_LEFT, 0); return;
             case 0x4D: enqueue_key(KEY_RIGHT, 0); return;
+            case 0x53: enqueue_key(KEY_DEL, 0); return;
             default: return;
         }
     }
@@ -90,6 +91,7 @@ static void handle_scancode(uint8_t code) {
         case 0x3B: enqueue_key(KEY_F1, 0); return;
         case 0x3C: enqueue_key(KEY_F2, 0); return;
         case 0x3E: enqueue_key(KEY_F4, 0); return;
+        case 0x53: enqueue_key(KEY_DEL, 0); return;
         default: {
             char ch = scancode_to_char(code, keyboard_shift);
             if (ch) {

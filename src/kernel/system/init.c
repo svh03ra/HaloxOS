@@ -62,8 +62,9 @@ static void init_state(void) {
     debug_memory_edit_nibble = -1;
     debug_edited_range_count = 0;
     debug_forced_fault_reason = NULL;
-    terminal_add_line(&boot_term, "help clear cls date time boot shutdown restart halt echo");
-    terminal_add_line(&cmd_term, "help clear cls date time boot shutdown restart halt echo");
+    cmd_term.wrap_chars = 51;
+    terminal_add_line(&cmd_term, "Welcome to HaloxOS Terminal:");
+    terminal_add_line(&cmd_term, "Type 'help' for show all comannds to use.");
     memset_local(paint_canvas, color_white, sizeof(paint_canvas));
     random_state = ((uint32_t)cmos_read(0x00) << 24) |
                    ((uint32_t)cmos_read(0x02) << 16) |

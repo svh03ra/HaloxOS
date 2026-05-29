@@ -22,7 +22,9 @@ static bool settings_dirty(void) {
     return settings_applied.palette_mode != settings_pending.palette_mode ||
            settings_applied.resolution_mode != settings_pending.resolution_mode ||
            settings_applied.widescreen != settings_pending.widescreen ||
-           settings_applied.background_mode != settings_pending.background_mode;
+           settings_applied.background_mode != settings_pending.background_mode ||
+           settings_applied.window_fade != settings_pending.window_fade ||
+           settings_applied.window_trails != settings_pending.window_trails;
 }
 
 static const char *palette_name(uint8_t index) {

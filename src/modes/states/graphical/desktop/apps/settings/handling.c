@@ -8,6 +8,8 @@ static void settings_handle_mouse(void) {
         settings_tab = 0;
     } else if (button_clicked(window->x + 90, window->y + 56, 80, 20)) {
         settings_tab = 1;
+    } else if (button_clicked(window->x + 176, window->y + 56, 60, 20)) {
+        settings_tab = 2;
     } else if (settings_tab == 0) {
         if (button_clicked(window->x + 178, window->y + 86, 20, 18) && live_palette_supported((uint8_t)((settings_pending.palette_mode + 2) % 3))) {
             settings_pending.palette_mode = (settings_pending.palette_mode + 2) % 3;
@@ -20,11 +22,17 @@ static void settings_handle_mouse(void) {
         } else if (button_clicked(window->x + 20, window->y + 148, 12, 12)) {
             settings_pending.widescreen = !settings_pending.widescreen;
         }
-    } else {
+    } else if (settings_tab == 1) {
         if (button_clicked(window->x + 170, window->y + 86, 20, 18)) {
             settings_pending.background_mode = (settings_pending.background_mode + 9) % 10;
         } else if (button_clicked(window->x + 358, window->y + 86, 20, 18)) {
             settings_pending.background_mode = (settings_pending.background_mode + 1) % 10;
+        }
+    } else if (settings_tab == 2) {
+        if (button_clicked(window->x + 20, window->y + 102, 12, 12)) {
+            settings_pending.window_fade = !settings_pending.window_fade;
+        } else if (button_clicked(window->x + 20, window->y + 150, 12, 12)) {
+            settings_pending.window_trails = !settings_pending.window_trails;
         }
     }
 

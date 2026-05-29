@@ -26,6 +26,10 @@ static void update_state(void) {
             open_window(APP_TASK_MANAGER);
             continue;
         }
+        if (system_state == STATE_DESKTOP && keyboard_ctrl && keyboard_alt && event.code == KEY_DEL) {
+            open_window(APP_POWER);
+            continue;
+        }
         switch (system_state) {
             case STATE_BOOT_MENU:
                 handle_boot_menu_keys(event);
@@ -54,5 +58,9 @@ static void update_state(void) {
     if (system_state == STATE_DESKTOP) {
         handle_desktop_mouse();
         update_snake();
+
+        if (window_fade_active && timer_ticks - window_fade_tick >= 18) {
+            window_fade_active = false;
+        }
     }
 }

@@ -11,8 +11,9 @@ static void render_boot_terminal_text(void) {
     int row = top_row;
 
     vga_text_clear(VGA_TEXT_ATTR_GRAY);
-    draw_text_mode_row(0, 0, "HaloxOS Command Prompt", VGA_TEXT_ATTR_GRAY);
-    draw_text_mode_row(1, 0, "Type 'boot' to start the desktop. ESC returns to boot menu.", VGA_TEXT_ATTR_GRAY);
+    draw_text_mode_row(0, 0, "Welcome to HaloxOS Command Prompt:", VGA_TEXT_ATTR_GRAY);
+    draw_text_mode_row(1, 0, "Type 'boot' to start the desktop | ESC returns to boot menu.", VGA_TEXT_ATTR_GRAY);
+    draw_text_mode_row(3, 0, "Type 'help' for show all comannds to use.", VGA_TEXT_ATTR_GRAY);
 
     for (int i = start; i < boot_term.line_count && row < top_row + max_rows; ++i, ++row) {
         draw_text_mode_row(row, 0, boot_term.lines[i], VGA_TEXT_ATTR_GRAY);

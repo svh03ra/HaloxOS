@@ -2,7 +2,7 @@
     HaloxOS - Version 1.0 Dev!
     Copyright Svh03ra (C) 2026, All rights reserved.
     Source File: kernel.c, main core.
-    Build: 28th May 2026
+    Build: 30th May 2026, 12:45 AM
 
     Made in AI used: GPT-5.5 for Visual Code Editor at Codex.
 */
@@ -34,6 +34,8 @@ extern const uint8_t _binary_build_taskmgr_icon_bin_start[];
 extern const uint8_t _binary_build_mines_icon_bin_start[];
 extern const uint8_t _binary_build_snake_icon_bin_start[];
 extern const uint8_t _binary_build_guessnum_icon_bin_start[];
+extern const uint8_t _binary_build_paint_icon_bin_start[];
+extern const uint8_t _binary_build_power_icon_bin_start[];
 
 #define OS_WIDTH 640
 #define OS_HEIGHT 480
@@ -97,6 +99,8 @@ extern const uint8_t _binary_build_guessnum_icon_bin_start[];
 #define TASKBAR_H 28
 #define DESKTOP_ICON_COUNT 11
 #define DESKTOP_ICON_NAME_MAX 50
+#define MAX_TEST_WINDOWS 1000
+#define TRAIL_COUNT 6
 #define MAX_TEXT 4096
 #define TERM_MAX_LINES 32
 #define TERM_LINE_LEN 72
@@ -114,8 +118,8 @@ extern const uint8_t _binary_build_guessnum_icon_bin_start[];
 #define TERMINAL_CURSOR_BLINK_TICKS 30
 #define SNAKE_STEP_TICKS 9
 #define PERF_UPDATE_TICKS 6
-#define PAINT_CANVAS_W 304
-#define PAINT_CANVAS_H 172
+#define PAINT_CANVAS_W 352
+#define PAINT_CANVAS_H 224
 #define GPU_GRID_COLS 24
 #define GPU_GRID_ROWS 12
 #define GPU_SWATCH_SIZE 10
@@ -149,7 +153,8 @@ typedef enum {
     KEY_UP,
     KEY_DOWN,
     KEY_LEFT,
-    KEY_RIGHT
+    KEY_RIGHT,
+    KEY_DEL
 } KeyCode;
 
 typedef struct {
@@ -283,6 +288,7 @@ typedef struct {
     int line_count;
     char input[TERM_LINE_LEN];
     int input_len;
+    int wrap_chars;
 } Terminal;
 
 typedef enum {
@@ -329,6 +335,8 @@ typedef struct {
     uint8_t resolution_mode;
     bool widescreen;
     uint8_t background_mode;
+    bool window_fade;
+    bool window_trails;
 } SettingsState;
 
 typedef enum {
@@ -489,6 +497,13 @@ static const char *debug_forced_fault_reason = NULL;
 static uint8_t paint_canvas[PAINT_CANVAS_W * PAINT_CANVAS_H];
 static uint8_t paint_color = 1;
 static uint8_t paint_brush_size = 1;
+static uint8_t paint_tool = 0;
+static int paint_text_x = -1;
+static int paint_text_y = -1;
+static uint8_t paint_clipboard[PAINT_CANVAS_W * PAINT_CANVAS_H];
+static uint8_t paint_undo_buffer[PAINT_CANVAS_W * PAINT_CANVAS_H];
+static bool paint_clipboard_valid = false;
+static bool paint_undo_valid = false;
 
 static int snake_x[SNAKE_MAX_SEGMENTS];
 static int snake_y[SNAKE_MAX_SEGMENTS];
@@ -516,13 +531,17 @@ static SettingsState settings_applied = {
     HALOXOS_CONFIG_PALETTE_MODE,
     HALOXOS_CONFIG_RESOLUTION_MODE,
     HALOXOS_CONFIG_WIDESCREEN != 0,
-    0
+    0,
+    false,
+    false
 };
 static SettingsState settings_pending = {
     HALOXOS_CONFIG_PALETTE_MODE,
     HALOXOS_CONFIG_RESOLUTION_MODE,
     HALOXOS_CONFIG_WIDESCREEN != 0,
-    0
+    0,
+    false,
+    false
 };
 static uint8_t settings_tab = 0;
 static uint8_t task_manager_tab = 0;
@@ -571,8 +590,9 @@ static bool desktop_icon_drag_moved = false;
 static bool desktop_icon_press_was_selected = false;
 static bool desktop_clipboard_valid = false;
 static bool desktop_clipboard_cut = false;
-static AppId desktop_clipboard_app = APP_NOTEPAD;
-static char desktop_clipboard_name[DESKTOP_ICON_NAME_MAX + 1];
+static int desktop_clipboard_count = 0;
+static AppId desktop_clipboard_apps[DESKTOP_ICON_COUNT];
+static char desktop_clipboard_names[DESKTOP_ICON_COUNT][DESKTOP_ICON_NAME_MAX + 1];
 static bool desktop_rename_active = false;
 static int desktop_rename_icon = -1;
 static char desktop_rename_buffer[DESKTOP_ICON_NAME_MAX + 1];
@@ -593,6 +613,60 @@ static int task_manager_gpu_scroll_drag_offset = 0;
 static uint32_t perf_window_start_cycles = 0;
 static uint32_t perf_busy_cycle_accum = 0;
 static bool perf_window_ready = false;
+
+static char test_window_titles[MAX_TEST_WINDOWS][32];
+static Window test_windows[MAX_TEST_WINDOWS];
+static int test_window_count = 0;
+static int active_test_window = -1;
+static int drag_test_window = -1;
+static int drag_test_offset_x = 0;
+static int drag_test_offset_y = 0;
+
+static int count_open_test_windows(void) {
+    int n = 0;
+    for (int i = 0; i < test_window_count; ++i) {
+        if (test_windows[i].open) ++n;
+    }
+    return n;
+}
+
+static bool desktop_select_dragging = false;
+static int desktop_select_x1 = 0;
+static int desktop_select_y1 = 0;
+static int desktop_select_x2 = 0;
+static int desktop_select_y2 = 0;
+static bool desktop_icon_multi_selected[DESKTOP_ICON_COUNT] = {false};
+static int desktop_icon_drag_start_x[DESKTOP_ICON_COUNT];
+static int desktop_icon_drag_start_y[DESKTOP_ICON_COUNT];
+static bool desktop_auto_grid = true;
+static bool desktop_undo_valid = false;
+static bool desktop_undo_visible[DESKTOP_ICON_COUNT];
+static int desktop_undo_x[DESKTOP_ICON_COUNT];
+static int desktop_undo_y[DESKTOP_ICON_COUNT];
+static char desktop_undo_names[DESKTOP_ICON_COUNT][DESKTOP_ICON_NAME_MAX + 1];
+static int taskbar_scroll = 0;
+static bool taskbar_menu_open = false;
+static int taskbar_menu_x = 0;
+static int taskbar_menu_y = 0;
+static int trail_x[TRAIL_COUNT];
+static int trail_y[TRAIL_COUNT];
+static int trail_w[TRAIL_COUNT];
+static int trail_h[TRAIL_COUNT];
+static uint32_t trail_tick[TRAIL_COUNT];
+static int trail_head = 0;
+static bool window_fade_active = false;
+static uint32_t window_fade_tick = 0;
+static AppId window_fade_app = APP_NOTEPAD;
+static int window_fade_x = 0;
+static int window_fade_y = 0;
+static int window_fade_w = 0;
+static int window_fade_h = 0;
+static uint32_t drag_anim_tick = 0;
+static uint32_t window_close_hover_tick = 0;
+static int context_menu_hover_row = -1;
+static uint32_t context_menu_hover_tick = 0;
+static int desktop_icon_menu_hover_row = -1;
+static uint32_t desktop_icon_menu_hover_tick = 0;
 
 extern void irq0_stub(void);
 extern void irq_default_stub(void);
