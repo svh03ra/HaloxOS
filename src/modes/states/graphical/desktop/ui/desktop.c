@@ -12,8 +12,8 @@ static void render_desktop(void) {
         }
     }
     render_taskbar();
-    draw_text(438, 430, "HaloxOS Version 1.0D", color_black, color_gray_light, true);
-    draw_text(438, 440, "For Testing purposes only", color_black, color_gray_light, true);
+    draw_text(480, 430, "HaloxOS Version 1.0", color_black, color_gray_light, true);
+    draw_text(480, 440, "Stable Copy.", color_black, color_gray_light, true);
     if (settings_applied.window_trails) {
         for (int i = 0; i < TRAIL_COUNT; ++i) {
             uint32_t age = timer_ticks - trail_tick[i];

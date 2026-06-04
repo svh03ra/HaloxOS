@@ -12,7 +12,7 @@ static void render_boot_menu(void) {
     draw_text_mode_center(8, "Hello World! Greetings HaloxOS!", VGA_TEXT_ATTR_BLUE);
     draw_text_mode_center(9, "Select an option to choose boot:", VGA_TEXT_ATTR_BLUE);
     draw_text_mode_center(12, "1) Main Boot", VGA_TEXT_ATTR_GRAY);
-    draw_text_mode_center(14, "2) Command Prompt", VGA_TEXT_ATTR_GRAY);
+    draw_text_mode_center(13, "2) Command Prompt", VGA_TEXT_ATTR_GRAY);
     if (boot_status_text[0] != '\0') {
         draw_text_mode_center(21, boot_status_text, VGA_TEXT_ATTR_GRAY);
     }

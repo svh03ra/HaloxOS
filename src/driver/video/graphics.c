@@ -1,3 +1,9 @@
+enum {
+    MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED = 0,
+    MULTIBOOT_FRAMEBUFFER_TYPE_RGB = 1,
+    MULTIBOOT_FRAMEBUFFER_TYPE_EGA_TEXT = 2
+};
+
 static uint8_t nearest_color(uint8_t r, uint8_t g, uint8_t b) {
     uint32_t best_distance = 0xFFFFFFFFu;
     uint8_t best_index = 0;
@@ -32,6 +38,87 @@ static void init_theme_colors(void) {
     color_pink = nearest_color(220, 140, 180);
     color_desktop_icon = nearest_color(245, 245, 245);
     paint_color = color_black;
+}
+
+static bool framebuffer_text_mode_active(void) {
+    return boot_text_mode && video_backend == VIDEO_BACKEND_MULTIBOOT && fb.address != NULL;
+}
+
+static uint8_t text_attr_foreground(uint8_t attr) {
+    switch (attr & 0x0Fu) {
+        case 0x0: return color_black;
+        case 0x1: return color_blue_dark;
+        case 0x4: return color_red;
+        case 0x7: return color_gray_light;
+        case 0x9: return color_blue;
+        case 0xF: return color_white;
+        default: return color_white;
+    }
+}
+
+static uint8_t text_attr_background(uint8_t attr) {
+    switch ((attr >> 4) & 0x07u) {
+        case 0x1: return color_blue_dark;
+        case 0x4: return color_red;
+        case 0x7: return color_gray_light;
+        default: return color_black;
+    }
+}
+
+static void set_default_framebuffer_format(uint8_t bpp) {
+    fb.type = bpp == 8 ? MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED : MULTIBOOT_FRAMEBUFFER_TYPE_RGB;
+    if (bpp == 15) {
+        fb.red_position = 10;
+        fb.red_mask_size = 5;
+        fb.green_position = 5;
+        fb.green_mask_size = 5;
+        fb.blue_position = 0;
+        fb.blue_mask_size = 5;
+    } else if (bpp == 16) {
+        fb.red_position = 11;
+        fb.red_mask_size = 5;
+        fb.green_position = 5;
+        fb.green_mask_size = 6;
+        fb.blue_position = 0;
+        fb.blue_mask_size = 5;
+    } else {
+        fb.red_position = 16;
+        fb.red_mask_size = 8;
+        fb.green_position = 8;
+        fb.green_mask_size = 8;
+        fb.blue_position = 0;
+        fb.blue_mask_size = 8;
+    }
+}
+
+static bool framebuffer_bpp_supported(uint8_t type, uint8_t bpp) {
+    if (type == MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED) {
+        return bpp == 8;
+    }
+    if (type == MULTIBOOT_FRAMEBUFFER_TYPE_RGB) {
+        return bpp == 15 || bpp == 16 || bpp == 24 || bpp == 32;
+    }
+    return false;
+}
+
+static uint32_t scale_channel_to_mask(uint8_t value, uint8_t bits) {
+    uint32_t max_value;
+
+    if (bits == 0) {
+        return 0;
+    }
+    if (bits >= 8) {
+        return value;
+    }
+
+    max_value = (1u << bits) - 1u;
+    return ((uint32_t)value * max_value + 127u) / 255u;
+}
+
+static uint32_t pack_framebuffer_color(Color color) {
+    return (scale_channel_to_mask(color.r, fb.red_mask_size) << fb.red_position) |
+           (scale_channel_to_mask(color.g, fb.green_mask_size) << fb.green_position) |
+           (scale_channel_to_mask(color.b, fb.blue_mask_size) << fb.blue_position);
 }
 
 static void program_vga_palette(void) {
@@ -70,16 +157,35 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
     }
 
     if ((mbi->flags & (1u << 12)) != 0) {
-        fb.address = (uint8_t *)(uintptr_t)mbi->framebuffer_addr;
-        fb.width = mbi->framebuffer_width;
-        fb.height = mbi->framebuffer_height;
-        fb.pitch = mbi->framebuffer_pitch;
-        fb.bpp = mbi->framebuffer_bpp;
+        uint8_t framebuffer_type = mbi->framebuffer_type;
+        if (mbi->framebuffer_addr <= 0xFFFFFFFFull &&
+            framebuffer_bpp_supported(framebuffer_type, mbi->framebuffer_bpp)) {
+            fb.address = (uint8_t *)(uintptr_t)mbi->framebuffer_addr;
+            fb.width = mbi->framebuffer_width;
+            fb.height = mbi->framebuffer_height;
+            fb.pitch = mbi->framebuffer_pitch;
+            fb.bpp = mbi->framebuffer_bpp;
+            fb.type = framebuffer_type;
+        }
         if (fb.address != NULL &&
             fb.width >= OS_WIDTH &&
             fb.height >= OS_HEIGHT &&
             fb.width <= MAX_OUTPUT_WIDTH &&
-            fb.height <= MAX_OUTPUT_HEIGHT) {
+            fb.height <= MAX_OUTPUT_HEIGHT &&
+            fb.pitch >= fb.width * ((fb.bpp + 7u) / 8u)) {
+            if (fb.type == MULTIBOOT_FRAMEBUFFER_TYPE_RGB &&
+                mbi->framebuffer_red_mask_size != 0 &&
+                mbi->framebuffer_green_mask_size != 0 &&
+                mbi->framebuffer_blue_mask_size != 0) {
+                fb.red_position = mbi->framebuffer_red_field_position;
+                fb.red_mask_size = mbi->framebuffer_red_mask_size;
+                fb.green_position = mbi->framebuffer_green_field_position;
+                fb.green_mask_size = mbi->framebuffer_green_mask_size;
+                fb.blue_position = mbi->framebuffer_blue_field_position;
+                fb.blue_mask_size = mbi->framebuffer_blue_mask_size;
+            } else {
+                set_default_framebuffer_format(fb.bpp);
+            }
             video_backend = VIDEO_BACKEND_MULTIBOOT;
             update_present_maps();
             return true;
@@ -103,13 +209,18 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
     fb.height = OS_HEIGHT;
     fb.pitch = OS_WIDTH;
     fb.bpp = 8;
+    set_default_framebuffer_format(fb.bpp);
     video_backend = VIDEO_BACKEND_BGA;
     update_present_maps();
     return true;
 }
 
 static void present(void) {
-    if (boot_text_mode) {
+    if (boot_text_mode && !framebuffer_text_mode_active()) {
+        return;
+    }
+
+    if (fb.address == NULL) {
         return;
     }
 
@@ -136,10 +247,11 @@ static void present(void) {
             continue;
         }
 
-        if (fb.bpp == 16) {
+        if (fb.bpp == 15 || fb.bpp == 16) {
             uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
-                dest[x] = backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]];
+                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
+                dest[x] = (uint16_t)pack_framebuffer_color(c);
             }
             continue;
         }
@@ -148,9 +260,10 @@ static void present(void) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             for (uint32_t x = 0; x < fb.width; ++x) {
                 Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
-                dest[x * 3 + 0] = c.b;
-                dest[x * 3 + 1] = c.g;
-                dest[x * 3 + 2] = c.r;
+                uint32_t packed = pack_framebuffer_color(c);
+                dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
+                dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
+                dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
             }
             continue;
         }
@@ -159,7 +272,7 @@ static void present(void) {
             uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
                 Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
-                dest[x] = ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b;
+                dest[x] = pack_framebuffer_color(c);
             }
         }
     }
@@ -304,7 +417,35 @@ static void draw_text_center_scaled(int center_x, int y, const char *text, uint8
     draw_text_scaled(x, y, text, fg, bg, transparent, scale);
 }
 
+static void framebuffer_text_write_at(int col, int row, const char *text, uint8_t attr) {
+    uint8_t fg = text_attr_foreground(attr);
+    uint8_t bg = text_attr_background(attr);
+    int x;
+    int y;
+
+    if (row < 0 || row >= VGA_TEXT_ROWS || col >= VGA_TEXT_COLS) {
+        return;
+    }
+
+    if (col < 0) {
+        text -= col;
+        col = 0;
+    }
+
+    x = col * 8;
+    y = row * 16;
+    for (int i = 0; text[i] != '\0' && col + i < VGA_TEXT_COLS; ++i) {
+        fill_rect(x + i * 8, y, 8, 16, bg);
+        draw_char(x + i * 8, y + 4, text[i], fg, bg, true);
+    }
+}
+
 static void vga_text_write_at(int col, int row, const char *text, uint8_t attr) {
+    if (framebuffer_text_mode_active()) {
+        framebuffer_text_write_at(col, row, text, attr);
+        return;
+    }
+
     if (row < 0 || row >= VGA_TEXT_ROWS || col >= VGA_TEXT_COLS) {
         return;
     }
@@ -320,17 +461,30 @@ static void vga_text_write_at(int col, int row, const char *text, uint8_t attr) 
 }
 
 static void vga_text_clear(uint8_t attr) {
+    if (framebuffer_text_mode_active()) {
+        clear_screen(text_attr_background(attr));
+        return;
+    }
+
     for (int i = 0; i < VGA_TEXT_COLS * VGA_TEXT_ROWS; ++i) {
         vga_text_buffer[i] = ((uint16_t)attr << 8) | ' ';
     }
 }
 
 static void vga_text_disable_cursor(void) {
+    if (framebuffer_text_mode_active()) {
+        return;
+    }
+
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x20);
 }
 
 static void vga_text_enable_cursor(uint8_t cursor_start, uint8_t cursor_end) {
+    if (framebuffer_text_mode_active()) {
+        return;
+    }
+
     outb(0x3D4, 0x0A);
     outb(0x3D5, (uint8_t)((inb(0x3D5) & 0xC0) | cursor_start));
     outb(0x3D4, 0x0B);
@@ -339,6 +493,11 @@ static void vga_text_enable_cursor(uint8_t cursor_start, uint8_t cursor_end) {
 
 static void vga_text_set_cursor(int col, int row) {
     uint16_t pos = (uint16_t)(row * VGA_TEXT_COLS + col);
+    if (framebuffer_text_mode_active()) {
+        fill_rect(col * 8, row * 16 + 14, 8, 2, color_gray_light);
+        return;
+    }
+
     outb(0x3D4, 0x0F);
     outb(0x3D5, (uint8_t)(pos & 0xFFu));
     outb(0x3D4, 0x0E);

@@ -39,8 +39,8 @@ extern const uint8_t _binary_build_power_icon_bin_start[];
 
 #define OS_WIDTH 640
 #define OS_HEIGHT 480
-#define MAX_OUTPUT_WIDTH 1280
-#define MAX_OUTPUT_HEIGHT 720
+#define MAX_OUTPUT_WIDTH 1920
+#define MAX_OUTPUT_HEIGHT 1200
 
 #if HALOXOS_CONFIG_DEBUG != 0 && HALOXOS_CONFIG_DEBUG != 1
 #error "HALOXOS_CONFIG_DEBUG must be 0 or 1"
@@ -196,7 +196,12 @@ typedef struct {
     uint32_t framebuffer_height;
     uint8_t framebuffer_bpp;
     uint8_t framebuffer_type;
-    uint16_t reserved;
+    uint8_t framebuffer_red_field_position;
+    uint8_t framebuffer_red_mask_size;
+    uint8_t framebuffer_green_field_position;
+    uint8_t framebuffer_green_mask_size;
+    uint8_t framebuffer_blue_field_position;
+    uint8_t framebuffer_blue_mask_size;
 } __attribute__((packed)) MultibootInfo;
 
 typedef struct {
@@ -234,6 +239,13 @@ typedef struct {
     uint32_t height;
     uint32_t pitch;
     uint8_t bpp;
+    uint8_t type;
+    uint8_t red_position;
+    uint8_t red_mask_size;
+    uint8_t green_position;
+    uint8_t green_mask_size;
+    uint8_t blue_position;
+    uint8_t blue_mask_size;
 } Framebuffer;
 
 typedef struct {
@@ -447,6 +459,7 @@ static int drag_offset_x = 0;
 static int drag_offset_y = 0;
 static bool cpu_halted_overlay = false;
 static bool shutdown_pending = false;
+static bool shutdown_poweroff_failed = false;
 static uint32_t random_state = 1;
 static volatile uint32_t timer_ticks = 0;
 static uint32_t last_input_tick = 0;
@@ -707,6 +720,7 @@ extern void idt_load(const IdtPointer *pointer);
 extern void cpu_halt_once(void);
 
 static void program_vga_palette(void);
+static void set_default_framebuffer_format(uint8_t bpp);
 static uint16_t palette_rgb565(uint8_t color);
 static Color rgb565_to_color(uint16_t value);
 static void apply_settings(void);

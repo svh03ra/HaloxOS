@@ -6,6 +6,10 @@ CC := gcc
 LD := ld
 HOSTCC := gcc
 
+CONFIG_SCREEN_WIDTH := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_WIDTH[[:space:]]*//p' src/config/config.h)
+CONFIG_SCREEN_HEIGHT := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_HEIGHT[[:space:]]*//p' src/config/config.h)
+CONFIG_SCREEN_DEPTH := 0
+ASFLAGS := -DHALOXOS_BOOT_SCREEN_WIDTH=$(CONFIG_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(CONFIG_SCREEN_HEIGHT) -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH)
 CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -Ibuild/generated
 LDFLAGS := -T linker.ld
 HOSTCFLAGS := -std=c11 -O2 -Wall -Wextra $(shell pkg-config --cflags libpng)
@@ -240,7 +244,7 @@ build/power_icon_asset.o: build/power_icon.bin
 	$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 build/boot.o: src/kernel/system/boot.asm | build
-	$(AS) -f elf32 -o $@ $<
+	$(AS) $(ASFLAGS) -f elf32 -o $@ $<
 
 build/interrupts.o: src/kernel/system/interrupts.asm | build
 	$(AS) -f elf32 -o $@ $<

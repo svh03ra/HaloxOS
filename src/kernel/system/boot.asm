@@ -5,9 +5,33 @@
 
 section .multiboot
 align 4
-    dd 0x1BADB002
-    dd 0x00000003
-    dd -(0x1BADB002 + 0x00000003)
+%ifndef HALOXOS_BOOT_SCREEN_WIDTH
+%define HALOXOS_BOOT_SCREEN_WIDTH 640
+%endif
+
+%ifndef HALOXOS_BOOT_SCREEN_HEIGHT
+%define HALOXOS_BOOT_SCREEN_HEIGHT 480
+%endif
+
+%ifndef HALOXOS_BOOT_SCREEN_DEPTH
+%define HALOXOS_BOOT_SCREEN_DEPTH 0
+%endif
+
+MB_MAGIC equ 0x1BADB002
+MB_FLAGS equ 0x00000007
+
+    dd MB_MAGIC
+    dd MB_FLAGS
+    dd -(MB_MAGIC + MB_FLAGS)
+    dd 0
+    dd 0
+    dd 0
+    dd 0
+    dd 0
+    dd 0
+    dd HALOXOS_BOOT_SCREEN_WIDTH
+    dd HALOXOS_BOOT_SCREEN_HEIGHT
+    dd HALOXOS_BOOT_SCREEN_DEPTH
 
 section .text
 global start

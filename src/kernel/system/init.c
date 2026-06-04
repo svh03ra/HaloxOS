@@ -152,7 +152,11 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
         if (system_state == STATE_SHUTDOWN) {
             draw_everything();
             present();
-            attempt_poweroff();
+            if (!attempt_poweroff()) {
+                shutdown_poweroff_failed = true;
+                draw_everything();
+                present();
+            }
             __asm__ volatile ("cli");
             for (;;) {
                 __asm__ volatile ("hlt");

@@ -401,6 +401,7 @@ static bool init_vmware_svga_backend(void) {
     fb.height = OS_HEIGHT;
     fb.pitch = OS_WIDTH;
     fb.bpp = 8;
+    set_default_framebuffer_format(fb.bpp);
     update_present_maps();
     video_backend = VIDEO_BACKEND_VMWARE_SVGA;
     return true;
@@ -494,8 +495,15 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
         return true;
     }
 
-    if (video_backend == VIDEO_BACKEND_MULTIBOOT || video_backend == VIDEO_BACKEND_NONE) {
-        return width == fb.width && height == fb.height && bpp == fb.bpp;
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
+        (void)width;
+        (void)height;
+        (void)bpp;
+        return fb.address != NULL && fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT;
+    }
+
+    if (video_backend == VIDEO_BACKEND_NONE) {
+        return false;
     }
 
     if (!video_mode_switch_available) {
