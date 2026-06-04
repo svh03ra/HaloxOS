@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, paint app input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void paint_flood_fill(int x, int y, uint8_t new_color) {
     uint8_t old_color = paint_canvas[y * PAINT_CANVAS_W + x];
     if (old_color == new_color) return;

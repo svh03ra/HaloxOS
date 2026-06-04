@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, settings input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void settings_handle_mouse(void) {
     if (!windows[APP_SETTINGS].open || active_window != APP_SETTINGS || !mouse.left || mouse.prev_left) {
         return;

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: explorer.c, file explorer app.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_explorer(const Window *window) {
     static const char *names[] = {
         "Desktop",

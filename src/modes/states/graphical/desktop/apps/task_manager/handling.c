@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, task manager input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void task_manager_handle_mouse(void) {
     if (windows[APP_TASK_MANAGER].open && active_window == APP_TASK_MANAGER && mouse.left && !mouse.prev_left) {
         Window *window = &windows[APP_TASK_MANAGER];

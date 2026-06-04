@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: desktop_icons.c, desktop icon rendering and logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static const uint8_t *app_icon_image(AppId app) {
     switch (app) {
         case APP_NOTEPAD: return _binary_build_notepad_icon_bin_start;
@@ -275,4 +280,3 @@ static void draw_desktop_background(void) {
         clear_screen(solid_color_index(settings_applied.background_mode));
     }
 }
-

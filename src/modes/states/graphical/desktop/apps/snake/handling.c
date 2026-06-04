@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, snake input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void snake_spawn_food(void) {
     bool occupied = true;
     while (occupied) {
@@ -62,4 +67,3 @@ static void update_snake(void) {
         snake_spawn_food();
     }
 }
-

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, power menu input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static bool power_handle_overlay_mouse(void) {
     if (!power_menu_open || !mouse.left || mouse.prev_left) {
         return false;

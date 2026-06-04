@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: paint.c, paint app.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_paint(const Window *window) {
     int canvas_x = window->x + 8;
     int canvas_y = window->y + 52;

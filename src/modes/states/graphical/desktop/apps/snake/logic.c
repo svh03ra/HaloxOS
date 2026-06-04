@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: logic.c, snake game logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static void reset_snake(void) {
     snake_length = 4;
     snake_dir = 1;

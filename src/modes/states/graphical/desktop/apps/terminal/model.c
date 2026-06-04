@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: model.c, terminal data model.
+
+// This repository is licensed under the GNU General Public License.
+
 static void terminal_reset(Terminal *term) {
     memset_local(term, 0, sizeof(*term));
 }

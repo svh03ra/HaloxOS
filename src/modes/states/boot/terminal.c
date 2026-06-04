@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: terminal.c, boot terminal text renderer.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_boot_terminal_text(void) {
     uint32_t blink_phase = timer_ticks / TERMINAL_CURSOR_BLINK_TICKS;
 

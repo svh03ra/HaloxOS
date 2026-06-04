@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: render.c, settings rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_settings(const Window *window) {
     char resolution[24] = {0};
     char current_mode[24] = {0};

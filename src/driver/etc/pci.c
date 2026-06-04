@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: pci.c, PCI configuration driver.
+
+// This repository is licensed under the GNU General Public License.
+
 static uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
     uint32_t address = 0x80000000u |
                        ((uint32_t)bus << 16) |

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: ata.c, ATA PATA storage driver.
+
+// This repository is licensed under the GNU General Public License.
+
 static bool ata_wait_ready(uint16_t status_port) {
     for (int i = 0; i < 100000; ++i) {
         uint8_t status = inb(status_port);

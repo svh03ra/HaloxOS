@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: widgets.c, common UI widget rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void draw_button(int x, int y, int w, int h, const char *label, uint8_t fill, uint8_t border, uint8_t text) {
     bool hover = point_in_rect(mouse.x, mouse.y, x, y, w, h);
     bool pressed = hover && mouse.left;
@@ -88,4 +93,3 @@ static bool button_clicked(int x, int y, int w, int h) {
 static bool button_right_clicked(int x, int y, int w, int h) {
     return point_in_rect(mouse.x, mouse.y, x, y, w, h) && mouse.right && !mouse.prev_right;
 }
-

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: shell.c, taskbar shell rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_taskbar(void) {
     char datetime[40] = {0};
     int total_open = 0;
@@ -262,4 +267,3 @@ static void render_start_app_menu(void) {
     draw_interactive_row(x, y, w, h, "Pin to Desktop Icon", color_black, hover, pressed, 0);
     draw_rect(x, y, w, h, color_black);
 }
-

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: context_menu.c, desktop context menu logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static void handle_taskbar_menu_click(void) {
     if (!taskbar_menu_open || !mouse.left || mouse.prev_left) {
         return;

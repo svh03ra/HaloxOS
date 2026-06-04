@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: game_center.c, game center app.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_game_center(const Window *window) {
     static const char *games[] = {"Minesweeper", "Snake", "Guess Number"};
     static const AppId game_apps[] = {APP_MINES, APP_SNAKE, APP_GUESS};

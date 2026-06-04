@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: system_api.c, task manager system API.
+
+// This repository is licensed under the GNU General Public License.
+
 static int open_window_count(void) {
     int count = 0;
     for (int app = 0; app < APP_COUNT; ++app) {

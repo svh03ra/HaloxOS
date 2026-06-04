@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: logic.c, minesweeper game logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static void mines_place(void) {
     memset_local(mines_value, 0, sizeof(mines_value));
     memset_local(mines_revealed, 0, sizeof(mines_revealed));

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: graphics.c, framebuffer graphics rendering driver.
+
+// This repository is licensed under the GNU General Public License.
+
 enum {
     MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED = 0,
     MULTIBOOT_FRAMEBUFFER_TYPE_RGB = 1,

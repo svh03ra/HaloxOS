@@ -1,8 +1,8 @@
 /*
-    HaloxOS - Version 1.0 Dev!
+    HaloxOS - Version 1.0 Release!
     Copyright Svh03ra (C) 2026, All rights reserved.
     Source File: kernel.c, main core.
-    Build: 30th May 2026, 12:45 AM
+    Build: 4th June 2026.
 
     Made in AI used: GPT-5.5 for Visual Code Editor at Codex.
 */

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: window_manager.c, window management logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static void open_window(AppId app) {
     Window *window = &windows[app];
     menu_open = false;

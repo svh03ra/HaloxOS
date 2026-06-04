@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, file explorer input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void explorer_handle_mouse(void) {
     if (active_window != APP_EXPLORER || !windows[APP_EXPLORER].open) {
         return;

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: video_modes.c, VBE video mode switching driver.
+
+// This repository is licensed under the GNU General Public License.
+
 #define VBE_DISPI_IOPORT_INDEX 0x01CE
 #define VBE_DISPI_IOPORT_DATA 0x01CF
 #define VBE_DISPI_INDEX_ID 0x0

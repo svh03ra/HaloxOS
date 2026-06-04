@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, minesweeper input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void reveal_mines(int x, int y) {
     if (x < 0 || y < 0 || x >= MINES_SIZE || y >= MINES_SIZE) {
         return;

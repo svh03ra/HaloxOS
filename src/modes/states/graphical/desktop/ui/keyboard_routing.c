@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: keyboard_routing.c, desktop keyboard input routing.
+
+// This repository is licensed under the GNU General Public License.
+
 static void desktop_paste_from_clipboard(int px, int py);
 static void desktop_copy_selected(int primary, bool cut);
 static void desktop_delete_selected(int primary);
@@ -180,5 +185,4 @@ static void handle_text_target(KeyEvent event) {
             set_active_window(APP_PAINT);
         }
     }
-}
 }

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: render.c, minesweeper rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_mines(const Window *window) {
     int gx = window->x + 18;
     int gy = window->y + 34;

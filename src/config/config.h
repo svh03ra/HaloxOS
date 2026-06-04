@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: config.h, build-time configuration header.
+
+// This repository is licensed under the GNU General Public License.
+
 #ifndef HALOXOS_CONFIG_H
 #define HALOXOS_CONFIG_H
 

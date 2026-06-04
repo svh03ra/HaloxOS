@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: power.c, power menu app.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_power(const Window *window) {
     int x = window->x + 20;
     int y = window->y + 36;

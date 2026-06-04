@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: redraw.c, desktop redraw timing logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static bool desktop_should_redraw(void) {
     uint32_t second = timer_ticks / TIMER_HZ;
     uint32_t perf_phase = timer_ticks / PERF_UPDATE_TICKS;

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: cursor.c, desktop cursor and icon rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_desktop_icons(void) {
     for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
         draw_desktop_icon(i, i == selected_desktop_icon || desktop_icon_multi_selected[i]);

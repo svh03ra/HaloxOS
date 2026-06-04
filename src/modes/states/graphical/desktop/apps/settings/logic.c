@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: logic.c, settings logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static void apply_settings(void) {
     SettingsState next = settings_pending;
     bool video_changed = settings_applied.palette_mode != next.palette_mode ||

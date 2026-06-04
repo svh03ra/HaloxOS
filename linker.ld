@@ -1,3 +1,7 @@
+/* Copyright Svh03ra (C) 2026, All rights reserved */
+/* Source File: linker.ld, kernel linker script. */
+/* This repository is licensed under the GNU General Public License. */
+
 ENTRY(start)
 
 SECTIONS

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: login.c, login screen rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_login(void) {
     const char *line1 = "Welcome! Enter to your login access:";
     const char *line2 = "Press ENTER to start";

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: icon_actions.c, desktop icon actions (rename, copy, delete).
+
+// This repository is licensed under the GNU General Public License.
+
 static void desktop_finish_rename(bool commit);
 static void desktop_copy_selected(int primary, bool cut);
 static void desktop_delete_selected(int primary);

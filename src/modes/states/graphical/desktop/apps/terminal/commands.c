@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: commands.c, terminal command execution.
+
+// This repository is licensed under the GNU General Public License.
+
 static void execute_terminal_command(Terminal *term, bool boot_console) {
     char command[TERM_LINE_LEN];
     copy_string(command, term->input, sizeof(command));
@@ -84,4 +89,3 @@ static void terminal_handle_key(Terminal *term, KeyEvent event, bool boot_consol
         }
     }
 }
-

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, game center input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void game_center_handle_mouse(void) {
     if (!windows[APP_GAME_CENTER].open || active_window != APP_GAME_CENTER || !mouse.left || mouse.prev_left) {
         return;

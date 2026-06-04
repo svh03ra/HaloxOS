@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: handling.c, guess number input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void handle_guess_submit(void) {
     int value = 0;
     for (int i = 0; i < guess_input_len; ++i) {

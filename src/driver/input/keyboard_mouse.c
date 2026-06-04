@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: keyboard_mouse.c, keyboard and mouse input driver.
+
+// This repository is licensed under the GNU General Public License.
+
 static void enqueue_key(KeyCode code, char ch) {
     int next = (key_tail + 1) % 64;
     if (next == key_head) {

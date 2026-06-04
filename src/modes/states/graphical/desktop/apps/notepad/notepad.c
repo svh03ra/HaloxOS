@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: notepad.c, notepad app.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_notepad(const Window *window) {
     int tx = window->x + 6;
     int ty = window->y + 24;

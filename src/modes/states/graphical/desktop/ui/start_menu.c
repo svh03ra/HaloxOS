@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: start_menu.c, start menu logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static bool start_menu_row_app(int row, AppId *app_out) {
     switch (row) {
         case 0: *app_out = APP_NOTEPAD; return true;

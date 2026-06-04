@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: render.c, task manager rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_task_manager(const Window *window) {
     char cpu_speed[32] = {0};
     char ram_total[32] = {0};

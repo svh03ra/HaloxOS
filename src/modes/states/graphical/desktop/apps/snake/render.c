@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: render.c, snake rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void render_snake(const Window *window) {
     char score[24] = {0};
     int ox = window->x + 20;

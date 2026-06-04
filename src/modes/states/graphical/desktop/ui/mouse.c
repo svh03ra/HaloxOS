@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: mouse.c, desktop mouse input handling.
+
+// This repository is licensed under the GNU General Public License.
+
 static void handle_desktop_mouse(void) {
     bool pointer_over_window = false;
     bool clicked = mouse.left && !mouse.prev_left;

@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: logic.c, guess number game logic.
+
+// This repository is licensed under the GNU General Public License.
+
 static void reset_guess(void) {
     guess_input_len = 0;
     guess_input[0] = '\0';

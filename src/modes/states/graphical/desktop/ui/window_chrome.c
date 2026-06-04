@@ -1,3 +1,8 @@
+// Copyright Svh03ra (C) 2026, All rights reserved
+// Source File: window_chrome.c, window chrome rendering.
+
+// This repository is licensed under the GNU General Public License.
+
 static void draw_window_chrome(const Window *window) {
     bool is_test = (window >= test_windows && window < test_windows + MAX_TEST_WINDOWS);
     int app_idx;
