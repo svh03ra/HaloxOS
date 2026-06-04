@@ -1,6 +1,7 @@
 # HaloxOS
 _100% **REAL** OS, Built from **SCRATCH**, Made with **AI**:_
-<img width="640" height="480" src="https://github.com/user-attachments/assets/192f7fb1-f370-4aba-b947-256ec8b5cf0e" />
+
+<img width="640" height="480" alt="Test-2026-06-04-07-09-04" src="https://github.com/user-attachments/assets/d2a1409c-045a-4636-842a-33d38c8c0d8e" />
 
 _<sup>(Graphical Demonstration included)</sup>_
 
@@ -88,6 +89,7 @@ First of all, you need to understand what you will do in order to follow the ins
 - For use the `make run serial` command for debugging:
 
 _Remember to remind this, make sure the `HALOXOS_CONFIG_DEBUG` variable is enabled in `src/config.config.h` before running it to be ready!_
+_At the starts from graphical desktop mode, but you just do to open the debugger terminal as press **Ctrl+Shift+Enter** to use._
 - To use `make clean` command to remove build artifacts for quick recovery.
 
 ## ⚖️ License:
