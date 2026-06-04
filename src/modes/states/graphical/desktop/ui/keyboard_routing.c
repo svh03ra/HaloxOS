@@ -186,3 +186,4 @@ static void handle_text_target(KeyEvent event) {
         }
     }
 }
+}
