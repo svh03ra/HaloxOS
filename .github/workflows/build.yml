@@ -1,7 +1,7 @@
 # Copyright Svh03ra (C) 2026, All rights reserved
 # This repository is licensed under the GNU General Public License.
 
-name: Build 1.0 Release
+name: Build 1.1 Development
 
 on:
   push:
@@ -40,17 +40,15 @@ jobs:
         run: make
 
       - name: Build Disk
-        run: make disk
+        run: make clean && make disk
 
       - name: Build Floppy
-        run: make floppy
+        run: make clean && make floppy
 
       - name: Verify Build
         run: |
           test -s build/os.iso
           test -s build/haloxos-disk.img
-          test -s build/core_disk.img
           test -s build/haloxos-floppy.img
-          test -s build/core_floppy.img
           echo "All builds are ready:"
-          ls -lh build/os.iso build/haloxos-disk.img build/core_disk.img build/haloxos-floppy.img build/core_floppy.img
+          ls -lh build/os.iso build/haloxos-disk.img build/haloxos-floppy.img

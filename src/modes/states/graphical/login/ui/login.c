@@ -36,7 +36,7 @@ static void render_login(void) {
     draw_text(text_x, 190, line1, color_black, 0, true);
     draw_text(text_x, 216, line2, color_black, 0, true);
     draw_text(text_x, 227, line3, color_black, 0, true);
-    draw_text(505, 10, "Version 1.0:", color_black, color_gray_light, true);
+    draw_text(505, 10, "Version 1.1 DEV:", color_black, color_gray_light, true);
     draw_text(505, 20, HALOXOS_BUILD_TEXT, color_black, color_gray_light, true);
     draw_text_center(OS_WIDTH / 2, 460, "(C) 2026 Svh03ra, " HALOXOS_LOGIN_MTXT, color_black, color_gray_light, true);
     draw_text_center(OS_WIDTH / 2, 450, "Available here! https://github.com/svh03ra/HaloxOS", color_black, color_gray_light, true);

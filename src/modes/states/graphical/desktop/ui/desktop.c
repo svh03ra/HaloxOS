@@ -18,10 +18,10 @@ static void render_desktop(void) {
     }
     render_taskbar();
 #if HALOXOS_CONFIG_DEV_MODE
-    draw_text(438, 430, "HaloxOS Version 1.0", color_black, color_gray_light, true);
+    draw_text(438, 430, "HaloxOS Version 1.1D", color_black, color_gray_light, true);
     draw_text(438, 440, "For Testing purposes only", color_black, color_gray_light, true);
 #else
-    draw_text(480, 430, "HaloxOS Version 1.0", color_black, color_gray_light, true);
+    draw_text(480, 430, "HaloxOS Version 1.1", color_black, color_gray_light, true);
     draw_text(480, 440, "Stable Copy.", color_black, color_gray_light, true);
 #endif
     if (settings_applied.window_trails) {
