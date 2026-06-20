@@ -67,6 +67,7 @@ First of all, you need to understand what you will do in order to follow the ins
 - dosfstools
 - parted
 - gzip
+- python3
 - pkg-config
 - libpng-dev
 - qemu
