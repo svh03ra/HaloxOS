@@ -28,7 +28,7 @@ static void render_settings(const Window *window) {
 
         draw_text(window->x + 20, window->y + 122, "Screen Resolution:", color_black, color_white, true);
         draw_button(window->x + 178, window->y + 116, 20, 18, "<", live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
-        draw_button(window->x + 202, window->y + 116, 140, 18, resolution_name(settings_pending.resolution_mode), live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
+        draw_button(window->x + 202, window->y + 116, 140, 18, resolution_name(&settings_pending), live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
         draw_button(window->x + 346, window->y + 116, 20, 18, ">", live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
 
         fill_rect(window->x + 20, window->y + 148, 12, 12, settings_pending.widescreen ? color_green : color_white);
@@ -38,7 +38,13 @@ static void render_settings(const Window *window) {
         draw_text(window->x + 128, window->y + 174, resolution, color_blue_dark, color_white, true);
         draw_text(window->x + 20, window->y + 192, "Current Output:", color_black, color_white, true);
         draw_text(window->x + 143, window->y + 192, current_mode, color_blue_dark, color_white, true);
-        draw_text(window->x + 20, window->y + 206, video_mode_switch_available ? "Apply switches the video mode." : "ERROR: video mode switch is unavailable!", color_black, color_white, true);
+        if (video_backend == VIDEO_BACKEND_VGA) {
+            draw_text(window->x + 20, window->y + 206, "VGA: Default 320x240, Low 640x480.", color_black, color_white, true);
+        } else if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
+            draw_text(window->x + 20, window->y + 206, "Boot framebuffer: colours work; resolution is fixed.", color_black, color_white, true);
+        } else {
+            draw_text(window->x + 20, window->y + 206, video_mode_switch_available ? "Apply switches the video mode." : "ERROR: video mode switch is unavailable!", color_black, color_white, true);
+        }
     } else if (settings_tab == 1) {
         draw_text(window->x + 20, window->y + 92, "Desktop Background", color_black, color_white, true);
         draw_button(window->x + 170, window->y + 86, 20, 18, "<", color_gray_light, color_black, color_black);

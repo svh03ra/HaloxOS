@@ -355,7 +355,8 @@ typedef enum {
     VIDEO_BACKEND_NONE,
     VIDEO_BACKEND_MULTIBOOT,
     VIDEO_BACKEND_BGA,
-    VIDEO_BACKEND_VMWARE_SVGA
+    VIDEO_BACKEND_VMWARE_SVGA,
+    VIDEO_BACKEND_VGA
 } VideoBackend;
 
 typedef struct {
@@ -615,6 +616,10 @@ static bool boot_text_mode = true;
 static volatile uint16_t *const vga_text_buffer = (volatile uint16_t *)(uintptr_t)0xB8000;
 static uint16_t present_x_map[MAX_OUTPUT_WIDTH];
 static uint16_t present_y_map[MAX_OUTPUT_HEIGHT];
+static uint32_t present_content_width = OS_WIDTH;
+static uint32_t present_content_height = OS_HEIGHT;
+static uint32_t present_offset_x = 0;
+static uint32_t present_offset_y = 0;
 static uint32_t last_desktop_redraw_input_tick = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_second = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
@@ -721,6 +726,7 @@ extern void cpu_halt_once(void);
 
 static void program_vga_palette(void);
 static void set_default_framebuffer_format(uint8_t bpp);
+static void update_present_maps(void);
 static uint16_t palette_rgb565(uint8_t color);
 static Color rgb565_to_color(uint16_t value);
 static void apply_settings(void);
@@ -741,6 +747,7 @@ static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8
 #include "../../driver/etc/pci.c"
 #include "timer.c"
 #include "runtime.c"
+#include "../../driver/video/vga_legacy.c"
 #include "../../driver/video/video_modes.c"
 #include "interrupts.c"
 #include "exceptions.c"

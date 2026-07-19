@@ -27,7 +27,7 @@
  *   16 = true-color 16-bit mode when the active video backend supports it
  */
  
-#define HALOXOS_CONFIG_DEBUG 0
+#define HALOXOS_CONFIG_DEBUG 1
 #define HALOXOS_CONFIG_DEV_MODE 1
 #define HALOXOS_CONFIG_SCREEN_WIDTH 640
 #define HALOXOS_CONFIG_SCREEN_HEIGHT 480

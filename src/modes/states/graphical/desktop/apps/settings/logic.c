@@ -41,9 +41,14 @@ static const char *palette_name(uint8_t index) {
     return names[index % 3];
 }
 
-static const char *resolution_name(uint8_t index) {
-    static const char *names[] = {"720p", "480p", "360p", "240p", "144p"};
-    return names[index % 5];
+static const char *resolution_name(const SettingsState *state) {
+    static const char *four_three[] = {
+        "960x720", "640x480 (Default)", "480x360", "320x240", "192x144"
+    };
+    static const char *wide[] = {
+        "1280x720", "854x480", "640x360", "426x240", "256x144"
+    };
+    return (state->widescreen ? wide : four_three)[state->resolution_mode % 5];
 }
 
 static bool live_resolution_supported(uint8_t index) {
@@ -59,6 +64,11 @@ static bool live_resolution_supported(uint8_t index) {
                output_height_for_settings(&candidate) <= vmware_svga.max_height;
     }
 
+    if (video_backend == VIDEO_BACKEND_VGA && settings_pending.palette_mode == 1) {
+        return output_width_for_settings(&candidate) == 640 &&
+               output_height_for_settings(&candidate) == 480;
+    }
+
     return true;
 }
 
@@ -70,6 +80,14 @@ static bool live_palette_supported(uint8_t index) {
             return vmware_svga.host_bpp >= 16;
         }
         return ((vmware_svga.caps & SVGA_CAP_8BIT_EMULATION) != 0) || vmware_svga.host_bpp >= 16;
+    }
+
+    if (video_backend == VIDEO_BACKEND_VGA) {
+        return index % 3 != 2;
+    }
+
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
+        return palette_mode != 2 || fb.bpp >= 15;
     }
 
     return palette_mode != 2 || video_mode_switch_available;

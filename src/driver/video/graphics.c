@@ -127,6 +127,11 @@ static uint32_t pack_framebuffer_color(Color color) {
 }
 
 static void program_vga_palette(void) {
+    if (video_backend == VIDEO_BACKEND_VGA) {
+        vga_sync_palette();
+        return;
+    }
+
     if (fb.bpp != 8) {
         return;
     }
@@ -161,7 +166,7 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
         return true;
     }
 
-    if ((mbi->flags & (1u << 12)) != 0) {
+    if (false && (mbi->flags & (1u << 12)) != 0) {
         uint8_t framebuffer_type = mbi->framebuffer_type;
         if (mbi->framebuffer_addr <= 0xFFFFFFFFull &&
             framebuffer_bpp_supported(framebuffer_type, mbi->framebuffer_bpp)) {
@@ -202,6 +207,9 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
     }
 
     if (!detect_bga_backend()) {
+        if (init_vga_legacy_backend()) {
+            return true;
+        }
         return true;
     }
 
@@ -229,6 +237,11 @@ static void present(void) {
         return;
     }
 
+    if (video_backend == VIDEO_BACKEND_VGA) {
+        vga_present();
+        return;
+    }
+
     if (fb.bpp == 8 && fb.width == OS_WIDTH && fb.height == OS_HEIGHT) {
         for (int y = 0; y < OS_HEIGHT; ++y) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
@@ -241,13 +254,15 @@ static void present(void) {
     }
 
     for (uint32_t y = 0; y < fb.height; ++y) {
-        uint16_t sy = present_y_map[y];
+        bool inside_y = y >= present_offset_y && y < present_offset_y + present_content_height;
+        uint16_t sy = inside_y ? present_y_map[y] : 0;
         const uint8_t *src = &backbuffer[sy * OS_WIDTH];
 
         if (fb.bpp == 8) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             for (uint32_t x = 0; x < fb.width; ++x) {
-                dest[x] = src[present_x_map[x]];
+                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
+                dest[x] = inside ? src[present_x_map[x]] : color_black;
             }
             continue;
         }
@@ -255,7 +270,11 @@ static void present(void) {
         if (fb.bpp == 15 || fb.bpp == 16) {
             uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
+                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
+                Color c = inside ? rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]) : (Color){0, 0, 0};
+                if (settings_applied.palette_mode == 1) {
+                    c = quantize_color_16(c);
+                }
                 dest[x] = (uint16_t)pack_framebuffer_color(c);
             }
             continue;
@@ -264,7 +283,11 @@ static void present(void) {
         if (fb.bpp == 24) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
+                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
+                Color c = inside ? rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]) : (Color){0, 0, 0};
+                if (settings_applied.palette_mode == 1) {
+                    c = quantize_color_16(c);
+                }
                 uint32_t packed = pack_framebuffer_color(c);
                 dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
                 dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
@@ -276,7 +299,11 @@ static void present(void) {
         {
             uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
+                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
+                Color c = inside ? rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]) : (Color){0, 0, 0};
+                if (settings_applied.palette_mode == 1) {
+                    c = quantize_color_16(c);
+                }
                 dest[x] = pack_framebuffer_color(c);
             }
         }

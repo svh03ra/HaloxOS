@@ -131,20 +131,25 @@ static void update_present_maps(void) {
         return;
     }
 
-    for (uint32_t x = 0; x < fb.width && x < MAX_OUTPUT_WIDTH; ++x) {
-        uint32_t source = (x * OS_WIDTH) / fb.width;
-        if (source >= OS_WIDTH) {
-            source = OS_WIDTH - 1;
-        }
-        present_x_map[x] = (uint16_t)source;
+    /*
+     * The desktop is a 640x480 logical canvas.  Keep it 1:1 when the active
+     * framebuffer is larger; this avoids advertising a larger VBE mode while
+     * merely magnifying the old desktop.  Only native low-resolution modes
+     * sample the canvas down to their real hardware dimensions.
+     */
+    present_content_width = fb.width < OS_WIDTH ? fb.width : OS_WIDTH;
+    present_content_height = fb.height < OS_HEIGHT ? fb.height : OS_HEIGHT;
+    present_offset_x = (fb.width - present_content_width) / 2u;
+    present_offset_y = (fb.height - present_content_height) / 2u;
+
+    for (uint32_t x = 0; x < present_content_width; ++x) {
+        present_x_map[present_offset_x + x] =
+            (uint16_t)((x * OS_WIDTH) / present_content_width);
     }
 
-    for (uint32_t y = 0; y < fb.height && y < MAX_OUTPUT_HEIGHT; ++y) {
-        uint32_t source = (y * OS_HEIGHT) / fb.height;
-        if (source >= OS_HEIGHT) {
-            source = OS_HEIGHT - 1;
-        }
-        present_y_map[y] = (uint16_t)source;
+    for (uint32_t y = 0; y < present_content_height; ++y) {
+        present_y_map[present_offset_y + y] =
+            (uint16_t)((y * OS_HEIGHT) / present_content_height);
     }
 }
 
@@ -160,7 +165,10 @@ static uint16_t output_height_for_settings(const SettingsState *state) {
 }
 
 static uint8_t output_bpp_for_settings(const SettingsState *state) {
-    return state->palette_mode == 2 ? 16 : 8;
+    if (state->palette_mode == 2) {
+        return 16;
+    }
+    return state->palette_mode == 1 && video_backend == VIDEO_BACKEND_VGA ? 4 : 8;
 }
 
 static void framebuffer_mode_string(char *buffer, size_t max_len, uint32_t width, uint32_t height, uint8_t bpp) {
@@ -418,7 +426,9 @@ static bool detect_bga_backend(void) {
 }
 
 static bool detect_video_mode_switch(void) {
-    return video_backend == VIDEO_BACKEND_BGA || video_backend == VIDEO_BACKEND_VMWARE_SVGA;
+    return video_backend == VIDEO_BACKEND_BGA ||
+           video_backend == VIDEO_BACKEND_VMWARE_SVGA ||
+           video_backend == VIDEO_BACKEND_VGA;
 }
 
 static const char *video_backend_name(void) {
@@ -426,6 +436,7 @@ static const char *video_backend_name(void) {
         case VIDEO_BACKEND_MULTIBOOT: return "Multiboot framebuffer";
         case VIDEO_BACKEND_BGA: return "Bochs/QEMU BGA";
         case VIDEO_BACKEND_VMWARE_SVGA: return "VMware SVGA";
+        case VIDEO_BACKEND_VGA: return "Legacy VGA";
         default: return "None";
     }
 }
@@ -501,10 +512,15 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
     }
 
     if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
-        (void)width;
-        (void)height;
-        (void)bpp;
-        return fb.address != NULL && fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT;
+        if (fb.address == NULL || width != fb.width || height != fb.height) {
+            return false;
+        }
+        /* Indexed palettes are rendered in software on an RGB boot buffer. */
+        return bpp == 4 || bpp == 8 || (bpp == 16 && fb.bpp >= 15);
+    }
+
+    if (video_backend == VIDEO_BACKEND_VGA) {
+        return vga_set_legacy_mode(width, height, bpp);
     }
 
     if (video_backend == VIDEO_BACKEND_NONE) {
@@ -551,13 +567,15 @@ static void enter_boot_text_mode(void) {
         bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
     } else if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
         vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_DISABLE);
+    } else if (video_backend == VIDEO_BACKEND_VGA) {
+        vga_restore_text_mode();
     }
 }
 
 static void enter_main_graphics_mode(void) {
     if (!set_framebuffer_mode_raw(HALOXOS_CONFIG_SCREEN_WIDTH,
                                   HALOXOS_CONFIG_SCREEN_HEIGHT,
-                                  HALOXOS_CONFIG_OUTPUT_BPP)) {
+                                  output_bpp_for_settings(&settings_applied))) {
         serial_trace("ERROR", "graphics mode unavailable");
         serial_trace_video_mode("Graphics mode unavailable state");
         return;

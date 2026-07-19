@@ -40,10 +40,10 @@ jobs:
         run: make
 
       - name: Build Disk
-        run: make clean && make disk
+        run: make disk
 
       - name: Build Floppy
-        run: make clean && make floppy
+        run: make floppy
 
       - name: Verify Build
         run: |
