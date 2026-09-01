@@ -28,7 +28,7 @@ CONFIG_SCREEN_WIDTH := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_WIDTH[[:
 CONFIG_SCREEN_HEIGHT := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_HEIGHT[[:space:]]*//p' src/config/config.h)
 CONFIG_DEBUG := $(shell sed -n 's/^#define HALOXOS_CONFIG_DEBUG[[:space:]]*//p' src/config/config.h)
 CONFIG_DEV_MODE := $(shell sed -n 's/^#define HALOXOS_CONFIG_DEV_MODE[[:space:]]*//p' src/config/config.h)
-CONFIG_SCREEN_DEPTH := 0
+CONFIG_SCREEN_DEPTH := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_BPP[[:space:]]*//p' src/config/config.h)
 ASFLAGS := -DHALOXOS_BOOT_SCREEN_WIDTH=$(CONFIG_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(CONFIG_SCREEN_HEIGHT) -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH)
 CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -Ibuild/generated
 LDFLAGS := -T linker.ld
@@ -66,9 +66,9 @@ BUILD_PROFILE_COLOR := $(COLOR_GREEN)
 endif
 
 BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-ISO := build/os.iso
-DISK := build/haloxos-disk.img
-FLOPPY := build/haloxos-floppy.img
+ISO := build/HaloxOS-LiveCD_DEV.iso
+DISK := build/HaloxOS-Disk_DEV.img
+FLOPPY := build/HaloxOS-Floppy_DEV.img
 KERNEL := build/kernel.bin
 KERNEL_GZ := build/kernel.bin.gz
 DISK_CORE := build/core_disk.img
@@ -181,11 +181,11 @@ $(BUILD_INFO): FORCE | build/generated
 
 $(BOOT_DISK_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,boot disk menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=640x480x16' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(BOOT_FLOPPY_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,boot floppy menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=640x480x16' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(CORE_DISK_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,core disk menu,$@)

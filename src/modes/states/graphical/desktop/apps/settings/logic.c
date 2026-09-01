@@ -36,11 +36,12 @@ static const char *palette_name(uint8_t index) {
     static const char *names[] = {
         "Default",
         "Low",
-        "True Color!"
+        "True-Color!"
     };
     return names[index % 3];
 }
 
+<<<<<<< HEAD
 static const char *resolution_name(const SettingsState *state) {
     static const char *four_three[] = {
         "960x720", "640x480 (Default)", "480x360", "320x240", "192x144"
@@ -49,6 +50,16 @@ static const char *resolution_name(const SettingsState *state) {
         "1280x720", "854x480", "640x360", "426x240", "256x144"
     };
     return (state->widescreen ? wide : four_three)[state->resolution_mode % 5];
+=======
+static const char *resolution_name(uint8_t index) {
+    static const char *names[] = {"960x720", "640x480", "480x360", "320x240", "192x144"};
+    return names[index % 5];
+}
+
+static const char *resolution_name_wide(uint8_t index) {
+    static const char *names[] = {"1280x720", "854x480", "640x360", "426x240", "256x144"};
+    return names[index % 5];
+>>>>>>> 6f31922 (Legacy VGA Support)
 }
 
 static bool live_resolution_supported(uint8_t index) {
@@ -74,6 +85,20 @@ static bool live_resolution_supported(uint8_t index) {
 
 static bool live_palette_supported(uint8_t index) {
     uint8_t palette_mode = index % 3;
+
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
+        return true;
+    }
+
+    if (video_backend == VIDEO_BACKEND_VGA) {
+        if (palette_mode == 2) {
+            return false;
+        }
+        if (palette_mode == 1) {
+            return video_mode_switch_available;
+        }
+        return true;
+    }
 
     if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
         if (palette_mode == 2) {

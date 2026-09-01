@@ -87,7 +87,7 @@ extern const uint8_t _binary_build_power_icon_bin_start[];
 
 #if HALOXOS_CONFIG_SCREEN_BPP == 4
 #define HALOXOS_CONFIG_PALETTE_MODE 1
-#define HALOXOS_CONFIG_OUTPUT_BPP 8
+#define HALOXOS_CONFIG_OUTPUT_BPP 4
 #elif HALOXOS_CONFIG_SCREEN_BPP == 16
 #define HALOXOS_CONFIG_PALETTE_MODE 2
 #define HALOXOS_CONFIG_OUTPUT_BPP 16
@@ -351,6 +351,7 @@ typedef struct {
     bool window_trails;
 } SettingsState;
 
+<<<<<<< HEAD
 typedef enum {
     VIDEO_BACKEND_NONE,
     VIDEO_BACKEND_MULTIBOOT,
@@ -358,6 +359,21 @@ typedef enum {
     VIDEO_BACKEND_VMWARE_SVGA,
     VIDEO_BACKEND_VGA
 } VideoBackend;
+=======
+typedef enum {
+    VIDEO_BACKEND_NONE,
+    VIDEO_BACKEND_MULTIBOOT,
+    VIDEO_BACKEND_VGA,
+    VIDEO_BACKEND_BGA,
+    VIDEO_BACKEND_VMWARE_SVGA
+} VideoBackend;
+>>>>>>> 6f31922 (Legacy VGA Support)
+
+enum {
+    MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED = 0,
+    MULTIBOOT_FRAMEBUFFER_TYPE_RGB = 1,
+    MULTIBOOT_FRAMEBUFFER_TYPE_EGA_TEXT = 2
+};
 
 typedef struct {
     uint16_t io_base;
@@ -734,6 +750,10 @@ static void desktop_finish_rename(bool commit);
 static void append_char(char *dest, size_t *len, size_t max_len, char ch);
 static bool cursor_over_clickable(void);
 static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8_t dark, uint32_t hover_tick);
+static bool vga_probe_present(void);
+static bool vga_set_graphics_mode(uint16_t width, uint16_t height, uint16_t bpp);
+static void vga_save_and_enter_text_mode(void);
+static bool vga_native_text_mode_active(void);
 
 
 /*
@@ -745,10 +765,17 @@ static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8
 #include "../../driver/etc/ata.c"
 #include "cpu.c"
 #include "../../driver/etc/pci.c"
+<<<<<<< HEAD
 #include "timer.c"
 #include "runtime.c"
 #include "../../driver/video/vga_legacy.c"
 #include "../../driver/video/video_modes.c"
+=======
+#include "timer.c"
+#include "runtime.c"
+#include "../../driver/video/vga.c"
+#include "../../driver/video/video_modes.c"
+>>>>>>> 6f31922 (Legacy VGA Support)
 #include "interrupts.c"
 #include "exceptions.c"
 #include "../../driver/video/graphics.c"

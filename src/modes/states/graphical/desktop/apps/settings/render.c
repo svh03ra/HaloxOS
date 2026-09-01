@@ -11,7 +11,10 @@ static void render_settings(const Window *window) {
     int header_x = window->x + (window->w - (icon_w + 8 + header_text_w)) / 2;
     bool dirty = settings_dirty();
     resolution_string(resolution, sizeof(resolution), &settings_pending);
-    framebuffer_mode_string(current_mode, sizeof(current_mode), fb.width, fb.height, fb.bpp);
+    framebuffer_mode_string(current_mode, sizeof(current_mode),
+                            output_width_for_settings(&settings_pending),
+                            output_height_for_settings(&settings_pending),
+                            output_bpp_for_settings(&settings_pending));
 
     fill_rect(window->x + 8, window->y + 24, window->w - 16, window->h - 32, color_white);
     draw_image_at(_binary_build_settings_icon_bin_start, header_x, window->y + 24, true);
@@ -28,7 +31,11 @@ static void render_settings(const Window *window) {
 
         draw_text(window->x + 20, window->y + 122, "Screen Resolution:", color_black, color_white, true);
         draw_button(window->x + 178, window->y + 116, 20, 18, "<", live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
+<<<<<<< HEAD
         draw_button(window->x + 202, window->y + 116, 140, 18, resolution_name(&settings_pending), live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
+=======
+        draw_button(window->x + 202, window->y + 116, 140, 18, settings_pending.widescreen ? resolution_name_wide(settings_pending.resolution_mode) : resolution_name(settings_pending.resolution_mode), live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
+>>>>>>> 6f31922 (Legacy VGA Support)
         draw_button(window->x + 346, window->y + 116, 20, 18, ">", live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
 
         fill_rect(window->x + 20, window->y + 148, 12, 12, settings_pending.widescreen ? color_green : color_white);

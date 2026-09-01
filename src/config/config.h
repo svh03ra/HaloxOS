@@ -22,15 +22,19 @@
  *   Supported wide modes: 1280x720, 854x480, 640x360, 426x240, 256x144
  *
  * HALOXOS_CONFIG_SCREEN_BPP:
- *   4  = low-color palette mode using an 8-bit framebuffer
- *   8  = default 8-bit palette mode
- *   16 = true-color 16-bit mode when the active video backend supports it
+ *   4  = true 16-color VGA mode (classic VGA backend only)
+ *   8  = 256-color palette mode
+ *   16 = true-color 16-bit mode (default; modern hardware / framebuffer backends)
  */
+<<<<<<< HEAD
  
+=======
+
+>>>>>>> 6f31922 (Legacy VGA Support)
 #define HALOXOS_CONFIG_DEBUG 1
 #define HALOXOS_CONFIG_DEV_MODE 1
 #define HALOXOS_CONFIG_SCREEN_WIDTH 640
 #define HALOXOS_CONFIG_SCREEN_HEIGHT 480
-#define HALOXOS_CONFIG_SCREEN_BPP 8
+#define HALOXOS_CONFIG_SCREEN_BPP 16
 
 #endif
