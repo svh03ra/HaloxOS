@@ -362,11 +362,11 @@ $(KERNEL_GZ): $(KERNEL) | build
 
 $(DISK_CORE): $(CORE_DISK_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe vbeinfo video_all video_bochs video_cirrus || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe all_video || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(FLOPPY_CORE): $(CORE_FLOPPY_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe vbeinfo video_all video_bochs video_cirrus || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe all_video || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(KERNEL): $(KERNEL_OBJS)
 	@$(call LOG_COMPILE,kernel objects,$@)
