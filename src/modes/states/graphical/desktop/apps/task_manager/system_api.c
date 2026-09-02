@@ -62,6 +62,9 @@ static bool task_manager_selected_is_killable(AppId *app_out) {
 }
 
 static uint32_t gpu_palette_entry_count(void) {
+    if (fb.bpp == 4) {
+        return 16u;
+    }
     if (fb.bpp == 8) {
         return settings_applied.palette_mode == 1 ? 16u : 256u;
     }
@@ -72,6 +75,15 @@ static uint32_t gpu_palette_entry_count(void) {
 }
 
 static uint8_t gpu_palette_entry_color(uint32_t index) {
+    if (fb.bpp == 4) {
+        if (index >= 16u) {
+            return color_gray_light;
+        }
+        return nearest_color(vga_ega16_colors[index].r,
+                             vga_ega16_colors[index].g,
+                             vga_ega16_colors[index].b);
+    }
+
     if (fb.bpp == 8) {
         if (index >= gpu_palette_entry_count()) {
             return color_gray_light;

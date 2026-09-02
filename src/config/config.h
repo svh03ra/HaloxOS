@@ -26,11 +26,7 @@
  *   8  = 256-color palette mode
  *   16 = true-color 16-bit mode (default; modern hardware / framebuffer backends)
  */
-<<<<<<< HEAD
- 
-=======
 
->>>>>>> 6f31922 (Legacy VGA Support)
 #define HALOXOS_CONFIG_DEBUG 1
 #define HALOXOS_CONFIG_DEV_MODE 1
 #define HALOXOS_CONFIG_SCREEN_WIDTH 640

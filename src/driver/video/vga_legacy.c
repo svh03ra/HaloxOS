@@ -15,7 +15,8 @@ typedef enum {
 } VgaLegacyMode;
 
 static VgaLegacyMode vga_legacy_mode = VGA_LEGACY_MODE_NONE;
-static uint8_t vga_palette_to_ega[256];
+static uint8_t vga_rgb565_to_ega[65536];
+static bool vga_rgb565_ega_ready = false;
 
 static const Color vga_ega_colors[16] = {
     {0, 0, 0},       {0, 0, 170},     {0, 170, 0},    {0, 170, 170},
@@ -154,14 +155,24 @@ static uint8_t vga_nearest_ega_color(Color color) {
     return best_index;
 }
 
+static void vga_build_rgb565_ega_map(void) {
+    if (vga_rgb565_ega_ready) {
+        return;
+    }
+
+    for (uint32_t value = 0; value < 65536u; ++value) {
+        Color color = rgb565_to_color((uint16_t)value);
+        vga_rgb565_to_ega[value] = vga_nearest_ega_color(color);
+    }
+
+    vga_rgb565_ega_ready = true;
+}
+
 static void vga_sync_palette(void) {
     outb(0x3C6, 0xFF);
     outb(0x3C8, 0);
 
     if (vga_legacy_mode == VGA_LEGACY_MODE_640X480X16) {
-        for (uint16_t index = 0; index < 256; ++index) {
-            vga_palette_to_ega[index] = vga_nearest_ega_color(palette[index]);
-        }
         for (uint8_t index = 0; index < 16; ++index) {
             Color color = vga_ega_colors[index];
             outb(0x3C9, color.r >> 2);
@@ -237,6 +248,7 @@ static bool vga_set_legacy_mode(uint16_t width, uint16_t height, uint16_t bpp) {
     fb.blue_position = 0;
     fb.blue_mask_size = 0;
     vga_clear_graphics_memory();
+    vga_build_rgb565_ega_map();
     update_present_maps();
     vga_sync_palette();
     return true;
@@ -269,7 +281,8 @@ static void vga_present(void) {
                     uint8_t packed = 0;
                     for (uint32_t bit = 0; bit < 8; ++bit) {
                         uint32_t x = byte_x * 8u + bit;
-                        uint8_t color = vga_palette_to_ega[source[present_x_map[x]]];
+                        uint16_t rgb = backbuffer_rgb565[(size_t)present_y_map[y] * OS_WIDTH + present_x_map[x]];
+                        uint8_t color = vga_rgb565_to_ega[rgb];
                         if ((color & (1u << plane)) != 0) {
                             packed |= (uint8_t)(0x80u >> bit);
                         }

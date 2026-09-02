@@ -41,16 +41,6 @@ static const char *palette_name(uint8_t index) {
     return names[index % 3];
 }
 
-<<<<<<< HEAD
-static const char *resolution_name(const SettingsState *state) {
-    static const char *four_three[] = {
-        "960x720", "640x480 (Default)", "480x360", "320x240", "192x144"
-    };
-    static const char *wide[] = {
-        "1280x720", "854x480", "640x360", "426x240", "256x144"
-    };
-    return (state->widescreen ? wide : four_three)[state->resolution_mode % 5];
-=======
 static const char *resolution_name(uint8_t index) {
     static const char *names[] = {"960x720", "640x480", "480x360", "320x240", "192x144"};
     return names[index % 5];
@@ -59,7 +49,6 @@ static const char *resolution_name(uint8_t index) {
 static const char *resolution_name_wide(uint8_t index) {
     static const char *names[] = {"1280x720", "854x480", "640x360", "426x240", "256x144"};
     return names[index % 5];
->>>>>>> 6f31922 (Legacy VGA Support)
 }
 
 static bool live_resolution_supported(uint8_t index) {

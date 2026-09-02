@@ -351,15 +351,6 @@ typedef struct {
     bool window_trails;
 } SettingsState;
 
-<<<<<<< HEAD
-typedef enum {
-    VIDEO_BACKEND_NONE,
-    VIDEO_BACKEND_MULTIBOOT,
-    VIDEO_BACKEND_BGA,
-    VIDEO_BACKEND_VMWARE_SVGA,
-    VIDEO_BACKEND_VGA
-} VideoBackend;
-=======
 typedef enum {
     VIDEO_BACKEND_NONE,
     VIDEO_BACKEND_MULTIBOOT,
@@ -367,7 +358,6 @@ typedef enum {
     VIDEO_BACKEND_BGA,
     VIDEO_BACKEND_VMWARE_SVGA
 } VideoBackend;
->>>>>>> 6f31922 (Legacy VGA Support)
 
 enum {
     MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED = 0,
@@ -765,17 +755,10 @@ static bool vga_native_text_mode_active(void);
 #include "../../driver/etc/ata.c"
 #include "cpu.c"
 #include "../../driver/etc/pci.c"
-<<<<<<< HEAD
-#include "timer.c"
-#include "runtime.c"
-#include "../../driver/video/vga_legacy.c"
-#include "../../driver/video/video_modes.c"
-=======
 #include "timer.c"
 #include "runtime.c"
 #include "../../driver/video/vga.c"
 #include "../../driver/video/video_modes.c"
->>>>>>> 6f31922 (Legacy VGA Support)
 #include "interrupts.c"
 #include "exceptions.c"
 #include "../../driver/video/graphics.c"

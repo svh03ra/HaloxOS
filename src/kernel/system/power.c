@@ -401,28 +401,53 @@ static void init_acpi_power(void) {
     acpi_power.slp_typa = slp_typa;
     acpi_power.slp_typb = slp_typb;
     acpi_power.available = true;
+
     serial_trace("INFO", "ACPI poweroff data ready");
+    serial_trace_hex_value("INFO", "ACPI RSDP address", (uint32_t)(uintptr_t)rsdp);
+    serial_trace_hex_value("INFO", "ACPI RSDT address", rsdp->rsdt_address);
+    serial_trace_hex_value("INFO", "ACPI FADT address", (uint32_t)(uintptr_t)fadt);
+    serial_trace_hex_value("INFO", "ACPI DSDT address", dsdt_address);
+    serial_trace_hex_value("INFO", "ACPI SMI command port", acpi_power.smi_command_port);
+    serial_trace_hex_value("INFO", "ACPI enable value", acpi_power.acpi_enable);
+    serial_trace_hex_value("INFO", "ACPI PM1a event block", acpi_power.pm1a_event_block);
+    serial_trace_hex_value("INFO", "ACPI PM1b event block", acpi_power.pm1b_event_block);
+    serial_trace_hex_value("INFO", "ACPI PM1a control block", acpi_power.pm1a_control_block);
+    serial_trace_hex_value("INFO", "ACPI PM1b control block", acpi_power.pm1b_control_block);
+    serial_trace_hex_value("INFO", "ACPI PM1 event length", acpi_power.pm1_event_length);
+    serial_trace_hex_value("INFO", "ACPI PM1 control length", acpi_power.pm1_control_length);
+    serial_trace_hex_value("INFO", "ACPI S5 SLP_TYPa", acpi_power.slp_typa);
+    serial_trace_hex_value("INFO", "ACPI S5 SLP_TYPb", acpi_power.slp_typb);
 }
 
 static bool acpi_enable_if_needed(void) {
-    if ((inw((uint16_t)acpi_power.pm1a_control_block) & ACPI_PM1_SCI_EN) != 0) {
+    uint16_t pm1a_control = inw((uint16_t)acpi_power.pm1a_control_block);
+
+    if ((pm1a_control & ACPI_PM1_SCI_EN) != 0) {
+        serial_trace("INFO", "ACPI already enabled (SCI_EN set)");
         return true;
     }
 
     if (acpi_power.smi_command_port == 0 ||
         acpi_power.smi_command_port > 0xFFFFu ||
         acpi_power.acpi_enable == 0) {
+        serial_trace("WARNING", "ACPI SMI command port unavailable, cannot enable");
         return false;
     }
 
+    serial_trace_hex_value("INFO", "ACPI PM1a control before enable", pm1a_control);
+    serial_trace("INFO", "ACPI enable through SMI command port");
     outb((uint16_t)acpi_power.smi_command_port, acpi_power.acpi_enable);
     for (uint32_t i = 0; i < 1000000u; ++i) {
         if ((inw((uint16_t)acpi_power.pm1a_control_block) & ACPI_PM1_SCI_EN) != 0) {
+            serial_trace_hex_value("INFO", "ACPI PM1a control after enable",
+                                   inw((uint16_t)acpi_power.pm1a_control_block));
             return true;
         }
         io_wait();
     }
 
+    serial_trace_hex_value("WARNING", "ACPI enable timed out, PM1a control",
+                           inw((uint16_t)acpi_power.pm1a_control_block));
     return (inw((uint16_t)acpi_power.pm1a_control_block) & ACPI_PM1_SCI_EN) != 0;
 }
 
@@ -468,23 +493,32 @@ static bool attempt_acpi_poweroff(void) {
     }
 
     serial_trace("INFO", "ACPI S5 poweroff I/O sequence");
+    serial_trace_hex_value("INFO", "ACPI PM1a control before S5",
+                           inw((uint16_t)acpi_power.pm1a_control_block));
     acpi_clear_wake_status();
     pm1a_value = (uint16_t)(((uint16_t)acpi_power.slp_typa << 10) | ACPI_PM1_SLP_EN);
     pm1b_value = (uint16_t)(((uint16_t)acpi_power.slp_typb << 10) | ACPI_PM1_SLP_EN);
+    serial_trace_hex_value("INFO", "ACPI S5 PM1a write value", pm1a_value);
     outw((uint16_t)acpi_power.pm1a_control_block, pm1a_value);
     if (acpi_power.pm1b_control_block != 0) {
+        serial_trace_hex_value("INFO", "ACPI S5 PM1b write value", pm1b_value);
         outw((uint16_t)acpi_power.pm1b_control_block, pm1b_value);
     }
 
     wait_for_power_transition(TIMER_HZ);
 
+    serial_trace_hex_value("WARNING", "ACPI S5 poweroff failed, PM1a control",
+                           inw((uint16_t)acpi_power.pm1a_control_block));
     return false;
 }
 
 static void attempt_legacy_poweroff_ports(void) {
     serial_trace("INFO", "legacy emulator poweroff I/O sequence");
+    serial_trace("INFO", "write port 0x0604 <- 0x2000 (Bochs/QEMU old)");
     outw(0x604, 0x2000);
+    serial_trace("INFO", "write port 0xB004 <- 0x2000 (VirtualBox old)");
     outw(0xB004, 0x2000);
+    serial_trace("INFO", "write port 0x4004 <- 0x3400 (old newer QEMU)");
     outw(0x4004, 0x3400);
 }
 
@@ -507,10 +541,66 @@ static void shutdown_system(void) {
 }
 
 static void restart_system(void) {
-    serial_trace("INFO", "restart requested through keyboard controller");
-    while (inb(0x64) & 0x02) {
+    uint32_t timeout;
+    uint8_t status;
+
+    serial_trace("INFO", "restart requested");
+
+    /*
+     * Stage 1: keyboard controller (8042) pulse-reset. On some real
+     * machines there is no 8042 at all (USB-only board) and port 0x64
+     * reads 0xFF forever, so the input-buffer wait is bounded by timeout.
+     */
+    timeout = 100000;
+    do {
+        status = inb(0x64);
+        --timeout;
+    } while ((status & 0x02) != 0 && timeout > 0);
+
+    serial_trace_hex_value("INFO", "8042 status register", status);
+    if (timeout == 0) {
+        serial_trace("WARNING", "8042 input buffer wait timed out");
+    } else {
+        serial_trace("INFO", "8042 pulse reset");
+        outb(0x64, 0xFE);
     }
-    outb(0x64, 0xFE);
+
+    /* Give the pulse a moment to take effect before further attempts. */
+    timeout = 1000000;
+    while (timeout > 0) {
+        --timeout;
+    }
+
+    /*
+     * Stage 2: System Control Port A fast reset (AT+ machines).
+     */
+    status = inb(0x92);
+    serial_trace_hex_value("INFO", "port 0x92 value before reset", status);
+    serial_trace("INFO", "port 0x92 fast reset");
+    outb(0x92, 0x01);
+
+    timeout = 1000000;
+    while (timeout > 0) {
+        --timeout;
+    }
+
+    /*
+     * Stage 3: last resort, load a null IDT and raise an interrupt, which
+     * triple faults and forces the CPU to reset on any x86 machine.
+     */
+    serial_trace("WARNING", "reset not triggered, triple fault reset");
+    {
+        static const uint16_t null_idt[3] = {0, 0, 0};
+        __asm__ volatile (
+            "lidt %0\n"
+            "int $0x03\n"
+            :
+            : "m"(null_idt)
+            : "memory"
+        );
+    }
+
+    serial_trace("ERROR", "triple fault reset failed");
     for (;;) {
         __asm__ volatile ("cli; hlt");
     }

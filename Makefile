@@ -179,13 +179,26 @@ $(BUILD_INFO): FORCE | build/generated
 	@$(call LOG_COMPILE,$(BUILD_ID),$@)
 	@printf '%s\n' "#ifndef HALOXOS_BUILD_TEXT" "#define HALOXOS_BUILD_TEXT \"Build: '$(BUILD_ID)'\"" "#endif" > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
+ifeq ($(CONFIG_SCREEN_DEPTH),4)
+GFXPAYLOAD := text
+else ifeq ($(CONFIG_SCREEN_DEPTH),8)
+# Request the configured geometry in real 8bpp / 256-colour mode.
+# Keep only same-depth fallbacks so an 8bpp build never silently becomes 16bpp.
+GFXPAYLOAD := $(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x8
+else
+# Request the configured geometry in true 16bpp first.  15bpp is a
+# compatibility fallback for older VBE implementations; 8bpp is the final
+# colour fallback.  No 4bpp fallback is requested here.
+GFXPAYLOAD := $(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x16,$(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x15,$(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x8
+endif
+
 $(BOOT_DISK_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,boot disk menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=640x480x16' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(BOOT_FLOPPY_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,boot floppy menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=640x480x16' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(CORE_DISK_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,core disk menu,$@)
@@ -349,11 +362,11 @@ $(KERNEL_GZ): $(KERNEL) | build
 
 $(DISK_CORE): $(CORE_DISK_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe vbeinfo video_all video_bochs video_cirrus || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(FLOPPY_CORE): $(CORE_FLOPPY_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe vbeinfo video_all video_bochs video_cirrus || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(KERNEL): $(KERNEL_OBJS)
 	@$(call LOG_COMPILE,kernel objects,$@)
@@ -374,9 +387,9 @@ build/isodir/boot/kernel.bin: $(KERNEL) | build/isodir/boot/grub
 	@$(call LOG_COMPILE,$<,$@)
 	@cp $(KERNEL) $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
 
-build/isodir/boot/grub/grub.cfg: grub/grub.cfg | build/isodir/boot/grub
-	@$(call LOG_COMPILE,$<,$@)
-	@cp $< $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
+build/isodir/boot/grub/grub.cfg: | build/isodir/boot/grub
+	@$(call LOG_COMPILE,boot menu,$@)
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(ISO): build/isodir/boot/kernel.bin build/isodir/boot/grub/grub.cfg
 	@$(call LOG_COMPILE,build/isodir,$@)

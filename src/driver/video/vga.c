@@ -70,8 +70,8 @@ static const VgaModeRegisters vga_mode_x = {
 
 static uint8_t vga_font_backup[VGA_FONT_BYTES];
 static bool vga_graphics_active = false;
-static uint8_t palette_index_to_ega[256];
-static bool palette_ega_map_ready = false;
+static uint8_t rgb565_to_ega[65536];
+static bool rgb565_ega_map_ready = false;
 
 typedef struct {
     uint8_t misc;
@@ -87,27 +87,44 @@ static bool vga_state_saved = false;
 static bool vga_native_text_active = false;
 
 static void update_present_maps(void);
+static void vga_enter_text_mode(void);
 
-static void vga_build_ega_map(void) {
-    if (palette_ega_map_ready) {
+static uint8_t vga_nearest_ega_color(Color color) {
+    uint32_t best_distance = 0xFFFFFFFFu;
+    uint8_t best_index = 0;
+
+    for (int i = 0; i < 16; ++i) {
+        int dr = (int)vga_ega16_colors[i].r - (int)color.r;
+        int dg = (int)vga_ega16_colors[i].g - (int)color.g;
+        int db = (int)vga_ega16_colors[i].b - (int)color.b;
+        uint32_t distance = (uint32_t)(dr * dr + dg * dg + db * db);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_index = (uint8_t)i;
+        }
+    }
+
+    return best_index;
+}
+
+/*
+ * The image assets keep their own per-pixel RGB565 data.  Their 8-bit palette
+ * index is NOT guaranteed to be the same as the kernel's generated 256-color
+ * palette, so an index->EGA map produces badly wrong colors on native 4bpp
+ * VGA.  Build a compact RGB565->EGA lookup once and use the actual pixel color
+ * when presenting to the 16-color planar framebuffer.
+ */
+static void vga_build_rgb565_ega_map(void) {
+    if (rgb565_ega_map_ready) {
         return;
     }
-    for (int i = 0; i < 256; ++i) {
-        uint32_t best_distance = 0xFFFFFFFFu;
-        uint8_t best_index = 0;
-        for (int j = 0; j < 16; ++j) {
-            int dr = (int)vga_ega16_colors[j].r - (int)palette[i].r;
-            int dg = (int)vga_ega16_colors[j].g - (int)palette[i].g;
-            int db = (int)vga_ega16_colors[j].b - (int)palette[i].b;
-            uint32_t distance = (uint32_t)(dr * dr + dg * dg + db * db);
-            if (distance < best_distance) {
-                best_distance = distance;
-                best_index = (uint8_t)j;
-            }
-        }
-        palette_index_to_ega[i] = best_index;
+
+    for (uint32_t value = 0; value < 65536u; ++value) {
+        Color color = rgb565_to_color((uint16_t)value);
+        rgb565_to_ega[value] = vga_nearest_ega_color(color);
     }
-    palette_ega_map_ready = true;
+
+    rgb565_ega_map_ready = true;
 }
 
 static void vga_write_seq(uint8_t index, uint8_t value) {
@@ -310,6 +327,35 @@ static void vga_program_ega_dac(void) {
     }
 }
 
+/* Keep the VGA DAC synchronized with the OS 256-color palette.
+ * This is intentionally local to the VGA backend so the generic graphics
+ * layer does not need to know about VGA register programming details.
+ */
+static void vga_sync_palette(void) {
+    int i;
+
+    /*
+     * In 4bpp planar modes the visible DAC entries are 0-15 and must hold
+     * the classic EGA colors; writing the OS palette here would repaint the
+     * whole desktop with the blue-heavy start of the 6x6x6 color cube.
+     */
+    if (fb.bpp == 4) {
+        vga_program_ega_dac();
+        return;
+    }
+
+    outb(VGA_DAC_WRITE_INDEX, 0);
+    for (i = 0; i < 256; ++i) {
+        Color output = settings_applied.palette_mode == 1
+                     ? vga_ega16_colors[vga_nearest_ega_color(palette[i])]
+                     : palette[i];
+        outb(VGA_DAC_DATA, output.r / 4);
+        outb(VGA_DAC_DATA, output.g / 4);
+        outb(VGA_DAC_DATA, output.b / 4);
+    }
+}
+
+
 static void vga_enter_text_mode(void) {
     vga_restore_text_font();
     vga_load_mode_registers(&vga_mode_text3);
@@ -388,7 +434,7 @@ static bool vga_set_graphics_mode(uint16_t width, uint16_t height, uint16_t bpp)
     fb.bpp = (uint8_t)bpp;
     fb.type = MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED;
     if (bpp == 4) {
-        vga_build_ega_map();
+        vga_build_rgb565_ega_map();
         vga_program_ega_dac();
     } else if (bpp == 8) {
         program_vga_palette();
@@ -444,7 +490,6 @@ static void present_vga_planar_16(void) {
         vga_write_seq(0x02, (uint8_t)(1u << plane));
         for (y = 0; y < fb.height; ++y) {
             uint16_t sy = present_y_map[y];
-            const uint8_t *src = &backbuffer[sy * OS_WIDTH];
             uint8_t *dest = vram + (size_t)y * fb.pitch;
             uint32_t byte_col;
 
@@ -454,7 +499,8 @@ static void present_vga_planar_16(void) {
                 uint32_t b;
 
                 for (b = 0; b < 8; ++b) {
-                    uint8_t ega = palette_index_to_ega[src[present_x_map[x0 + b]]];
+                    uint16_t rgb = backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x0 + b]];
+                    uint8_t ega = rgb565_to_ega[rgb];
                     bits |= (uint8_t)(((ega >> plane) & 1u) << (7 - b));
                 }
                 dest[byte_col] = bits;
@@ -462,3 +508,12 @@ static void present_vga_planar_16(void) {
         }
     }
 }
+/* Present the software backbuffer using the active native VGA format. */
+static void vga_present(void) {
+    if (fb.bpp == 4) {
+        present_vga_planar_16();
+    } else if (fb.bpp == 8) {
+        present_vga_linear_256();
+    }
+}
+

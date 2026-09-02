@@ -40,6 +40,9 @@ static void init_theme_colors(void) {
 }
 
 static bool framebuffer_text_mode_active(void) {
+    if (vga_native_text_mode_active()) {
+        return false;
+    }
     return boot_text_mode && video_backend == VIDEO_BACKEND_MULTIBOOT && fb.address != NULL;
 }
 
@@ -203,6 +206,7 @@ static Color present_color_for(uint16_t rgb565) {
 
 static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
     uint32_t bar0 = 0;
+    bool bga_text_boot_backend_ready = false;
 
     memset_local(&fb, 0, sizeof(fb));
     video_backend = VIDEO_BACKEND_NONE;
@@ -215,6 +219,7 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
      * The currently active mode set by the bootloader is adopted as-is.
      */
     if (detect_bga_backend() && find_vga_framebuffer_bar(&bar0)) {
+        bga_text_boot_backend_ready = true;
         uint16_t current_width = bga_read(VBE_DISPI_INDEX_XRES);
         uint16_t current_height = bga_read(VBE_DISPI_INDEX_YRES);
         uint16_t current_bpp = bga_read(VBE_DISPI_INDEX_BPP);
@@ -222,7 +227,8 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
                                                 : MULTIBOOT_FRAMEBUFFER_TYPE_RGB;
         if (current_width >= OS_WIDTH && current_height >= OS_HEIGHT &&
             current_width <= MAX_OUTPUT_WIDTH && current_height <= MAX_OUTPUT_HEIGHT &&
-            framebuffer_bpp_supported(current_type, (uint8_t)current_bpp)) {
+            framebuffer_bpp_supported(current_type, (uint8_t)current_bpp) &&
+            (bga_read(VBE_DISPI_INDEX_ENABLE) & VBE_DISPI_ENABLED) != 0) {
             fb.address = (uint8_t *)(uintptr_t)bar0;
             fb.width = current_width;
             fb.height = current_height;
@@ -235,14 +241,25 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
         }
     }
 
-<<<<<<< HEAD
-    if (false && (mbi->flags & (1u << 12)) != 0) {
-=======
-    if (magic == 0x2BADB002 && mbi != NULL &&
-        (mbi->flags & (1u << 12)) != 0) {
->>>>>>> 6f31922 (Legacy VGA Support)
+    if (magic == 0x2BADB002 && mbi != NULL) {
+        /*
+         * Multiboot1 flag 12 explicitly says the framebuffer fields are
+         * present. Always log the raw hand-off before validating it: this
+         * makes a GRUB mode-selection problem distinguishable from a VGA
+         * backend problem on real hardware.
+         */
+        serial_trace_uint_value("INFO", "Multiboot flags", mbi->flags);
+        if ((mbi->flags & (1u << 12)) != 0) {
+            serial_trace_uint_value("INFO", "Multiboot framebuffer width", mbi->framebuffer_width);
+            serial_trace_uint_value("INFO", "Multiboot framebuffer height", mbi->framebuffer_height);
+            serial_trace_uint_value("INFO", "Multiboot framebuffer bpp", mbi->framebuffer_bpp);
+            serial_trace_uint_value("INFO", "Multiboot framebuffer type", mbi->framebuffer_type);
+            serial_trace_uint_value("INFO", "Multiboot framebuffer pitch", mbi->framebuffer_pitch);
+        }
+
         uint8_t framebuffer_type = mbi->framebuffer_type;
-        if (mbi->framebuffer_addr <= 0xFFFFFFFFull &&
+        if ((mbi->flags & (1u << 12)) != 0 &&
+            mbi->framebuffer_addr <= 0xFFFFFFFFull &&
             framebuffer_bpp_supported(framebuffer_type, mbi->framebuffer_bpp)) {
             fb.address = (uint8_t *)(uintptr_t)mbi->framebuffer_addr;
             fb.width = mbi->framebuffer_width;
@@ -280,17 +297,32 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
         return true;
     }
 
-<<<<<<< HEAD
-    if (!detect_bga_backend()) {
-        if (init_vga_legacy_backend()) {
+    /*
+     * BGA hardware booted in text mode (gfxpayload=text): keep the BGA
+     * backend so pressing 1 programs a linear framebuffer via DISPI.
+     * The classic VGA probe below would otherwise claim the card and the
+     * 8/16-bit color modes would be lost. Only classic cards fall through.
+     */
+    if (bga_text_boot_backend_ready) {
+        uint32_t bar0_text = 0;
+        if (find_vga_framebuffer_bar(&bar0_text)) {
+            fb.address = (uint8_t *)(uintptr_t)bar0_text;
+            fb.width = OS_WIDTH;
+            fb.height = OS_HEIGHT;
+            fb.pitch = OS_WIDTH;
+            fb.bpp = 8;
+            fb.type = MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED;
+            set_default_framebuffer_format(fb.bpp);
+            video_backend = VIDEO_BACKEND_BGA;
+            update_present_maps();
+            serial_trace("INFO", "BGA backend: adopted from text boot");
             return true;
         }
-        return true;
-=======
+    }
+
     if (init_vga_backend()) {
         serial_trace("INFO", "VGA backend: available");
         return true;
->>>>>>> 6f31922 (Legacy VGA Support)
     }
 
     serial_trace("ERROR", "no compatible video backend detected");
@@ -308,15 +340,6 @@ static void present(void) {
 
     if (video_backend == VIDEO_BACKEND_VGA) {
         vga_present();
-        return;
-    }
-
-    if (video_backend == VIDEO_BACKEND_VGA) {
-        if (fb.bpp == 4) {
-            present_vga_planar_16();
-        } else {
-            present_vga_linear_256();
-        }
         return;
     }
 
@@ -358,17 +381,6 @@ static void present(void) {
             continue;
         }
 
-<<<<<<< HEAD
-        if (fb.bpp == 24) {
-            uint8_t *dest = fb.address + (size_t)y * fb.pitch;
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
-                Color c = inside ? rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]) : (Color){0, 0, 0};
-                if (settings_applied.palette_mode == 1) {
-                    c = quantize_color_16(c);
-                }
-                uint32_t packed = pack_framebuffer_color(c);
-=======
         if (fb.bpp == 15 || fb.bpp == 16) {
             uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
@@ -383,7 +395,6 @@ static void present(void) {
             for (uint32_t x = 0; x < fb.width; ++x) {
                 Color c = present_color_for(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
                 uint32_t packed = pack_framebuffer_color(c);
->>>>>>> 6f31922 (Legacy VGA Support)
                 dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
                 dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
                 dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
@@ -391,23 +402,11 @@ static void present(void) {
             continue;
         }
 
-<<<<<<< HEAD
-        {
-            uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
-                Color c = inside ? rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]) : (Color){0, 0, 0};
-                if (settings_applied.palette_mode == 1) {
-                    c = quantize_color_16(c);
-                }
-                dest[x] = pack_framebuffer_color(c);
-=======
         {
             uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
                 Color c = present_color_for(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
                 dest[x] = pack_framebuffer_color(c);
->>>>>>> 6f31922 (Legacy VGA Support)
             }
         }
     }

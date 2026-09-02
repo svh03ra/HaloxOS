@@ -7,6 +7,22 @@ static void update_state(void) {
     KeyEvent event;
 
     if (cpu_halted_overlay) {
+        serial_trace("INFO", "system halt requested");
+        serial_trace_uint_value("INFO", "uptime ticks at halt", timer_ticks);
+        serial_trace_hex_value("INFO", "8042 status register at halt", inb(0x64));
+        serial_trace_hex_value("INFO", "PIC1 IMR at halt", inb(0x21));
+        serial_trace_hex_value("INFO", "PIC2 IMR at halt", inb(0xA1));
+        init_acpi_power();
+        if (acpi_power.available) {
+            serial_trace("INFO", "ACPI available at halt");
+            serial_trace_hex_value("INFO", "halt PM1a event block", acpi_power.pm1a_event_block);
+            serial_trace_hex_value("INFO", "halt PM1a control block", acpi_power.pm1a_control_block);
+            serial_trace_hex_value("INFO", "halt PM1a control readback",
+                                   inw((uint16_t)acpi_power.pm1a_control_block));
+        } else {
+            serial_trace("WARNING", "ACPI unavailable at halt");
+        }
+        serial_trace("INFO", "CPU halting (cli + hlt loop)");
         __asm__ volatile("cli");
         for (;;) {
             __asm__ volatile("hlt");

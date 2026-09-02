@@ -689,8 +689,11 @@ static void debug_help_command(const char *command) {
     cursor = read_token(cursor, token, sizeof(token));
 
     if (token[0] == '\0') {
-        terminal_add_line(&debug_term, "help edit | help exception | help fault");
-        terminal_add_line(&debug_term, "edit view change crash halt fault continue test");
+        terminal_add_line(&debug_term, "There are many more commands that you can use freely:");
+        terminal_add_line(&debug_term, "help edit | help exception | help fault | help power");
+        terminal_add_line(&debug_term, "");
+        terminal_add_line(&debug_term, "== ALL COMMANDS: ==");
+        terminal_add_line(&debug_term, "edit view change continue test");
     } else if (token_is(token, "e", "edit", NULL, NULL)) {
         terminal_add_line(&debug_term, "edit mem 0xADDR ff 0x100");
         terminal_add_line(&debug_term, "view mem [0xADDR] | view vid | view disk");
@@ -704,6 +707,14 @@ static void debug_help_command(const char *command) {
         terminal_add_line(&debug_term, "halt: arm silent CPU halt, then continue.");
     } else if (token_is(token, "f", "fault", NULL, NULL)) {
         terminal_add_line(&debug_term, "fault 1=divide, 2=invalid opcode, 3=triple fault");
+    } else if (token_is(token, "shutdown", "poweroff", NULL, NULL)) {
+        terminal_add_line(&debug_term, "shutdown: power off through ACPI S5 immediately.");
+    } else if (token_is(token, "reboot", "restart", NULL, NULL)) {
+        terminal_add_line(&debug_term, "reboot: reset the machine immediately.");
+    } else if (token_is(token, "pow", "power", "p", NULL)) {
+        terminal_add_line(&debug_term, "shutdown | poweroff: turn off the computer.");
+        terminal_add_line(&debug_term, "reboot | restart: restart the computer.");
+        terminal_add_line(&debug_term, "halt: stop the CPU until hard reset.");
     } else if (token_is(token, "view", "v", NULL, NULL)) {
         terminal_add_line(&debug_term, "view mem [0xADDR] opens hex/visual memory viewer.");
         terminal_add_line(&debug_term, "F1 hex, F2 visual, arrows move, ESC exits viewer.");
@@ -742,7 +753,13 @@ static void debug_execute_command(void) {
     if (command[0] == '\0') {
         return;
     }
-    terminal_add_line(&debug_term, command);
+    terminal_add_line(&debug_term, "");
+    {
+        char echo[TERM_LINE_LEN + 8];
+        copy_string(echo, "DBG: ", sizeof(echo));
+        copy_string(echo + 5, command, sizeof(echo) - 5);
+        terminal_add_line(&debug_term, echo);
+    }
     debug_add_history(command);
     serial_trace_concat("INFO", "DBG command: ", command);
 
@@ -770,6 +787,14 @@ static void debug_execute_command(void) {
         }
         debug_pending_action = fault == 3 ? DEBUG_ACTION_FAULT3 : (fault == 2 ? DEBUG_ACTION_FAULT2 : DEBUG_ACTION_FAULT1);
         terminal_add_line(&debug_term, "Fault armed. Type continue.");
+    } else if (streq(command, "shutdown") || streq(command, "poweroff")) {
+        terminal_add_line(&debug_term, "Shutting down...");
+        serial_trace("INFO", "debug shutdown command requested");
+        shutdown_system();
+    } else if (streq(command, "reboot") || streq(command, "restart")) {
+        terminal_add_line(&debug_term, "Rebooting...");
+        serial_trace("INFO", "debug reboot command requested");
+        restart_system();
     } else if (starts_with(command, "change ") || starts_with(command, "ch ")) {
         debug_change_command(command);
     } else if (streq(command, "view") || streq(command, "v") || starts_with(command, "view ") || starts_with(command, "v ")) {

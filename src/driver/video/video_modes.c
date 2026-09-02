@@ -164,13 +164,6 @@ static uint16_t output_height_for_settings(const SettingsState *state) {
     return heights[state->resolution_mode % 5];
 }
 
-<<<<<<< HEAD
-static uint8_t output_bpp_for_settings(const SettingsState *state) {
-    if (state->palette_mode == 2) {
-        return 16;
-    }
-    return state->palette_mode == 1 && video_backend == VIDEO_BACKEND_VGA ? 4 : 8;
-=======
 static uint8_t output_bpp_for_settings(const SettingsState *state) {
     if (state->palette_mode == 2) {
         return 16;
@@ -179,7 +172,6 @@ static uint8_t output_bpp_for_settings(const SettingsState *state) {
         return 4;
     }
     return 8;
->>>>>>> 6f31922 (Legacy VGA Support)
 }
 
 static void framebuffer_mode_string(char *buffer, size_t max_len, uint32_t width, uint32_t height, uint8_t bpp) {
@@ -436,34 +428,19 @@ static bool detect_bga_backend(void) {
     return id >= VBE_DISPI_ID0 && id <= VBE_DISPI_ID5;
 }
 
-<<<<<<< HEAD
 static bool detect_video_mode_switch(void) {
     return video_backend == VIDEO_BACKEND_BGA ||
            video_backend == VIDEO_BACKEND_VMWARE_SVGA ||
            video_backend == VIDEO_BACKEND_VGA;
-=======
-static bool detect_video_mode_switch(void) {
-    return video_backend == VIDEO_BACKEND_BGA ||
-           video_backend == VIDEO_BACKEND_VMWARE_SVGA ||
-           video_backend == VIDEO_BACKEND_VGA;
->>>>>>> 6f31922 (Legacy VGA Support)
 }
 
 static const char *video_backend_name(void) {
     switch (video_backend) {
-<<<<<<< HEAD
-        case VIDEO_BACKEND_MULTIBOOT: return "Multiboot framebuffer";
-        case VIDEO_BACKEND_BGA: return "Bochs/QEMU BGA";
-        case VIDEO_BACKEND_VMWARE_SVGA: return "VMware SVGA";
-        case VIDEO_BACKEND_VGA: return "Legacy VGA";
-        default: return "None";
-=======
         case VIDEO_BACKEND_MULTIBOOT: return "Multiboot framebuffer";
         case VIDEO_BACKEND_VGA: return "IBM VGA";
         case VIDEO_BACKEND_BGA: return "Bochs/QEMU BGA";
         case VIDEO_BACKEND_VMWARE_SVGA: return "VMware SVGA";
         default: return "None";
->>>>>>> 6f31922 (Legacy VGA Support)
     }
 }
 
@@ -495,9 +472,6 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
         return false;
     }
 
-<<<<<<< HEAD
-    if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
-=======
     /*
      * BGA and VMware have no linear 4bpp framebuffer. Low (16 colors) on
      * those backends uses an 8-bit mode with the DAC quantized to the
@@ -510,7 +484,6 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
     }
 
     if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
->>>>>>> 6f31922 (Legacy VGA Support)
         if (width > vmware_svga.max_width || height > vmware_svga.max_height) {
             return false;
         }
@@ -549,22 +522,6 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
         }
 
         update_present_maps();
-<<<<<<< HEAD
-        return true;
-    }
-
-    if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
-        if (fb.address == NULL || width != fb.width || height != fb.height) {
-            return false;
-        }
-        /* Indexed palettes are rendered in software on an RGB boot buffer. */
-        return bpp == 4 || bpp == 8 || (bpp == 16 && fb.bpp >= 15);
-    }
-
-    if (video_backend == VIDEO_BACKEND_VGA) {
-        return vga_set_legacy_mode(width, height, bpp);
-    }
-=======
         return true;
     }
 
@@ -577,6 +534,11 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
             boot_text_mode = false;
             return true;
         }
+        /*
+         * No VBE linear framebuffer: keep the requested 640x480 geometry
+         * with mode 12h (16 colors) before dropping to 320x200x256.
+         * Resolution-correct beats colorful-but-squashed.
+         */
         if (vga_set_graphics_mode(640, 480, 4)) {
             serial_trace("WARNING", "classic VGA: using 640x480x16 native fallback");
             boot_text_mode = false;
@@ -596,7 +558,6 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
         (void)bpp;
         return fb.address != NULL && fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT;
     }
->>>>>>> 6f31922 (Legacy VGA Support)
 
     if (video_backend == VIDEO_BACKEND_NONE) {
         return false;
@@ -638,25 +599,23 @@ static bool set_output_mode(const SettingsState *state) {
 
 static void enter_boot_text_mode(void) {
     boot_text_mode = true;
-<<<<<<< HEAD
-    if (video_backend == VIDEO_BACKEND_BGA && video_mode_switch_available) {
-        bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
-    } else if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
-        vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_DISABLE);
-    } else if (video_backend == VIDEO_BACKEND_VGA) {
-        vga_restore_text_mode();
-    }
-=======
     if (video_backend == VIDEO_BACKEND_BGA) {
         bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
         vga_enter_text_mode();
     } else if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
         vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_DISABLE);
         vga_enter_text_mode();
+    } else if (video_backend == VIDEO_BACKEND_MULTIBOOT && fb.bpp == 8) {
+        /*
+         * Emulated text menu on an indexed VBE LFB: the DAC still holds the
+         * bootloader's palette, so the menu's palette indices land on
+         * arbitrary colors (cyan headers, invisible gray text). Program the
+         * OS palette into the DAC so the indices render as intended.
+         */
+        program_vga_palette();
     } else if (video_backend == VIDEO_BACKEND_VGA && vga_graphics_active && !vga_native_text_mode_active()) {
         vga_save_and_enter_text_mode();
     }
->>>>>>> 6f31922 (Legacy VGA Support)
 }
 
 static void enter_main_graphics_mode(void) {

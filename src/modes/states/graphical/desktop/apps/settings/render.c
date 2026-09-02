@@ -31,11 +31,7 @@ static void render_settings(const Window *window) {
 
         draw_text(window->x + 20, window->y + 122, "Screen Resolution:", color_black, color_white, true);
         draw_button(window->x + 178, window->y + 116, 20, 18, "<", live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
-<<<<<<< HEAD
-        draw_button(window->x + 202, window->y + 116, 140, 18, resolution_name(&settings_pending), live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
-=======
         draw_button(window->x + 202, window->y + 116, 140, 18, settings_pending.widescreen ? resolution_name_wide(settings_pending.resolution_mode) : resolution_name(settings_pending.resolution_mode), live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
->>>>>>> 6f31922 (Legacy VGA Support)
         draw_button(window->x + 346, window->y + 116, 20, 18, ">", live_resolution_supported(settings_pending.resolution_mode) ? color_gray_light : color_gray, color_black, color_black);
 
         fill_rect(window->x + 20, window->y + 148, 12, 12, settings_pending.widescreen ? color_green : color_white);
