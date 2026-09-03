@@ -336,6 +336,7 @@ typedef struct {
 typedef enum {
     DEBUG_ACTION_NONE,
     DEBUG_ACTION_CRASH,
+    DEBUG_ACTION_CRASH_VECTOR,
     DEBUG_ACTION_HALT,
     DEBUG_ACTION_FAULT1,
     DEBUG_ACTION_FAULT2,
@@ -502,6 +503,7 @@ static Terminal debug_term;
 static bool debug = HALOXOS_CONFIG_DEBUG != 0;
 static bool debug_overlay_open = false;
 static DebugAction debug_pending_action = DEBUG_ACTION_NONE;
+static uint8_t debug_crash_vector = 0xFF;
 static char debug_history[DEBUG_HISTORY_COUNT][TERM_LINE_LEN];
 static int debug_history_count = 0;
 static int debug_history_cursor = 0;
@@ -588,6 +590,8 @@ static bool cpu_has_cpuid = false;
 static bool cpu_has_tsc = false;
 static bool boot_drive_valid = false;
 static uint8_t boot_drive_number = 0;
+static uintptr_t crash_mmap_addr = 0;
+static uint32_t crash_mmap_length = 0;
 static bool boot_drive_info_available = false;
 static uint8_t boot_drive_mode = 0;
 static uint16_t boot_drive_cylinders = 0;
@@ -744,6 +748,10 @@ static bool vga_probe_present(void);
 static bool vga_set_graphics_mode(uint16_t width, uint16_t height, uint16_t bpp);
 static void vga_save_and_enter_text_mode(void);
 static bool vga_native_text_mode_active(void);
+static void present(void);
+static void fill_rect(int x, int y, int w, int h, uint8_t color);
+static void draw_text(int x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent);
+static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transparent);
 
 
 /*

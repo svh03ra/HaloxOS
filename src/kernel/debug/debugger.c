@@ -351,6 +351,52 @@ static void debug_execute_pending(void) {
         debug_forced_fault_reason = "debug crash command requested";
         serial_trace("ERROR", "debug crash command requested");
         __asm__ volatile(".byte 0x0F, 0x0B");
+    } else if (action == DEBUG_ACTION_CRASH_VECTOR) {
+        uint8_t vector = debug_crash_vector;
+        debug_forced_fault_reason = "debug crash vector command requested";
+        serial_trace_hex_value("ERROR", "debug crash vector", vector);
+        switch (vector) {
+            case 0x00: /* divide error through a real instruction */
+                __asm__ volatile("xor %%edx, %%edx; xor %%ecx, %%ecx; div %%ecx" : : : "eax", "ecx", "edx");
+                break;
+            case 0x06: /* invalid opcode */
+                __asm__ volatile(".byte 0x0F, 0x0B");
+                break;
+            /* x86 'int' only accepts an immediate vector, so every IDT
+             * vector gets its own constant instruction here. */
+            case 0x01: __asm__ volatile("int $0x01"); break;
+            case 0x02: __asm__ volatile("int $0x02"); break;
+            case 0x03: __asm__ volatile("int $0x03"); break;
+            case 0x04: __asm__ volatile("int $0x04"); break;
+            case 0x05: __asm__ volatile("int $0x05"); break;
+            case 0x07: __asm__ volatile("int $0x07"); break;
+            case 0x08: __asm__ volatile("int $0x08"); break;
+            case 0x09: __asm__ volatile("int $0x09"); break;
+            case 0x0A: __asm__ volatile("int $0x0A"); break;
+            case 0x0B: __asm__ volatile("int $0x0B"); break;
+            case 0x0C: __asm__ volatile("int $0x0C"); break;
+            case 0x0D: __asm__ volatile("int $0x0D"); break;
+            case 0x0E: __asm__ volatile("int $0x0E"); break;
+            case 0x10: __asm__ volatile("int $0x10"); break;
+            case 0x11: __asm__ volatile("int $0x11"); break;
+            case 0x12: __asm__ volatile("int $0x12"); break;
+            case 0x13: __asm__ volatile("int $0x13"); break;
+            case 0x14: __asm__ volatile("int $0x14"); break;
+            case 0x15: __asm__ volatile("int $0x15"); break;
+            case 0x16: __asm__ volatile("int $0x16"); break;
+            case 0x17: __asm__ volatile("int $0x17"); break;
+            case 0x18: __asm__ volatile("int $0x18"); break;
+            case 0x19: __asm__ volatile("int $0x19"); break;
+            case 0x1A: __asm__ volatile("int $0x1A"); break;
+            case 0x1B: __asm__ volatile("int $0x1B"); break;
+            case 0x1C: __asm__ volatile("int $0x1C"); break;
+            case 0x1D: __asm__ volatile("int $0x1D"); break;
+            case 0x1E: __asm__ volatile("int $0x1E"); break;
+            case 0x1F: __asm__ volatile("int $0x1F"); break;
+            default: /* 0x0F is reserved: land on the invalid opcode path */
+                __asm__ volatile(".byte 0x0F, 0x0B");
+                break;
+        }
     } else if (action == DEBUG_ACTION_HALT) {
         serial_trace("INFO", "debug halt command requested");
         __asm__ volatile("cli");
@@ -700,9 +746,13 @@ static void debug_help_command(const char *command) {
         terminal_add_line(&debug_term, "change vid 800x600 bpp 16 | change bg 2");
     } else if (token_is(token, "ex", "except", "exception", "exceptions")) {
         terminal_add_line(&debug_term, "crash | halt | fault 1 | fault 2 | fault 3");
-        terminal_add_line(&debug_term, "continue runs armed crash/halt/fault actions.");
+        terminal_add_line(&debug_term, "continue runs the crash, halt, or fault you picked.");
     } else if (token_is(token, "crash", NULL, NULL, NULL)) {
-        terminal_add_line(&debug_term, "crash: arm a real kernel crash, then continue.");
+        terminal_add_line(&debug_term, "crash: crash the system on purpose, then continue.");
+        terminal_add_line(&debug_term, "crash vector=XX: crash with a chosen CPU vector.");
+        terminal_add_line(&debug_term, "vector aliases: vec= v= code= id=");
+        terminal_add_line(&debug_term, "value: hex (0E, 0x0E) or decimal (14), range 0-31.");
+        terminal_add_line(&debug_term, "examples: crash vector=0E | crash v=3 | crash code=1");
     } else if (token_is(token, "halt", NULL, NULL, NULL)) {
         terminal_add_line(&debug_term, "halt: arm silent CPU halt, then continue.");
     } else if (token_is(token, "f", "fault", NULL, NULL)) {
@@ -770,12 +820,91 @@ static void debug_execute_command(void) {
         debug_memory_view_open = false;
         serial_trace("INFO", "Debugger continued");
         debug_execute_pending();
-    } else if (streq(command, "crash")) {
-        debug_pending_action = DEBUG_ACTION_CRASH;
-        terminal_add_line(&debug_term, "Crash armed. Type continue.");
+    } else if (streq(command, "crash") || starts_with(command, "crash ")) {
+        uint32_t vector = 0;
+
+        if (streq(command, "crash")) {
+            debug_pending_action = DEBUG_ACTION_CRASH;
+            terminal_add_line(&debug_term, "Crash set. Type continue.");
+            return;
+        }
+
+        {
+            const char *arg = skip_spaces(command + 6);
+            static const char *const prefixes[] = {
+                "vector=", "vec=", "v=", "code=", "id=", NULL
+            };
+            const char *value = NULL;
+            int hex = 0;
+
+            for (int i = 0; prefixes[i] != NULL; ++i) {
+                size_t plen = strlen_local(prefixes[i]);
+                if (starts_with(arg, prefixes[i])) {
+                    value = arg + plen;
+                    break;
+                }
+            }
+
+            if (value == NULL) {
+                terminal_add_line(&debug_term, "Usage: crash vector=XX (hex) | crash vector=13 (decimal)");
+                return;
+            }
+
+            if (starts_with(value, "0x") || starts_with(value, "0X")) {
+                value += 2;
+                hex = 1;
+            } else if (value[2] == '\0' && parse_hex_digit_char(value[0]) >= 0 &&
+                       parse_hex_digit_char(value[1]) >= 0) {
+                /* two bare hex-style digits like 0E or 1D */
+                hex = 1;
+            }
+
+            if (hex) {
+                int d0 = parse_hex_digit_char(value[0]);
+                int d1 = value[1] != '\0' ? parse_hex_digit_char(value[1]) : 0;
+                if (d0 < 0 || (value[1] != '\0' && d1 < 0) || value[2] != '\0') {
+                    terminal_add_line(&debug_term, "Usage: crash vector=XX (hex) | crash vector=13 (decimal)");
+                    return;
+                }
+                vector = (uint32_t)((d0 << 4) | d1);
+            } else {
+                if (!parse_uint_decimal(value, &vector)) {
+                    terminal_add_line(&debug_term, "Usage: crash vector=XX (hex) | crash vector=13 (decimal)");
+                    return;
+                }
+            }
+
+            if (vector > 31) {
+                terminal_add_line(&debug_term, "Vector range is 0..31.");
+                return;
+            }
+
+            debug_crash_vector = (uint8_t)vector;
+            debug_pending_action = DEBUG_ACTION_CRASH_VECTOR;
+            {
+                char msg[TERM_LINE_LEN];
+                size_t len = 0;
+
+                copy_string(msg, "Crash vector ", sizeof(msg));
+                len = strlen_local(msg);
+                msg[len++] = '0';
+                msg[len++] = 'x';
+                msg[len] = '\0';
+                if (vector < 16) {
+                    msg[len++] = '0';
+                }
+                {
+                    static const char digits[] = "0123456789ABCDEF";
+                    msg[len++] = digits[vector & 0x0Fu];
+                }
+                msg[len] = '\0';
+                copy_string(msg + len, " set. Type continue.", sizeof(msg) - len);
+                terminal_add_line(&debug_term, msg);
+            }
+        }
     } else if (streq(command, "halt")) {
         debug_pending_action = DEBUG_ACTION_HALT;
-        terminal_add_line(&debug_term, "Halt armed. Type continue.");
+        terminal_add_line(&debug_term, "Halt set. Type continue.");
     } else if (streq(command, "f") || streq(command, "fault") || starts_with(command, "f ") || starts_with(command, "fault ")) {
         uint32_t fault = 1;
         if (starts_with(command, "f ") || starts_with(command, "fault ")) {
@@ -786,7 +915,7 @@ static void debug_execute_command(void) {
             }
         }
         debug_pending_action = fault == 3 ? DEBUG_ACTION_FAULT3 : (fault == 2 ? DEBUG_ACTION_FAULT2 : DEBUG_ACTION_FAULT1);
-        terminal_add_line(&debug_term, "Fault armed. Type continue.");
+        terminal_add_line(&debug_term, "Fault set. Type continue.");
     } else if (streq(command, "shutdown") || streq(command, "poweroff")) {
         terminal_add_line(&debug_term, "Shutting down...");
         serial_trace("INFO", "debug shutdown command requested");

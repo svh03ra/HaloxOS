@@ -96,6 +96,11 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     ram_total_bytes = detect_total_ram_bytes(mbi);
     serial_trace_uint_value("INFO", "RAM total bytes", ram_total_bytes);
 
+    if (mbi != NULL && (mbi->flags & (1u << 6)) != 0 && mbi->mmap_addr != 0 && mbi->mmap_length != 0) {
+        crash_mmap_addr = (uintptr_t)mbi->mmap_addr;
+        crash_mmap_length = mbi->mmap_length;
+    }
+
     init_framebuffer(magic, mbi);
     serial_trace_video_mode("initialize graphics");
     video_mode_switch_available = detect_video_mode_switch();
