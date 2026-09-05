@@ -4,6 +4,7 @@
 AS := nasm
 CC := gcc
 LD := ld
+OBJCOPY := objcopy
 HOSTCC := gcc
 PYTHON := python3
 BUILD_STARTED := $(shell date +%s)
@@ -34,12 +35,70 @@ CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-
 LDFLAGS := -T linker.ld
 HOSTCFLAGS = -std=c11 -O2 -Wall -Wextra $(shell pkg-config --cflags libpng)
 HOSTLIBS = $(shell pkg-config --libs libpng)
-QEMU_ARGS = -cdrom $(ISO) -m 128 -vga std
+
+# OS detection for the run targets: Windows (MinGW/MSYS/Cygwin) or Linux.
+# Both paths are supported; the QEMU binary is located per platform.
+UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
+ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
+HOST_OS := windows
+else ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
+HOST_OS := windows
+else ifeq ($(findstring CYGWIN,$(UNAME_S)),CYGWIN)
+HOST_OS := windows
+else ifeq ($(findstring Windows,$(UNAME_S)),Windows)
+HOST_OS := windows
+else
+HOST_OS := linux
+endif
+
+ifeq ($(HOST_OS),windows)
+# Locate QEMU on Windows: PATH first, then common install locations
+# (qemu.org installer, MSYS2/mingw64, w64devkit). Paths with spaces are
+# quoted so the shell loop does not word-split them.
+QEMU_BIN := $(shell q=$$(command -v qemu-system-i386 2>/dev/null); \
+	if [ -n "$$q" ]; then echo "$$q"; \
+	else \
+		for c in "C:/Program Files/qemu/qemu-system-i386.exe" \
+		         "C:/Program Files (x86)/qemu/qemu-system-i386.exe" \
+		         "C:/qemu/qemu-system-i386.exe" \
+		         "C:/msys64/mingw64/bin/qemu-system-i386.exe" \
+		         "C:/msys64/usr/bin/qemu-system-i386.exe" \
+		         "$(USERPROFILE)/qemu/qemu-system-i386.exe"; do \
+			if [ -f "$$c" ]; then echo "$$c"; break; fi; \
+		done; \
+	fi)
+else
+QEMU_BIN := qemu-system-i386
+endif
+
+QEMU_ARGS = -cdrom $(ISO)
 ifneq ($(filter serial,$(MAKECMDGOALS)),)
 QEMU_ARGS += -serial stdio -monitor none
 endif
-ARCH_PACKAGES := nasm gcc binutils grub xorriso pkgconf libpng dosfstools parted mtools gzip python3 qemu-system-x86
-DEBIAN_PACKAGES := nasm gcc gcc-multilib binutils grub-pc-bin grub-common xorriso pkg-config libpng-dev dosfstools parted mtools gzip python3 qemu-system-x86
+
+# Testing flag: build the ISO with the loader's "not enough RAM" BOOT
+# ERROR screen FORCED at boot, so it can be verified on real hardware
+# (which always has far more than 8MB). This only changes the build; no
+# emulator is launched. Matches -noram/--noram/-nr/--nr/-nomemory/
+# --nomemory/-nm/--nm plus the dashless noram/nr/nomemory/nm spellings.
+NORAM_MATCH := -noram --noram -nr --nr -nomemory --nomemory -nm --nm noram nr nomemory nm
+ifndef NORAM_TEST
+ifeq ($(filter $(NORAM_MATCH),$(MAKECMDGOALS)),)
+NORAM_TEST := 0
+else
+NORAM_TEST := 1
+endif
+endif
+# Stamp that records which mode the loader objects were last built in, so
+# switching between `make` and `make noram` always rebuilds the loader.
+NORAM_STAMP := build/generated/noram_stamp
+ifeq ($(NORAM_TEST),1)
+NORAM_STAMP_TEXT := test
+else
+NORAM_STAMP_TEXT := normal
+endif
+ARCH_PACKAGES := nasm gcc binutils grub xorriso pkgconf libpng dosfstools parted mtools gzip zstd python3 qemu-system-x86
+DEBIAN_PACKAGES := nasm gcc gcc-multilib binutils grub-pc-bin grub-common xorriso pkg-config libpng-dev dosfstools parted mtools gzip zstd python3 qemu-system-x86
 
 ifneq ($(filter disk,$(MAKECMDGOALS)),)
 BUILD_MEDIA := Hard Disk
@@ -71,6 +130,22 @@ DISK := build/HaloxOS-Disk_DEV.img
 FLOPPY := build/HaloxOS-Floppy_DEV.img
 KERNEL := build/kernel.bin
 KERNEL_GZ := build/kernel.bin.gz
+KERNEL_ZST := build/kernel.bin.zst
+LOADER := build/loader.elf
+LOADER_OBJS := \
+build/loader_boot.o \
+build/loader_main.o \
+build/loader_zstd.o \
+build/loader_shim.o
+
+LOADER_FLAGS := -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -fno-asynchronous-unwind-tables -Iloader/include -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH) -DHALOXOS_BOOT_SCREEN_WIDTH=$(CONFIG_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(CONFIG_SCREEN_HEIGHT) -DHALOXOS_FORCE_RAM_ERROR=$(NORAM_TEST)
+ifeq ($(CONFIG_SCREEN_DEPTH),4)
+LOADER_FLAGS += -DHALOXOS_BOOT_GRAPHICS_EXPECTED=0
+else
+LOADER_FLAGS += -DHALOXOS_BOOT_GRAPHICS_EXPECTED=1
+endif
+ZSTD_LEVEL := 12
+MODULE_MAGIC := 0x484C585A
 DISK_CORE := build/core_disk.img
 FLOPPY_CORE := build/core_floppy.img
 BUILD_INFO := build/generated/build_info.h
@@ -135,6 +210,7 @@ install-deps:
 	command -v mmd >/dev/null 2>&1 || missing=1; \
 	command -v mcopy >/dev/null 2>&1 || missing=1; \
 	command -v gzip >/dev/null 2>&1 || missing=1; \
+	command -v zstd >/dev/null 2>&1 || missing=1; \
 	command -v $(PYTHON) >/dev/null 2>&1 || missing=1; \
 	command -v qemu-system-i386 >/dev/null 2>&1 || missing=1; \
 	if [ $$missing -eq 1 ]; then \
@@ -192,13 +268,13 @@ else
 GFXPAYLOAD := $(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x16,$(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x15,$(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x8
 endif
 
-$(BOOT_DISK_CFG): FORCE | build/generated
+$(BOOT_DISK_CFG): src/config/config.h | build/generated
 	@$(call LOG_COMPILE,boot disk menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
-$(BOOT_FLOPPY_CFG): FORCE | build/generated
+$(BOOT_FLOPPY_CFG): src/config/config.h | build/generated
 	@$(call LOG_COMPILE,boot floppy menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin.gz' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(CORE_DISK_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,core disk menu,$@)
@@ -360,13 +436,64 @@ $(KERNEL_GZ): $(KERNEL) | build
 	@$(call LOG_COMPILE,$<,$@)
 	@gzip -n -9 -c $< > $@ || { $(call LOG_ERROR,Failed to compress $< to $@); exit 1; }
 
+# ===== zstd boot chain =====
+
+build/loader_boot.o: loader/boot.asm src/config/config.h | build
+	@$(call LOG_COMPILE,$<,$@)
+	@$(AS) $(ASFLAGS) -f elf32 -o $@ $< || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
+
+build/loader_main.o: loader/main.c loader/include/string.h src/config/config.h $(NORAM_STAMP) | build
+	@$(call LOG_COMPILE,$<,$@)
+	@$(CC) $(LOADER_FLAGS) -c -o $@ $< || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
+
+# The stamp recipe must run on every make invocation (like BUILD_INFO) so a
+# mode switch is detected even though the file always exists; it only
+# rewrites the file - and thus changes its mtime - when the mode actually
+# changed, which then triggers the loader_main.o rebuild.
+$(NORAM_STAMP): FORCE | build/generated
+	@mkdir -p build/generated
+	@if [ -f $@ ] && [ "$$(cat $@ 2>/dev/null)" = "$(NORAM_STAMP_TEXT)" ]; then exit 0; fi; \
+	printf '%s' '$(NORAM_STAMP_TEXT)' > $@.tmp || { $(call LOG_ERROR,Failed to write $@); exit 1; }; \
+	mv -f $@.tmp $@ || { $(call LOG_ERROR,Failed to update $@); exit 1; }
+
+build/loader_zstd.o: loader/zstd_all.c $(wildcard third_party/zstd-1.5.7/lib/**/*.c) | build
+	@$(call LOG_COMPILE,zstd 1.5.7 decompressor,$@)
+	@$(CC) $(LOADER_FLAGS) -c -o $@ $< || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
+
+build/loader_shim.o: loader/shim.c loader/include/string.h | build
+	@$(call LOG_COMPILE,$<,$@)
+	@$(CC) $(LOADER_FLAGS) -c -o $@ $< || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
+
+$(LOADER): $(LOADER_OBJS) loader/linker.ld
+	@$(call LOG_COMPILE,loader objects,$@)
+	@$(LD) -m elf_i386 -T loader/linker.ld -o $@ $(LOADER_OBJS) || { $(call LOG_ERROR,Failed to link $@); exit 1; }
+
+# Flat binary kernel image: file offset 0 == link address 0x200000, so the
+# loader can decompress it straight into place and jump to the entry VMA.
+# Compressing the ELF instead would ship ELF headers/offsets the loader
+# cannot relocate, and the entry would land on garbage.
+KERNEL_FLAT := build/kernel.flat
+KERNEL_BASE := 0x200000
+
+$(KERNEL_FLAT): $(KERNEL) | build
+	@$(call LOG_COMPILE,$<,$@)
+	@$(OBJCOPY) -O binary $(KERNEL) $@ || { $(call LOG_ERROR,Failed to flatten $< to $@); exit 1; }
+
+$(KERNEL_ZST): $(KERNEL_FLAT) | build
+	@$(call LOG_COMPILE,$<,$@)
+	@zstd -$(ZSTD_LEVEL) -T0 -f -q -o $@.frame $< || { $(call LOG_ERROR,Failed to compress $< with zstd); exit 1; }
+	@entry_addr=$$(nm $(KERNEL) | awk '/ T start$$/ {print "0x"$$1}'); \
+	if [ -z "$$entry_addr" ]; then $(call LOG_ERROR,kernel start symbol not found); exit 1; fi; \
+	$(PYTHON) tools/mkzstmodule.py $< $@.frame $@ $(MODULE_MAGIC) $$entry_addr || { $(call LOG_ERROR,Failed to package $@); exit 1; }
+	@rm -f $@.frame
+
 $(DISK_CORE): $(CORE_DISK_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe all_video || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot search search_fs_file vbe all_video || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(FLOPPY_CORE): $(CORE_FLOPPY_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot gzio search search_fs_file vbe all_video || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot search search_fs_file vbe all_video || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(KERNEL): $(KERNEL_OBJS)
 	@$(call LOG_COMPILE,kernel objects,$@)
@@ -383,20 +510,24 @@ $(KERNEL): $(KERNEL_OBJS)
 		exit 1; \
 	fi
 
-build/isodir/boot/kernel.bin: $(KERNEL) | build/isodir/boot/grub
+build/isodir/boot/loader.elf: $(LOADER) | build/isodir/boot/grub
 	@$(call LOG_COMPILE,$<,$@)
-	@cp $(KERNEL) $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
+	@cp $(LOADER) $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
 
-build/isodir/boot/grub/grub.cfg: | build/isodir/boot/grub
+build/isodir/boot/kernel.bin.zst: $(KERNEL_ZST) | build/isodir/boot/grub
+	@$(call LOG_COMPILE,$<,$@)
+	@cp $(KERNEL_ZST) $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
+
+build/isodir/boot/grub/grub.cfg: src/config/config.h | build/isodir/boot/grub
 	@$(call LOG_COMPILE,boot menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/kernel.bin' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    insmod gzio' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
-$(ISO): build/isodir/boot/kernel.bin build/isodir/boot/grub/grub.cfg
+$(ISO): build/isodir/boot/loader.elf build/isodir/boot/kernel.bin.zst build/isodir/boot/grub/grub.cfg
 	@$(call LOG_COMPILE,build/isodir,$@)
 	@grub-mkrescue -o $@ build/isodir >/dev/null 2>&1 || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 	@$(call LOG_OK,Build Finished!)
 
-$(DISK): $(KERNEL_GZ) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT) | build
+$(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT) | build
 	@$(call LOG_COMPILE,Empty disk image,$@)
 	@truncate -s 64M $@ || { $(call LOG_ERROR,Failed to create $@); exit 1; }
 	@$(call LOG_COMPILE,$@,msdos partition table)
@@ -418,8 +549,10 @@ $(DISK): $(KERNEL_GZ) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT) | build
 	@mmd -i $@@@$(DISK_PART_OFFSET) ::/boot ::/boot/grub || { $(call LOG_ERROR,Failed to create boot directories in $@); exit 1; }
 	@$(call LOG_COMPILE,$(BOOT_DISK_CFG),$@)
 	@mcopy -i $@@@$(DISK_PART_OFFSET) $(BOOT_DISK_CFG) ::/boot/grub/grub.cfg || { $(call LOG_ERROR,Failed to copy $(BOOT_DISK_CFG) into $@); exit 1; }
-	@$(call LOG_COMPILE,$(KERNEL_GZ),$@)
-	@mcopy -i $@@@$(DISK_PART_OFFSET) $(KERNEL_GZ) ::/boot/kernel.bin.gz || { $(call LOG_ERROR,Failed to copy $(KERNEL_GZ) into $@); exit 1; }
+	@$(call LOG_COMPILE,$(LOADER),$@)
+	@mcopy -i $@@@$(DISK_PART_OFFSET) $(LOADER) ::/boot/loader.elf || { $(call LOG_ERROR,Failed to copy $(LOADER) into $@); exit 1; }
+	@$(call LOG_COMPILE,$(KERNEL_ZST),$@)
+	@mcopy -i $@@@$(DISK_PART_OFFSET) $(KERNEL_ZST) ::/boot/kernel.bin.zst || { $(call LOG_ERROR,Failed to copy $(KERNEL_ZST) into $@); exit 1; }
 	@$(call LOG_COMPILE,$(GRUB_BOOT_IMG),$@)
 	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=446 count=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write boot sector into $@); exit 1; }
 	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=1 skip=510 seek=510 count=2 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write boot signature into $@); exit 1; }
@@ -429,7 +562,7 @@ $(DISK): $(KERNEL_GZ) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT) | build
 	@dd if=$(DESKTOP_LAYOUT) of=$@ bs=512 seek=$(DESKTOP_LAYOUT_LBA) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(DESKTOP_LAYOUT) into $@); exit 1; }
 	@$(call LOG_OK,Disk Image Finished!)
 
-$(FLOPPY): $(KERNEL_GZ) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
+$(FLOPPY): $(LOADER) $(KERNEL_ZST) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
 	@core_sectors=$$((($$(stat -c %s $(FLOPPY_CORE)) + 511) / 512)); \
 	if [ $$core_sectors -ge $(FLOPPY_PART_START) ]; then \
 		$(call LOG_ERROR,Floppy core image is too large: $$core_sectors sectors); \
@@ -456,8 +589,10 @@ $(FLOPPY): $(KERNEL_GZ) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
 	@mmd -i $@@@$(FLOPPY_PART_OFFSET) ::/boot ::/boot/grub || { $(call LOG_ERROR,Failed to create boot directories in $@); exit 1; }
 	@$(call LOG_COMPILE,$(BOOT_FLOPPY_CFG),$@)
 	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) $(BOOT_FLOPPY_CFG) ::/boot/grub/grub.cfg || { $(call LOG_ERROR,Failed to copy $(BOOT_FLOPPY_CFG) into $@); exit 1; }
-	@$(call LOG_COMPILE,$(KERNEL_GZ),$@)
-	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) $(KERNEL_GZ) ::/boot/kernel.bin.gz || { $(call LOG_ERROR,Failed to copy $(KERNEL_GZ) into $@); exit 1; }
+	@$(call LOG_COMPILE,$(LOADER),$@)
+	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) $(LOADER) ::/boot/loader.elf || { $(call LOG_ERROR,Failed to copy $(LOADER) into $@); exit 1; }
+	@$(call LOG_COMPILE,$(KERNEL_ZST),$@)
+	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) $(KERNEL_ZST) ::/boot/kernel.bin.zst || { $(call LOG_ERROR,Failed to copy $(KERNEL_ZST) into $@); exit 1; }
 	@$(call LOG_COMPILE,$(GRUB_BOOT_IMG),$@)
 	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=446 count=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write boot sector into $@); exit 1; }
 	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=1 skip=510 seek=510 count=2 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write boot signature into $@); exit 1; }
@@ -465,8 +600,55 @@ $(FLOPPY): $(KERNEL_GZ) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
 	@dd if=$(FLOPPY_CORE) of=$@ bs=512 seek=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(FLOPPY_CORE) into $@); exit 1; }
 	@$(call LOG_OK,Floppy Image Finished!)
 
+# Interactive QEMU launcher: asks for memory size and VGA type, then runs
+# the built ISO. Works on both Windows (MSYS2/MinGW shells with QEMU from
+# qemu.org or w64devkit) and Linux.
 run: $(ISO)
-	qemu-system-i386 $(QEMU_ARGS)
+ifeq ($(HOST_OS),windows)
+	@if [ -z "$(QEMU_BIN)" ]; then \
+		$(call LOG_ERROR,QEMU was not found on this Windows system); \
+		$(call LOG_DEP,Install QEMU from https://qemu.weilnetz.de/w64/ then retry); \
+		exit 1; \
+	fi
+else
+	@if ! command -v $(QEMU_BIN) >/dev/null 2>&1; then \
+		$(call LOG_ERROR,qemu-system-i386 is not installed); \
+		$(call LOG_DEP,Install it with your package manager (e.g. qemu-system-x86)); \
+		exit 1; \
+	fi
+endif
+	@$(call LOG_DEP,Detected OS: $(HOST_OS) | QEMU: $(QEMU_BIN))
+	@printf 'Set to Memory Size [default: 16]: '; \
+	read mem_input || mem_input=""; \
+	mem="$${mem_input:-16}"; \
+	case "$$mem" in \
+		''|*[!0-9]*) $(call LOG_ERROR,Invalid memory size: $$mem); exit 1;; \
+	esac; \
+	if [ "$$mem" -lt 1 ] || [ "$$mem" -gt 2048 ]; then \
+		$(call LOG_ERROR,Memory size must be between 1 and 2048 MB); exit 1; \
+	fi; \
+	printf 'Set to VGA Type [std, qxl, vmware, virtio, cirrus, none] [default: std]: '; \
+	read vga_input || vga_input=""; \
+	vga="$${vga_input:-std}"; \
+	case "$$vga" in \
+		std|qxl|vmware|virtio|cirrus|none) ;; \
+		*) $(call LOG_ERROR,Unknown VGA type: $$vga); \
+		   printf '%b%s%b\n' '\033[94m' 'Types: std, qxl, vmware, virtio, cirrus, none' '\033[0m'; exit 1;; \
+	esac; \
+	$(call LOG_DEP,Launching QEMU: $$mem MB RAM, VGA $$vga); \
+	"$(QEMU_BIN)" $(QEMU_ARGS) -m $$mem -vga $$vga
+
+# Low-RAM test build: rebuilds the ISO with the loader's "not enough RAM"
+# BOOT ERROR screen forced at boot (fake RAM shortage), so it can be
+# verified by booting the ISO on any machine - including real hardware
+# with plenty of RAM. No emulator is launched. GNU make cannot have a
+# target name starting with '-', so the dash spellings need a `--`
+# separator: `make -- -noram`, `make -- --noram`, `make -- -nr`,
+# `make -- -nomemory`, `make -- -nm`. The dashless spellings
+# `make noram`, `make nr`, `make nomemory`, `make nm` work directly.
+-noram --noram -nr --nr -nomemory --nomemory -nm --nm noram nr nomemory nm:
+	@$(call LOG_WARNING,Test build: BOOT ERROR RAM screen forced in the loader)
+	@$(MAKE) --no-print-directory NORAM_TEST=1 $(ISO)
 
 serial:
 	@:

@@ -381,15 +381,6 @@ static void present(void) {
             continue;
         }
 
-        if (fb.bpp == 15 || fb.bpp == 16) {
-            uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = present_color_for(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
-                dest[x] = (uint16_t)pack_framebuffer_color(c);
-            }
-            continue;
-        }
-
         if (fb.bpp == 24) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             for (uint32_t x = 0; x < fb.width; ++x) {

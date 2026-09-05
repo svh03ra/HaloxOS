@@ -135,3 +135,6 @@ cpu_halt_once:
     sti
     hlt
     ret
+
+; Mark the stack non-executable for the ELF linker.
+section .note.GNU-stack noalloc noexec nowrite progbits

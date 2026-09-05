@@ -77,12 +77,53 @@ static void init_state(void) {
     mines_place();
 }
 
+/*
+ * Loader handoff block: the zstd boot loader writes compression statistics
+ * at a fixed address before jumping into the kernel. Shown on the serial
+ * debugger trace in debug builds.
+ */
+#define LOADER_INFO_ADDR   0x750000u
+#define LOADER_INFO_MAGIC  0x484C585Au
+
+typedef struct {
+    uint32_t magic;
+    uint32_t module_start;
+    uint32_t module_end;
+    uint32_t compressed_size;
+    uint32_t original_size;
+    uint32_t ratio_percent_x10;
+    uint32_t decompress_ticks;
+    uint32_t dctx_size;
+    uint32_t kernel_entry;
+    uint32_t loader_flags;
+} LoaderInfoBlock;
+
+static void trace_loader_info(void) {
+    const volatile LoaderInfoBlock *info = (const volatile LoaderInfoBlock *)LOADER_INFO_ADDR;
+
+    if (info->magic != LOADER_INFO_MAGIC) {
+        serial_trace("WARNING", "boot loader info block not found");
+        return;
+    }
+
+    serial_trace("INFO", "kernel was loaded by the zstd boot loader");
+    serial_trace("INFO", "kernel compress/decompress details:");
+    serial_trace_uint_value("INFO", "  original kernel bytes", info->original_size);
+    serial_trace_uint_value("INFO", "  zstd compressed bytes", info->compressed_size);
+    serial_trace_uint_value("INFO", "  compression ratio percent x10", info->ratio_percent_x10);
+    serial_trace_hex_value("INFO", "  module range start", info->module_start);
+    serial_trace_hex_value("INFO", "  module range end", info->module_end);
+    serial_trace_uint_value("INFO", "  zstd dctx workspace bytes", info->dctx_size);
+    serial_trace_hex_value("INFO", "  kernel entry from loader", info->kernel_entry);
+}
+
 void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     uint32_t frame_cycle_start = 0;
     uint32_t frame_cycle_end = 0;
 
     serial_init();
     serial_trace("INFO", "initialize kernel");
+    trace_loader_info();
     serial_trace_hex_value("INFO", "kernel multiboot magic", magic);
     serial_trace_hex_value("INFO", "kernel entry address", (uint32_t)(uintptr_t)&kernel_main);
     boot_drive_valid = false;

@@ -175,7 +175,12 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
     draw_text(text_x, y, "to your machine.", color_white, color_blue, false);
     y += 20;
 
-    draw_text(text_x, y, name, color_white, color_blue, false);
+    line[0] = '\0';
+    len = 0;
+    copy_string(line, "CODE: ", sizeof(line));
+    len = strlen_local(line);
+    copy_string(line + len, name, sizeof(line) - len);
+    draw_text(text_x, y, line, color_white, color_blue, false);
     y += 30;
 
     /* Keep long diagnostics inside the 640x480 logical canvas instead of

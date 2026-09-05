@@ -76,7 +76,9 @@ static bool live_palette_supported(uint8_t index) {
     uint8_t palette_mode = index % 3;
 
     if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
-        return true;
+        /* Multiboot gives us a fixed framebuffer; only direct-color modes
+         * (15/16/24/32 bpp) can support the True-Color! setting. */
+        return palette_mode != 2 || fb.bpp >= 15;
     }
 
     if (video_backend == VIDEO_BACKEND_VGA) {
@@ -98,10 +100,6 @@ static bool live_palette_supported(uint8_t index) {
 
     if (video_backend == VIDEO_BACKEND_VGA) {
         return index % 3 != 2;
-    }
-
-    if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
-        return palette_mode != 2 || fb.bpp >= 15;
     }
 
     return palette_mode != 2 || video_mode_switch_available;

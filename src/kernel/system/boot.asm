@@ -51,9 +51,24 @@ MB_MODE_TYPE equ 0
 section .text
 global start
 extern kernel_main
+; Bounds of the whole .bss, defined by linker.ld (see the note below).
+extern __bss_start
+extern __bss_end
 
+; The zstd loader decompresses this kernel at its link address and jumps
+; here with the original GRUB multiboot registers (eax = magic, ebx = info).
+; GRUB never loaded this ELF, so .bss has to be zeroed by the kernel itself.
 start:
     cli
+    ; zero the whole .bss range
+    mov ecx, __bss_start
+.zero_bss:
+    cmp ecx, __bss_end
+    jae .bss_done
+    mov dword [ecx], 0
+    add ecx, 4
+    jmp .zero_bss
+.bss_done:
     mov esp, stack_top
     push ebx
     push eax
@@ -65,7 +80,14 @@ start:
     jmp .hang
 
 section .bss
-align 16
+; NOTE: __bss_start/__bss_end are defined by linker.ld around the whole
+; .bss section (every kernel object plus this stack). Do not add local
+; labels here - they would shadow the linker-provided bounds and the
+; boot-time zeroing loop would only clear the stack.
+
 stack_bottom:
     resb 16384
 stack_top:
+
+; Mark the stack non-executable for the ELF linker.
+section .note.GNU-stack noalloc noexec nowrite progbits
