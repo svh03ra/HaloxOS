@@ -30,7 +30,7 @@ jobs:
             mtools \
             dosfstools \
             parted \
-            \\
+            zstd \
             python3 \
             pkg-config \
             libpng-dev \

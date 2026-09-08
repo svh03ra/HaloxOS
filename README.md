@@ -5,33 +5,33 @@ _100% **REAL** OS, Built from **SCRATCH**, Made with **AI**:_
 
 _<sup>(Graphical Demonstration included)</sup>_
 
-## ??? What's that?
-This was actually made in VS???Code with Codex while I was developing my own OS.
-I???ve been handling things carefully and delicately for progress... So what???s going to be build lads?
+## ❓ What's that?
+This was actually made in VS Code with Codex while I was developing my own OS.
+I’ve been handling things carefully and delicately for progress... So what’s going to be build lads?
 
-## ???? Source Layout
+## 🧭 Source Layout
 The source tree is arranged around the OS parts that own the behavior:
 
 ```
 src/
-????????? config/                 # build-time toggles for debug and default video mode
-????????? driver/                 # video, input, and other hardware drivers
-????????? kernel/                 # system core and debug support
-????????? modes/states/
-    ????????? boot/               # boot menu and boot terminal state
-    ????????? graphical/
-        ????????? login/ui/       # graphical login UI assets and code
-        ????????? desktop/
-            ????????? apps/       # desktop app UI/handling ownership
-            ????????? ui/         # desktop shell, menus, overlays, icons, backgrounds
+├── config/                 # build-time toggles for debug and default video mode
+├── driver/                 # video, input, and other hardware drivers
+├── kernel/                 # system core and debug support
+└── modes/states/
+    ├── boot/               # boot menu and boot terminal state
+    └── graphical/
+        ├── login/ui/       # graphical login UI assets and code
+        └── desktop/
+            ├── apps/       # desktop app UI/handling ownership
+            └── ui/         # desktop shell, menus, overlays, icons, backgrounds
 ```
 
 `src/kernel/system/kernel.c` keeps the shared kernel types and state, then includes the split implementation fragments from the ownership folders. This keeps the original base-code behavior while letting driver, kernel, boot, login, desktop UI, and app code live on their new sides.
 
 Build-time defaults live in `src/config/config.h`, including debug mode, default screen resolution, and BPP.
 
-## ???? System Requirements
-Let???s take a look at some requirements you may need for _pinchy salt_!
+## 📝 System Requirements
+Let’s take a look at some requirements you may need for _pinchy salt_!
 
 **Minimum Requirements:**
 - **CPU:** `Intel i386(?)` or Fewer
@@ -42,10 +42,10 @@ Let???s take a look at some requirements you may need for _pinchy salt_!
 
 **If you have fewer specifications, you can run it at the same time!**
 
-## ???? Build Instructions
+## 📦 Build Instructions
 First of all, you need to understand what you will do in order to follow the instructions such like following a plan on paper:
 
-- **Be quick reminder, this will required for any ???? Linux OS only!**
+- **Be quick reminder, this will required for any 🐧 Linux OS only!**
 #
 **1.** Get to Download Repository: `git clone https://github.com/svh03ra/HaloxOS.git` from a terminal application.
 
@@ -53,7 +53,7 @@ First of all, you need to understand what you will do in order to follow the ins
 
 **3.** Have Fun!
 
-?????? **Keep in Mind:** Remember, if you don???t have some of the required packages by simply run `make` command for the first time may install them automatically.
+‼️ **Keep in Mind:** Remember, if you don’t have some of the required packages by simply run `make` command for the first time may install them automatically.
 
 **Unboxing the Packages:**
 ```
@@ -66,7 +66,7 @@ First of all, you need to understand what you will do in order to follow the ins
 - mtools
 - dosfstools
 - parted
-- zstd
+- gzip
 - python3
 - pkg-config
 - libpng-dev
@@ -93,5 +93,5 @@ _Remember to remind this, make sure the `HALOXOS_CONFIG_DEBUG` variable is enabl
 _At the starts from graphical desktop mode, but you just do to open the debugger terminal as press **Ctrl+Shift+Enter** to use._
 - To use `make clean` command to remove build artifacts for quick recovery.
 
-## ?????? License:
+## ⚖️ License:
 This repository is licensed under the GNU General Public License. You can view the full license here: [License Available](https://github.com/svh03ra/HaloxOS/blob/main/LICENSE)
