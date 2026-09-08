@@ -3,6 +3,10 @@
 
 // This repository is licensed under the GNU General Public License.
 
+/* Runtime pixel-drawing hot path: cached palette-index -> RGB565 table
+ * (defined near palette_rgb565 at the bottom of this file). */
+static uint16_t pixel_rgb565_fast(uint8_t color);
+
 static uint8_t nearest_color(uint8_t r, uint8_t g, uint8_t b) {
     uint32_t best_distance = 0xFFFFFFFFu;
     uint8_t best_index = 0;
@@ -31,6 +35,9 @@ static void init_theme_colors(void) {
     color_green_dark = nearest_color(0, 100, 0);
     color_blue = nearest_color(60, 110, 220);
     color_blue_dark = nearest_color(20, 40, 100);
+    /* exact BSOD blue #0909BF, snapped to slot 216 on indexed
+     * framebuffers and to the nearest channel value on direct-color */
+    color_crash_blue = nearest_color(9, 9, 191);
     color_red = nearest_color(180, 40, 40);
     color_yellow = nearest_color(230, 210, 40);
     color_orange = nearest_color(230, 130, 40);
@@ -204,6 +211,40 @@ static Color present_color_for(uint16_t rgb565) {
     return palette[quant_lut[rgb565]];
 }
 
+/*
+ * Full-chain output LUT: maps a backbuffer RGB565 value straight to the
+ * packed framebuffer pixel, fusing rgb565_to_color + palette/EGA
+ * quantization + format packing. Valid only while the output format and
+ * palette mode stay unchanged; both are rare runtime events, so the
+ * small rebuild cost is amortized over millions of pixels. This removes
+ * ~10 arithmetic ops + a 16-entry nearest-color search per pixel from
+ * every scanout of the 24/32bpp present paths.
+ */
+static uint32_t present_pixel_lut[65536];
+static int8_t present_pixel_lut_mode = -1;
+static uint8_t present_pixel_lut_bpp = 0;
+
+static void present_pixel_lut_invalidate(void) {
+    present_pixel_lut_mode = -1;
+    present_pixel_lut_bpp = 0;
+}
+
+static void present_pixel_lut_build(uint8_t mode, uint8_t bpp) {
+    for (uint32_t v = 0; v < 65536; ++v) {
+        present_pixel_lut[v] = pack_framebuffer_color(present_color_for((uint16_t)v));
+    }
+    present_pixel_lut_mode = (int8_t)mode;
+    present_pixel_lut_bpp = bpp;
+}
+
+static uint32_t present_pixel_fast(uint16_t rgb565) {
+    if (present_pixel_lut_mode != (int8_t)settings_applied.palette_mode ||
+        present_pixel_lut_bpp != fb.bpp) {
+        present_pixel_lut_build(settings_applied.palette_mode, fb.bpp);
+    }
+    return present_pixel_lut[rgb565];
+}
+
 static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
     uint32_t bar0 = 0;
     bool bga_text_boot_backend_ready = false;
@@ -370,9 +411,15 @@ static void present(void) {
 
         if (fb.bpp == 15 || fb.bpp == 16) {
             uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
+            uint16_t out_black = (uint16_t)pack_framebuffer_color((Color){0, 0, 0});
             for (uint32_t x = 0; x < fb.width; ++x) {
                 bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
-                Color c = inside ? rgb565_to_color(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]) : (Color){0, 0, 0};
+                if (!inside) {
+                    dest[x] = out_black;
+                    continue;
+                }
+                uint16_t rgb = backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]];
+                Color c = rgb565_to_color(rgb);
                 if (settings_applied.palette_mode == 1) {
                     c = quantize_color_16(c);
                 }
@@ -384,8 +431,7 @@ static void present(void) {
         if (fb.bpp == 24) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = present_color_for(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
-                uint32_t packed = pack_framebuffer_color(c);
+                uint32_t packed = present_pixel_fast(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
                 dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
                 dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
                 dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
@@ -396,8 +442,7 @@ static void present(void) {
         {
             uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
             for (uint32_t x = 0; x < fb.width; ++x) {
-                Color c = present_color_for(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
-                dest[x] = pack_framebuffer_color(c);
+                dest[x] = present_pixel_fast(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
             }
         }
     }
@@ -408,21 +453,57 @@ static void present(void) {
 }
 
 static void clear_screen(uint8_t color) {
+    uint16_t rgb = pixel_rgb565_fast(color);
+
     memset_local(backbuffer, color, sizeof(backbuffer));
-    {
-        uint16_t rgb = palette_rgb565(color);
-        for (int i = 0; i < OS_WIDTH * OS_HEIGHT; ++i) {
-            backbuffer_rgb565[i] = rgb;
-        }
+    for (int i = 0; i < OS_WIDTH * OS_HEIGHT; ++i) {
+        backbuffer_rgb565[i] = rgb;
     }
+}
+
+/*
+ * Window clip: when set, all pixel/rect/image drawing is confined to
+ * the client area of the app window being rendered, so scenes like
+ * Title Run! or the firecracker demo can never bleed outside their
+ * window face onto the desktop. render_app_window enables it around
+ * each app draw and disables it afterwards.
+ */
+static int clip_x0 = 0;
+static int clip_y0 = 0;
+static int clip_x1 = OS_WIDTH;
+static int clip_y1 = OS_HEIGHT;
+static bool clip_enabled = false;
+
+static void set_window_clip(int x, int y, int w, int h) {
+    clip_x0 = clampi(x, 0, OS_WIDTH);
+    clip_y0 = clampi(y, 0, OS_HEIGHT);
+    clip_x1 = clampi(x + w, 0, OS_WIDTH);
+    clip_y1 = clampi(y + h, 0, OS_HEIGHT);
+    if (clip_x1 < clip_x0) clip_x1 = clip_x0;
+    if (clip_y1 < clip_y0) clip_y1 = clip_y0;
+    clip_enabled = true;
+}
+
+static void clear_window_clip(void) {
+    clip_enabled = false;
+}
+
+static bool clip_contains(int x, int y) {
+    if (!clip_enabled) {
+        return true;
+    }
+    return x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1;
 }
 
 static void draw_pixel(int x, int y, uint8_t color) {
     if (x < 0 || y < 0 || x >= OS_WIDTH || y >= OS_HEIGHT) {
         return;
     }
+    if (!clip_contains(x, y)) {
+        return;
+    }
     backbuffer[y * OS_WIDTH + x] = color;
-    backbuffer_rgb565[y * OS_WIDTH + x] = palette_rgb565(color);
+    backbuffer_rgb565[y * OS_WIDTH + x] = pixel_rgb565_fast(color);
 }
 
 static void fill_rect(int x, int y, int w, int h, uint8_t color) {
@@ -430,11 +511,22 @@ static void fill_rect(int x, int y, int w, int h, uint8_t color) {
     int y0 = clampi(y, 0, OS_HEIGHT);
     int x1 = clampi(x + w, 0, OS_WIDTH);
     int y1 = clampi(y + h, 0, OS_HEIGHT);
+    uint16_t rgb = pixel_rgb565_fast(color);
+
+    if (clip_enabled) {
+        if (x0 < clip_x0) x0 = clip_x0;
+        if (y0 < clip_y0) y0 = clip_y0;
+        if (x1 > clip_x1) x1 = clip_x1;
+        if (y1 > clip_y1) y1 = clip_y1;
+    }
 
     for (int py = y0; py < y1; ++py) {
+        uint8_t *dest = &backbuffer[py * OS_WIDTH];
+        uint16_t *dest_rgb = &backbuffer_rgb565[py * OS_WIDTH];
+
         for (int px = x0; px < x1; ++px) {
-            backbuffer[py * OS_WIDTH + px] = color;
-            backbuffer_rgb565[py * OS_WIDTH + px] = palette_rgb565(color);
+            dest[px] = color;
+            dest_rgb[px] = rgb;
         }
     }
 }
@@ -453,6 +545,30 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
         glyph_index = 0;
     } else {
         glyph_index = (uint8_t)((unsigned char)ch - 32);
+    }
+
+    if (!clip_enabled && x >= 0 && y >= 0 && x + 8 <= OS_WIDTH && y + 8 <= OS_HEIGHT) {
+        /* Fully on-screen: write rows directly, no per-pixel clipping.
+         * Colors are resolved once instead of per pixel. */
+        uint16_t fg_rgb = pixel_rgb565_fast(fg);
+        uint16_t bg_rgb = transparent ? 0 : pixel_rgb565_fast(bg);
+
+        for (int row = 0; row < 8; ++row) {
+            uint8_t bits = font8x8_basic[glyph_index][row];
+            uint8_t *dest = &backbuffer[(y + row) * OS_WIDTH + x];
+            uint16_t *dest_rgb = &backbuffer_rgb565[(y + row) * OS_WIDTH + x];
+
+            for (int col = 0; col < 8; ++col) {
+                if ((bits >> col) & 1u) {
+                    dest[col] = fg;
+                    dest_rgb[col] = fg_rgb;
+                } else if (!transparent) {
+                    dest[col] = bg;
+                    dest_rgb[col] = bg_rgb;
+                }
+            }
+        }
+        return;
     }
 
     for (int row = 0; row < 8; ++row) {
@@ -722,6 +838,31 @@ static uint16_t palette_rgb565(uint8_t color) {
                       (uint16_t)(c.b >> 3));
 }
 
+/*
+ * Runtime pixel-drawing hot path. palette[] is built once at boot and
+ * never modified, so the RGB565 form of every palette index can be
+ * cached in a 256-entry table. This turns the per-pixel cost of the old
+ * path (palette struct load + 3 shifts + 3 ors) into a single byte load
+ * from a table that stays hot in cache, and lets fill_rect hoist the
+ * color conversion out of its loops entirely.
+ */
+static uint16_t palette_rgb565_cache[256];
+static bool palette_rgb565_cache_ready = false;
+
+static void palette_rgb565_cache_build(void) {
+    for (int i = 0; i < 256; ++i) {
+        palette_rgb565_cache[i] = palette_rgb565((uint8_t)i);
+    }
+    palette_rgb565_cache_ready = true;
+}
+
+static uint16_t pixel_rgb565_fast(uint8_t color) {
+    if (!palette_rgb565_cache_ready) {
+        palette_rgb565_cache_build();
+    }
+    return palette_rgb565_cache[color];
+}
+
 static Color rgb565_to_color(uint16_t value) {
     Color c;
     c.r = (uint8_t)((((value >> 11) & 0x1Fu) * 255u) / 31u);
@@ -747,7 +888,8 @@ static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) 
             if (!transparent || alpha[index] >= 128) {
                 int dx = x + px;
                 int dy = y + py;
-                if (dx >= 0 && dy >= 0 && dx < OS_WIDTH && dy < OS_HEIGHT) {
+                if (dx >= 0 && dy >= 0 && dx < OS_WIDTH && dy < OS_HEIGHT &&
+                    clip_contains(dx, dy)) {
                     backbuffer[dy * OS_WIDTH + dx] = pixels[index];
                     backbuffer_rgb565[dy * OS_WIDTH + dx] = rgb565[index];
                 }

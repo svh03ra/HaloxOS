@@ -35,11 +35,14 @@ static void execute_terminal_command(Terminal *term, bool boot_console) {
             open_desktop();
         }
     } else if (streq(command, "shutdown")) {
+        debug_bp_catch_power("shutdown (terminal command)");
         shutdown_system();
     } else if (streq(command, "restart")) {
+        debug_bp_catch_power("restart (terminal command)");
         restart_system();
     } else if (streq(command, "halt")) {
         serial_trace("INFO", "halt command requested");
+        debug_bp_catch_power("halt (terminal command)");
         cpu_halted_overlay = true;
         terminal_reset(term);
         terminal_add_line(term, "GAME OVER!");

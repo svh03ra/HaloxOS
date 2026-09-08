@@ -405,6 +405,8 @@ static void handle_desktop_mouse(void) {
     explorer_handle_mouse();
     mines_handle_mouse();
     game_center_handle_mouse();
+    demo_center_handle_mouse();
+    firecracker_handle_mouse();
     power_handle_mouse();
     settings_handle_mouse();
     task_manager_handle_mouse();

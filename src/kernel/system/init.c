@@ -62,6 +62,18 @@ static void init_state(void) {
     debug_memory_edit_nibble = -1;
     debug_edited_range_count = 0;
     debug_forced_fault_reason = NULL;
+    fps_overlay_on = false;
+    fps_display = 0;
+    fps_current = 0;
+    fps_avg_ticks_x10 = 0;
+    fps_lagging = false;
+    fps_frames_total = 0;
+    debug_bp_mask = 0;
+    debug_bp_caught = false;
+    debug_bp_frame_base = 0;
+    debug_bp_catch_count = 0;
+    debug_bp_armed = false;
+    debug_log_scroll_x = 0;
     cmd_term.wrap_chars = 51;
     terminal_add_line(&cmd_term, "Welcome to HaloxOS Terminal:");
     terminal_add_line(&cmd_term, "Type 'help' for show all comannds to use.");
@@ -120,6 +132,9 @@ static void trace_loader_info(void) {
 void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     uint32_t frame_cycle_start = 0;
     uint32_t frame_cycle_end = 0;
+    uint32_t fps_window_tick = timer_ticks;
+    uint32_t fps_window_frames = 0;
+    uint32_t fps_frame_tick = timer_ticks;
 
     serial_init();
     serial_trace("INFO", "initialize kernel");
@@ -193,6 +208,48 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
         if (perf_phase != last_performance_sample_phase) {
             update_performance_metrics(0);
             last_performance_sample_phase = perf_phase;
+        }
+
+        /* FPS measurement: count main-loop iterations and close a
+         * window every 10 timer ticks (6 fps windows per second at
+         * TIMER_HZ=60) so the overlay updates fast without flicker.
+         * fps_current is FPS * 10 for the XXX.X display. A frame that
+         * took 1.5x the rolling average marks fps_lagging for blink. */
+        ++fps_frames_total;
+        ++fps_window_frames;
+        {
+            uint32_t frame_delta = timer_ticks - fps_frame_tick;
+
+            if (frame_delta > 0) {
+                if (fps_avg_ticks_x10 == 0) {
+                    fps_avg_ticks_x10 = frame_delta * 10u;
+                } else {
+                    fps_avg_ticks_x10 = (fps_avg_ticks_x10 * 9u + frame_delta * 10u) / 10u;
+                }
+                fps_lagging = frame_delta * 10u > (fps_avg_ticks_x10 * 15u) / 10u;
+            }
+            fps_frame_tick = timer_ticks;
+        }
+        if (timer_ticks - fps_window_tick >= 10u) {
+            uint32_t elapsed = timer_ticks - fps_window_tick;
+
+            fps_current = elapsed > 0 ? (fps_window_frames * TIMER_HZ * 10u) / elapsed : 0;
+            fps_window_tick = timer_ticks;
+            fps_window_frames = 0;
+        }
+
+        /* FPS overlay redraws on its own when visible, even on an
+         * otherwise idle desktop. */
+        if (system_state == STATE_DESKTOP && fps_overlay_on &&
+            desktop_should_redraw() == false) {
+            static uint32_t fps_last_redraw_tick = 0;
+
+            if (timer_ticks - fps_last_redraw_tick >= 6u) {
+                fps_last_redraw_tick = timer_ticks;
+                draw_everything();
+                present();
+                mark_desktop_redrawn();
+            }
         }
 
         if (system_state == STATE_SHUTDOWN) {

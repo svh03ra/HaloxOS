@@ -11,11 +11,14 @@ static bool power_handle_overlay_mouse(void) {
     int x = 240;
     int y = 184;
     if (point_in_rect(mouse.x, mouse.y, x, y, 160, 24)) {
+        debug_bp_catch_power("shutdown (overlay menu)");
         shutdown_system();
     } else if (point_in_rect(mouse.x, mouse.y, x, y + 32, 160, 24)) {
+        debug_bp_catch_power("restart (overlay menu)");
         restart_system();
     } else if (point_in_rect(mouse.x, mouse.y, x, y + 64, 160, 24)) {
         serial_trace("INFO", "power menu halt requested");
+        debug_bp_catch_power("halt (overlay menu)");
         cpu_halted_overlay = true;
     } else if (point_in_rect(mouse.x, mouse.y, x, y + 92, 160, 20) ||
                !point_in_rect(mouse.x, mouse.y, 212, 150, 216, 158)) {
@@ -33,11 +36,14 @@ static void power_handle_mouse(void) {
     int x = window->x + 20;
     int y = window->y + 36;
     if (point_in_rect(mouse.x, mouse.y, x, y, 160, 24)) {
+        debug_bp_catch_power("shutdown (power app)");
         shutdown_system();
     } else if (point_in_rect(mouse.x, mouse.y, x, y + 32, 160, 24)) {
+        debug_bp_catch_power("restart (power app)");
         restart_system();
     } else if (point_in_rect(mouse.x, mouse.y, x, y + 64, 160, 24)) {
         serial_trace("INFO", "power window halt requested");
+        debug_bp_catch_power("halt (power app)");
         cpu_halted_overlay = true;
     } else if (point_in_rect(mouse.x, mouse.y, x, y + 96, 160, 24)) {
         close_window(APP_POWER);

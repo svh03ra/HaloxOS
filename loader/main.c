@@ -46,10 +46,14 @@
 
 #define HALOXOS_MODULE_MAGIC 0x484C585Au
 
-/* HaloxOS policy floor: require a full 8 MiB of installed/advertised RAM.
- * The loader's internal addresses fit below this, but the OS intentionally
- * refuses smaller configurations. */
-#define MIN_RAM_BYTES 0x800000u
+/* Minimum RAM the boot chain really needs. The highest byte the loader
+ * writes is the info block end at 0x750028, and the kernel's .bss ends
+ * at 0x70A2C4 - so the chain physically tops out at ~7.52 MiB. An 8 MB
+ * machine reports slightly under 8 MiB usable (QEMU -m 8: 8257536 bytes,
+ * because the 128 KiB legacy I/O hole is excluded), so requiring a full
+ * 8 MiB rejected every real 8 MB PC by 128 KiB. 0x780000 (7.5 MiB) is
+ * the true floor with margin and accepts every 8 MB machine. */
+#define MIN_RAM_BYTES 0x780000u
 
 /* VGA text mode screen geometry. */
 #define VGA_TEXT_BUFFER 0xB8000u
@@ -924,11 +928,26 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
 
     err_begin(mbi);
 
-    /* Header: centered near the top with deliberate breathing room. */
-    fb_text_center(mbi, 24u, "***** BOOT ERROR!!! *****", fg, bg);
+    /*
+     * Uniform 12px text step (8px glyph + 4px gap) - the classic
+     * single-spaced 8x8 font look. Sections are separated by exactly one
+     * blank line (24px) so the whole screen reads as even, deliberate
+     * spacing instead of mixed gaps.
+     *
+     *   y= 20  ***** BOOT ERROR!!! *****          (header)
+     *   y= 56  warning line 1                     (one blank line below header)
+     *   y= 68  warning line 2
+     *   y= 80  warning line 3
+     *   y=104  Your Memory: ...                   (one blank line)
+     *   y=128  ** DEBUGGER INFO:                  (one blank line)
+     *   y=144  EAX/EBX ... 12px rows (dense diag block)
+     *   y=204  Memory Map:                        (one blank line)
+     *   y=216  map rows, 12px steps
+     */
+    fb_text_center(mbi, 20u, "***** BOOT ERROR!!! *****", fg, bg);
 
     /* Main explanation: each sentence is independently centered. */
-    fb_text_center_block(mbi, 64u, warning, 3u, 20u, fg, bg);
+    fb_text_center_block(mbi, 56u, warning, 3u, 12u, fg, bg);
 
     /* Memory amount: centered and visually separated from the paragraph. */
     line[0] = '\0';
@@ -979,7 +998,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
             }
         }
     }
-    fb_text_center(mbi, 148u, line, fg, bg);
+    fb_text_center(mbi, 104u, line, fg, bg);
 
 #if LOADER_DEBUG
     {
@@ -989,7 +1008,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
         capture_regs(&regs);
 
         /* Diagnostics are deliberately left aligned in a clean lower block. */
-        fb_text_left(mbi, 198u, 32u, "** DEBUGGER INFO:", fg, bg);
+        fb_text_left(mbi, 128u, 32u, "** DEBUGGER INFO:", fg, bg);
 
         line[0] = '\0'; len = 0;
         {
@@ -1003,7 +1022,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
             line[len] = '\0';
             text_append_hex32(line, &len, sizeof(line), regs.ebx);
         }
-        fb_text_left(mbi, 214u, 32u, line, fg, bg);
+        fb_text_left(mbi, 144u, 32u, line, fg, bg);
 
         line[0] = '\0'; len = 0;
         {
@@ -1014,7 +1033,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
             while (s[n] && len < (int)sizeof(line)-1) line[len++] = s[n++];
             line[len] = '\0'; text_append_hex32(line, &len, sizeof(line), regs.edx);
         }
-        fb_text_left(mbi, 230u, 32u, line, fg, bg);
+        fb_text_left(mbi, 156u, 32u, line, fg, bg);
 
         line[0] = '\0'; len = 0;
         {
@@ -1025,7 +1044,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
             while (s[n] && len < (int)sizeof(line)-1) line[len++] = s[n++];
             line[len] = '\0'; text_append_hex32(line, &len, sizeof(line), regs.edi);
         }
-        fb_text_left(mbi, 246u, 32u, line, fg, bg);
+        fb_text_left(mbi, 168u, 32u, line, fg, bg);
 
         line[0] = '\0'; len = 0;
         {
@@ -1036,7 +1055,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
             while (s[n] && len < (int)sizeof(line)-1) line[len++] = s[n++];
             line[len] = '\0'; text_append_hex32(line, &len, sizeof(line), regs.esp);
         }
-        fb_text_left(mbi, 262u, 32u, line, fg, bg);
+        fb_text_left(mbi, 180u, 32u, line, fg, bg);
 
         line[0] = '\0'; len = 0;
         {
@@ -1050,14 +1069,14 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
             while (s[n] && len < (int)sizeof(line)-1) line[len++] = s[n++];
             line[len] = '\0'; text_append_hex32(line, &len, sizeof(line), regs.ds);
         }
-        fb_text_left(mbi, 278u, 32u, line, fg, bg);
+        fb_text_left(mbi, 192u, 32u, line, fg, bg);
 
-        fb_text_left(mbi, 310u, 32u, "Memory Map:", fg, bg);
+        fb_text_left(mbi, 208u, 32u, "Memory Map:", fg, bg);
 
         if ((mbi->flags & MB_FLAG_MMAP) != 0 && mbi->mmap_addr != 0 && mbi->mmap_length != 0) {
             uint32_t cursor = mbi->mmap_addr;
             uint32_t end = mbi->mmap_addr + mbi->mmap_length;
-            uint32_t y = 330u;
+            uint32_t y = 220u;
             uint32_t column = 0;
             line[0] = '\0'; len = 0;
 
@@ -1074,7 +1093,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
                 ++column;
                 if (column == 4u) {
                     fb_text_left(mbi, y, 32u, line, fg, bg);
-                    y += 16u;
+                    y += 12u;
                     column = 0;
                     line[0] = '\0';
                     len = 0;
@@ -1089,7 +1108,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
                 fb_text_left(mbi, y, 32u, line, fg, bg);
             }
         } else {
-            fb_text_left(mbi, 330u, 32u, "unavailable", fg, bg);
+            fb_text_left(mbi, 220u, 32u, "unavailable", fg, bg);
         }
     }
 #endif

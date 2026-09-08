@@ -122,6 +122,10 @@ static void handle_text_target(KeyEvent event) {
         if (event.code == KEY_ENTER && (mines_lost || mines_won)) {
             mines_place();
         }
+    } else if (active_window == APP_RUN_GAME) {
+        run_handle_key(event);
+    } else if (active_window == APP_3D_BOX) {
+        box3d_handle_key(event);
     } else if (active_window == APP_PAINT) {
         if (keyboard_ctrl && (event.ch == 'c' || event.ch == 'C')) {
             memcpy_local(paint_clipboard, paint_canvas, sizeof(paint_canvas));

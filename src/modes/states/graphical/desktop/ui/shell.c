@@ -77,15 +77,16 @@ static int start_menu_item_y(int menu_y, int row) {
         case 3: return menu_y + 70;
         case 4: return menu_y + 86;
         case 6: return menu_y + 120;
-        case 9: return menu_y + 158;
-        case 10: return menu_y + 174;
-        case 11: return menu_y + 190;
+        case 7: return menu_y + 136;
+        case 9: return menu_y + 174;
+        case 10: return menu_y + 190;
+        case 11: return menu_y + 206;
         default: return -1;
     }
 }
 
 static int start_menu_hit_row(int menu_x, int menu_y, int px, int py) {
-    static const int rows[] = {0, 1, 2, 3, 4, 6, 9, 10, 11};
+    static const int rows[] = {0, 1, 2, 3, 4, 6, 7, 9, 10, 11};
     for (int i = 0; i < (int)(sizeof(rows) / sizeof(rows[0])); ++i) {
         int row_y = start_menu_item_y(menu_y, rows[i]);
         if (point_in_rect(px, py, menu_x + 4, row_y, 172, 15)) {
@@ -127,9 +128,9 @@ static void render_start_menu(void) {
         return;
     }
     int x = 0;
-    int y = OS_HEIGHT - TASKBAR_H - 214;
+    int y = OS_HEIGHT - TASKBAR_H - 232;
     int hover_row = -1;
-    if (point_in_rect(mouse.x, mouse.y, x, y, 180, 214)) {
+    if (point_in_rect(mouse.x, mouse.y, x, y, 180, 232)) {
         hover_row = start_menu_hit_row(x, y, mouse.x, mouse.y);
     }
     if (hover_row != start_menu_hover_row) {
@@ -137,8 +138,8 @@ static void render_start_menu(void) {
         start_menu_hover_tick = timer_ticks;
     }
 
-    fill_rect(x, y, 180, 214, color_gray_light);
-    draw_rect(x, y, 180, 214, color_black);
+    fill_rect(x, y, 180, 232, color_gray_light);
+    draw_rect(x, y, 180, 232, color_black);
     draw_text(x + 8, y + 8, "Tools:", color_blue_dark, color_gray_light, true);
     draw_start_menu_item(x, y, 0, "Notepad", color_black);
     draw_start_menu_item(x, y, 1, "Command Prompt", color_black);
@@ -147,7 +148,8 @@ static void render_start_menu(void) {
     draw_start_menu_item(x, y, 4, "Task Manager", color_black);
     draw_text(x + 8, y + 106, "Games:", color_blue_dark, color_gray_light, true);
     draw_start_menu_item(x, y, 6, "Game Center", color_black);
-    draw_text(x + 8, y + 144, "Options:", color_blue_dark, color_gray_light, true);
+    draw_start_menu_item(x, y, 7, "Demo Center", color_black);
+    draw_text(x + 8, y + 160, "Options:", color_blue_dark, color_gray_light, true);
     draw_start_menu_item(x, y, 9, "Power Options", color_black);
     draw_start_menu_item(x, y, 10, "Settings", color_black);
     draw_start_menu_item(x, y, 11, "x Close", color_red);

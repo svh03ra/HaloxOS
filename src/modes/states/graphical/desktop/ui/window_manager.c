@@ -3,6 +3,40 @@
 
 // This repository is licensed under the GNU General Public License.
 
+static int app_window_width(AppId app) {
+    switch (app) {
+        case APP_SETTINGS: return 400;
+        case APP_TASK_MANAGER: return 440;
+        case APP_POWER: return 220;
+        case APP_GAME_CENTER: return 360;
+        case APP_DEMO_CENTER: return 360;
+        case APP_3D_BOX: return 300;
+        case APP_FIRECRACKER: return 340;
+        case APP_RUN_GAME: return 420;
+        case APP_PAINT: return 368;
+        case APP_EXPLORER: return 336;
+        case APP_CMD: return 420;
+        default: return 300;
+    }
+}
+
+static int app_window_height(AppId app) {
+    switch (app) {
+        case APP_SETTINGS: return 260;
+        case APP_TASK_MANAGER: return 360;
+        case APP_POWER: return 160;
+        case APP_GAME_CENTER: return 268;
+        case APP_DEMO_CENTER: return 230;
+        case APP_3D_BOX: return 280;
+        case APP_FIRECRACKER: return 260;
+        case APP_RUN_GAME: return 300;
+        case APP_MINES: return 250;
+        case APP_PAINT: return 290;
+        case APP_EXPLORER: return 220;
+        default: return 200;
+    }
+}
+
 static void open_window(AppId app) {
     Window *window = &windows[app];
     menu_open = false;
@@ -19,21 +53,13 @@ static void open_window(AppId app) {
     if (!window->open) {
         window->open = true;
         window->title = app == APP_GAME_CENTER ? "Game Center" :
-                        (app == APP_TASK_MANAGER ? "Task Manager" : app_titles[app]);
-        window->w = (app == APP_SETTINGS) ? 400 :
-                    (app == APP_TASK_MANAGER ? 440 :
-                    (app == APP_POWER ? 220 :
-                    (app == APP_GAME_CENTER ? 360 :
-                    (app == APP_PAINT ? 368 :
-                    (app == APP_EXPLORER ? 336 :
-                    (app == APP_CMD ? 420 : 300))))));
-        window->h = (app == APP_SETTINGS) ? 260 :
-                    (app == APP_TASK_MANAGER ? 360 :
-                    (app == APP_POWER ? 160 :
-                    (app == APP_GAME_CENTER ? 230 :
-                    (app == APP_MINES ? 250 :
-                    (app == APP_PAINT ? 290 :
-                    (app == APP_EXPLORER ? 220 : 200))))));
+                        (app == APP_TASK_MANAGER ? "Task Manager" :
+                        (app == APP_DEMO_CENTER ? "Demo Center" :
+                        (app == APP_3D_BOX ? "3D Box" :
+                        (app == APP_FIRECRACKER ? "Firecracker" :
+                        (app == APP_RUN_GAME ? "Run! Run" : app_titles[app])))));
+        window->w = app_window_width(app);
+        window->h = app_window_height(app);
         window->x = 70 + app * 18;
         window->y = 40 + app * 12;
         if (window->x + window->w > OS_WIDTH - 10) {
@@ -58,6 +84,18 @@ static void open_window(AppId app) {
         task_manager_selected_process = 0;
         task_manager_confirm_kill = false;
         task_manager_kill_target = -1;
+    } else if (app == APP_RUN_GAME) {
+        reset_run();
+    } else if (app == APP_3D_BOX) {
+        box3d_mode = 0;
+        box3d_angle = 0;
+        box3d_angle_x = 0;
+        box3d_last_tick = timer_ticks;
+    } else if (app == APP_FIRECRACKER) {
+        for (int i = 0; i < FIRE_PARTICLES; ++i) {
+            fire_alive[i] = false;
+        }
+        fire_last_tick = timer_ticks;
     }
 
     active_window = app;

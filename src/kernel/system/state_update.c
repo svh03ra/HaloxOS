@@ -74,6 +74,8 @@ static void update_state(void) {
     if (system_state == STATE_DESKTOP) {
         handle_desktop_mouse();
         update_snake();
+        update_demos();
+        update_run();
 
         if (window_fade_active && timer_ticks - window_fade_tick >= 18) {
             window_fade_active = false;

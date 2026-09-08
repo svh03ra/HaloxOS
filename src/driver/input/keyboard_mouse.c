@@ -83,6 +83,8 @@ static void handle_scancode(uint8_t code) {
             case 0x50: enqueue_key(KEY_DOWN, 0); return;
             case 0x4B: enqueue_key(KEY_LEFT, 0); return;
             case 0x4D: enqueue_key(KEY_RIGHT, 0); return;
+            case 0x47: enqueue_key(KEY_HOME, 0); return;
+            case 0x4F: enqueue_key(KEY_END, 0); return;
             case 0x53: enqueue_key(KEY_DEL, 0); return;
             default: return;
         }

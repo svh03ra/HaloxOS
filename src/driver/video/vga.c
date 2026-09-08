@@ -382,6 +382,14 @@ static bool vga_native_text_mode_active(void) {
     return vga_native_text_active;
 }
 
+/* Clear the text-mode flag when a non-VGA backend (BGA DISPI, VMware)
+ * activates a real graphics mode; those paths bypass
+ * vga_set_graphics_mode so the flag would stay stale from the boot
+ * text menu. */
+static void vga_clear_native_text_flag(void) {
+    vga_native_text_active = false;
+}
+
 static bool vga_probe_present(void) {
     uint8_t misc;
     uint8_t saved;

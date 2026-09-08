@@ -29,6 +29,13 @@ static bool desktop_should_redraw(void) {
     if (windows[APP_SNAKE].open && last_desktop_redraw_snake_tick != snake_last_step_tick) {
         return true;
     }
+    /* Live animated apps redraw every tick so they stay smooth with
+     * the cursor idle - not only while the mouse moves. */
+    if ((windows[APP_3D_BOX].open || windows[APP_FIRECRACKER].open ||
+         (windows[APP_RUN_GAME].open && run_state < 3)) &&
+        last_desktop_redraw_demos_tick != timer_ticks) {
+        return true;
+    }
     if (menu_open || context_menu_open || desktop_icon_menu_open || start_app_menu_open || power_menu_open ||
         (windows[APP_GAME_CENTER].open && active_window == APP_GAME_CENTER)) {
         return true;
@@ -42,4 +49,5 @@ static void mark_desktop_redrawn(void) {
     last_desktop_redraw_perf_phase = timer_ticks / PERF_UPDATE_TICKS;
     last_desktop_redraw_terminal_blink = timer_ticks / TERMINAL_CURSOR_BLINK_TICKS;
     last_desktop_redraw_snake_tick = snake_last_step_tick;
+    last_desktop_redraw_demos_tick = timer_ticks;
 }

@@ -30,20 +30,20 @@ jobs:
             mtools \
             dosfstools \
             parted \
-            gzip \
+            \\
             python3 \
             pkg-config \
             libpng-dev \
             qemu-system-x86
 
       - name: Build CD-ROM
-        run: make
+        run: make -j4
 
       - name: Build Disk
-        run: make disk
+        run: make disk -j4
 
       - name: Build Floppy
-        run: make floppy
+        run: make floppy -j4
 
       - name: Verify Build
         run: |

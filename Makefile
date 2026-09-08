@@ -21,7 +21,7 @@ LOG_COMPILE = printf '%b[Compiling...]%b %b%s%b %b%s%b\n' '$(COLOR_GREEN)' '$(CO
 LOG_DEP = printf '%b%s%b\n' '$(COLOR_BLUE)' "$(1)" '$(COLOR_RESET)'
 LOG_ERROR = printf '%b[ERROR!]%b %b%s%b\n' '$(COLOR_RED)' '$(COLOR_RESET)' '$(COLOR_WHITE)' "$(1)" '$(COLOR_RESET)'
 LOG_WARNING = printf '%b[WARNING!]%b %b%s%b\n' '$(COLOR_ORANGE)' '$(COLOR_RESET)' '$(COLOR_WHITE)' "$(1)" '$(COLOR_RESET)'
-LOG_OK = elapsed_secs=$$(($$(date +%s) - $(BUILD_STARTED))); elapsed=$$(printf '%02d:%02d:%02d' $$((elapsed_secs / 3600)) $$(((elapsed_secs % 3600) / 60)) $$((elapsed_secs % 60))); printf '\n%bBuild Timelapse: %s%b\n%b[OK]%b %b%s%b\n' '$(COLOR_BLUE)' "$$elapsed" '$(COLOR_RESET)' '$(COLOR_GREEN)' '$(COLOR_RESET)' '$(COLOR_WHITE)' "$(1)" '$(COLOR_RESET)'
+LOG_OK = elapsed_secs=$$(($$(date +%s) - $(BUILD_STARTED))); elapsed=$$(printf '%02d:%02d:%02d' $$((elapsed_secs / 3600)) $$(((elapsed_secs % 3600) / 60)) $$((elapsed_secs % 60))); printf '\n\n%bBuild Timelapse: %s%b\n%b[OK]%b %b%s%b\n' '$(COLOR_BLUE)' "$$elapsed" '$(COLOR_RESET)' '$(COLOR_GREEN)' '$(COLOR_RESET)' '$(COLOR_WHITE)' "$(1)" '$(COLOR_RESET)'
 LOG_CLEAN_OK = printf '%b[OK]%b %b%s%b\n' '$(COLOR_GREEN)' '$(COLOR_RESET)' '$(COLOR_WHITE)' "$(1)" '$(COLOR_RESET)'
 LOG_INTRO = printf '%s\n%s\n%s\n%s\nBuild Type: %s | %b%s%b\n%s\n\n%s\n\n' '==================================================' 'HaloxOS Compiler, (C) 2026 Svh03ra' '  ----------------------------------------------  ' 'Compiler Version: 2.0' "$(BUILD_MEDIA)" '$(BUILD_PROFILE_COLOR)' "$(BUILD_PROFILE)" '$(COLOR_RESET)' '==================================================' 'Starting to build...'
 
@@ -33,6 +33,12 @@ CONFIG_SCREEN_DEPTH := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_BPP[[:sp
 ASFLAGS := -DHALOXOS_BOOT_SCREEN_WIDTH=$(CONFIG_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(CONFIG_SCREEN_HEIGHT) -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH)
 CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -Ibuild/generated
 LDFLAGS := -T linker.ld
+# Debug builds keep EBP frame pointers so the crash handler can walk the
+# stack chain, embed debug line info for the BSOD backtrace symbol table,
+# and get the addr2line symbol data generated after the final link.
+ifeq ($(CONFIG_DEBUG),1)
+CFLAGS += -fno-omit-frame-pointer -g
+endif
 HOSTCFLAGS = -std=c11 -O2 -Wall -Wextra $(shell pkg-config --cflags libpng)
 HOSTLIBS = $(shell pkg-config --libs libpng)
 
@@ -97,8 +103,8 @@ NORAM_STAMP_TEXT := test
 else
 NORAM_STAMP_TEXT := normal
 endif
-ARCH_PACKAGES := nasm gcc binutils grub xorriso pkgconf libpng dosfstools parted mtools gzip zstd python3 qemu-system-x86
-DEBIAN_PACKAGES := nasm gcc gcc-multilib binutils grub-pc-bin grub-common xorriso pkg-config libpng-dev dosfstools parted mtools gzip zstd python3 qemu-system-x86
+ARCH_PACKAGES := nasm gcc binutils grub xorriso pkgconf libpng dosfstools parted mtools zstd python3 qemu-system-x86
+DEBIAN_PACKAGES := nasm gcc gcc-multilib binutils grub-pc-bin grub-common xorriso pkg-config libpng-dev dosfstools parted mtools zstd python3 qemu-system-x86
 
 ifneq ($(filter disk,$(MAKECMDGOALS)),)
 BUILD_MEDIA := Hard Disk
@@ -129,9 +135,12 @@ ISO := build/HaloxOS-LiveCD_DEV.iso
 DISK := build/HaloxOS-Disk_DEV.img
 FLOPPY := build/HaloxOS-Floppy_DEV.img
 KERNEL := build/kernel.bin
-KERNEL_GZ := build/kernel.bin.gz
 KERNEL_ZST := build/kernel.bin.zst
 LOADER := build/loader.elf
+# Debug-build crash-handler symbol table (see the rule near $(KERNEL)):
+# fixed-size so embedding the data never shifts kernel addresses.
+CRASH_SYMBOLS_H := build/generated/crash_symbols.h
+CRASH_SYMBOL_MAX := 400
 LOADER_OBJS := \
 build/loader_boot.o \
 build/loader_main.o \
@@ -179,7 +188,19 @@ build/mines_icon_asset.o \
 build/snake_icon_asset.o \
 build/guessnum_icon_asset.o \
 build/paint_icon_asset.o \
-build/power_icon_asset.o \
+	build/power_icon_asset.o \
+	build/run_icon_asset.o \
+	build/box3d_icon_asset.o \
+	build/firecracker_icon_asset.o \
+	build/run_player_asset.o \
+	build/run_player_died_asset.o \
+build/run_player16_asset.o \
+build/run_coin1_asset.o \
+build/run_coin2_asset.o \
+build/run_coin3_asset.o \
+build/run_coin4_asset.o \
+build/run_brick_asset.o \
+build/run_skull_asset.o \
 
 KERNEL_ENTRY := src/kernel/system/kernel.c
 KERNEL_FRAGMENTS := $(shell find src/driver src/kernel src/modes -name '*.c' ! -path '$(KERNEL_ENTRY)' | sort)
@@ -208,8 +229,7 @@ install-deps:
 	command -v mkfs.fat >/dev/null 2>&1 || missing=1; \
 	command -v parted >/dev/null 2>&1 || missing=1; \
 	command -v mmd >/dev/null 2>&1 || missing=1; \
-	command -v mcopy >/dev/null 2>&1 || missing=1; \
-	command -v gzip >/dev/null 2>&1 || missing=1; \
+ 	command -v mcopy >/dev/null 2>&1 || missing=1; \
 	command -v zstd >/dev/null 2>&1 || missing=1; \
 	command -v $(PYTHON) >/dev/null 2>&1 || missing=1; \
 	command -v qemu-system-i386 >/dev/null 2>&1 || missing=1; \
@@ -356,6 +376,54 @@ build/power_icon.bin: src/modes/states/graphical/desktop/apps/power/power.png bu
 	@$(call LOG_COMPILE,$<,$@)
 	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
 
+build/run_icon.bin: src/modes/states/graphical/desktop/apps/runGame/appicon.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/box3d_icon.bin: src/modes/states/graphical/desktop/apps/3DBox/appicon.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/firecracker_icon.bin: src/modes/states/graphical/desktop/apps/firecracker/appicon.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_player.bin: src/modes/states/graphical/desktop/apps/runGame/spr/player-32x.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_player_died.bin: src/modes/states/graphical/desktop/apps/runGame/spr/player_died-32x.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_player16.bin: src/modes/states/graphical/desktop/apps/runGame/spr/player.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_coin1.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_coin2.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin2.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_coin3.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin3.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_coin4.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin4.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_brick.bin: src/modes/states/graphical/desktop/apps/runGame/spr/brick.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/run_skull.bin: src/modes/states/graphical/desktop/apps/runGame/spr/skull-48x.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
 build/login_asset.o: build/login.bin
 	@$(call LOG_COMPILE,$<,$@)
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
@@ -420,6 +488,54 @@ build/power_icon_asset.o: build/power_icon.bin
 	@$(call LOG_COMPILE,$<,$@)
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
 
+build/run_icon_asset.o: build/run_icon.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/box3d_icon_asset.o: build/box3d_icon.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/firecracker_icon_asset.o: build/firecracker_icon.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_player_asset.o: build/run_player.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_player_died_asset.o: build/run_player_died.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_player16_asset.o: build/run_player16.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_coin1_asset.o: build/run_coin1.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_coin2_asset.o: build/run_coin2.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_coin3_asset.o: build/run_coin3.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_coin4_asset.o: build/run_coin4.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_brick_asset.o: build/run_brick.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/run_skull_asset.o: build/run_skull.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
 build/boot.o: src/kernel/system/boot.asm | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(AS) $(ASFLAGS) -f elf32 -o $@ $< || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
@@ -428,13 +544,9 @@ build/interrupts.o: src/kernel/system/interrupts.asm | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(AS) -f elf32 -o $@ $< || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
 
-build/kernel.o: $(KERNEL_SRC) $(BUILD_INFO) | build
+build/kernel.o: $(KERNEL_SRC) $(BUILD_INFO) $(CRASH_SYMBOLS_H) | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(CC) $(CFLAGS) -c -o $@ $< || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
-
-$(KERNEL_GZ): $(KERNEL) | build
-	@$(call LOG_COMPILE,$<,$@)
-	@gzip -n -9 -c $< > $@ || { $(call LOG_ERROR,Failed to compress $< to $@); exit 1; }
 
 # ===== zstd boot chain =====
 
@@ -495,6 +607,56 @@ $(FLOPPY_CORE): $(CORE_FLOPPY_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
 	@grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot search search_fs_file vbe all_video || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
+# Symbol table for the debug-build crash-handler backtrace. The kernel
+# embeds a FIXED-SIZE table (crash_symbol_table_data, capped at
+# CRASH_SYMBOL_MAX entries), so filling in the real symbol data never
+# shifts kernel addresses. Debug builds link twice: pass 1 lays out the
+# kernel with the current table contents, the table is regenerated from
+# that kernel via nm + addr2line, pass 2 relinks with identical layout.
+# There is no dependency cycle: the header always exists (empty on a
+# fresh build or when the last kernel.bin is absent) and is refreshed
+# after every kernel link. (The := definitions live near the top of the
+# file with the other build variables so every rule sees them.)
+
+$(CRASH_SYMBOLS_H): FORCE | build/generated
+	@prev_count=0; \
+	if [ -f $@ ]; then prev_count=$$(grep -c '{ 0x' $@ 2>/dev/null || echo 0); fi; \
+	if [ "$(CONFIG_DEBUG)" != "1" ]; then \
+		printf '%s\n' '#define CRASH_SYMBOL_COUNT 0' '#define CRASH_SYMBOL_MAX $(CRASH_SYMBOL_MAX)' > $@.tmp; \
+	elif [ ! -f $(KERNEL) ]; then \
+		printf '%s\n' '#define CRASH_SYMBOL_COUNT 0' '#define CRASH_SYMBOL_MAX $(CRASH_SYMBOL_MAX)' > $@.tmp; \
+	else \
+		nm -n --defined-only $(KERNEL) | awk '$$2 ~ /^[tTdDrRbB]$$/ && $$3 != "" { print }' | head -$(CRASH_SYMBOL_MAX) > $@.syms; \
+		{ \
+			printf '#define CRASH_SYMBOL_COUNT %s\n' "$$(wc -l < $@.syms | tr -d ' ')"; \
+			printf '#define CRASH_SYMBOL_MAX %s\n' '$(CRASH_SYMBOL_MAX)'; \
+			printf '%s\n' 'static const struct { unsigned long addr; const char *name; const char *file; int line; } crash_symbol_table_data[CRASH_SYMBOL_COUNT > 0 ? CRASH_SYMBOL_COUNT : 1] = {'; \
+			if [ -s $@.syms ]; then \
+				while read -r addr type name; do \
+					func_line=$$(addr2line -e $(KERNEL) -f -C 0x$$addr 2>/dev/null | sed -n 2p | sed 's/ (discriminator [0-9]*)//'); \
+				file_part=$$(printf '%s' "$$func_line" | sed 's/:.*$$//'); \
+				line_part=$$(printf '%s' "$$func_line" | sed -n 's/^.*:\([0-9][0-9]*\)$$/\1/p'); \
+				file_part=$$(printf '%s' "$$file_part" \
+					| sed -e 's|^.*[/]HaloxOS[/]||' \
+					      -e ':a' -e 's|/[^./][^/]*/\.\./|/|g' -e 'ta' \
+					      -e 's|^\(\.\./\)*||'); \
+				case "$$file_part" in ""|\?*) file_part="unknown";; */*) file_part="HaloxOS/$$file_part";; *) file_part="unknown";; esac; \
+					case "$$line_part" in "") line_part="0";; esac; \
+					printf '  { 0x%s, "%s", "%s", %s },\n' "$$addr" "$$name" "$$file_part" "$$line_part"; \
+				done < $@.syms; \
+			fi; \
+			printf '%s\n' '};'; \
+		} > $@.tmp; \
+		rm -f $@.syms; \
+	fi; \
+	new_count=$$(grep -c '{ 0x' $@.tmp 2>/dev/null || echo 0); \
+	if [ -f $@ ] && [ "$$prev_count" = "$$new_count" ] && cmp -s $@ $@.tmp; then \
+		rm -f $@.tmp; \
+	else \
+		mv -f $@.tmp $@ || { $(call LOG_ERROR,Failed to update $@); exit 1; }; \
+		$(call LOG_COMPILE,crash symbol table,$@ ($$new_count symbols)); \
+	fi
+
 $(KERNEL): $(KERNEL_OBJS)
 	@$(call LOG_COMPILE,kernel objects,$@)
 	@warn_log=$$(mktemp); \
@@ -509,6 +671,15 @@ $(KERNEL): $(KERNEL_OBJS)
 		$(call LOG_ERROR,Failed to link $@); \
 		exit 1; \
 	fi
+ifeq ($(CONFIG_DEBUG),1)
+	@# Pass 2: refresh the symbol table from the just-linked kernel,
+	@# recompile the amalgamation with the real symbols, relink. The
+	@# table has a fixed maximum size so pass-2 addresses stay identical
+	@# to pass 1 for every symbol below the cap.
+	@$(MAKE) --no-print-directory $(CRASH_SYMBOLS_H)
+	@$(MAKE) --no-print-directory build/kernel.o
+	@$(LD) -m elf_i386 $(LDFLAGS) -o $@ $(KERNEL_OBJS)
+endif
 
 build/isodir/boot/loader.elf: $(LOADER) | build/isodir/boot/grub
 	@$(call LOG_COMPILE,$<,$@)
@@ -522,9 +693,38 @@ build/isodir/boot/grub/grub.cfg: src/config/config.h | build/isodir/boot/grub
 	@$(call LOG_COMPILE,boot menu,$@)
 	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    insmod gzio' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
+# Kernel size report: prints the actual kernel image/memory numbers in
+# the same blue info colour as the rest of the build log, right before the
+# Build Timelapse line. Uses stat/nm only (tools already required).
+#  - kernel bytes:      size of kernel.flat (what gets decompressed)
+#  - compressed bytes:  size of kernel.bin.zst (what ships on the media)
+#  - memory bytes:      highest physical byte the boot chain occupies:
+#                       __bss_end counted from address 0, because GRUB, the
+#                       loader and the compressed module live below the
+#                       kernel's 0x200000 load base too
+define KERNEL_SIZE_REPORT
+	flat_kb=$$(stat -c '%s' $(KERNEL_FLAT)); \
+	zst_kb=$$(stat -c '%s' $(KERNEL_ZST)); \
+	mem_end=$$(nm $(KERNEL) | awk '/ B __bss_end$$/ {print "0x"$$1}'); \
+	flat_mb=$$(python3 -c "print('%.5f' % ($$flat_kb/1048576))"); \
+	zst_kb_h=$$(python3 -c "print('%.5f' % ($$zst_kb/1024))"); \
+	ratio=$$(python3 -c "print('%.5f' % ($$zst_kb*100/$$flat_kb))"); \
+	mem_mb=$$(python3 -c "print('%.5f' % ($$mem_end/1048576))"); \
+	printf '%b\n%b%s%b\n%b%s%b\n' '\033[0m' '\033[92m' "** Total calculated in kernel bytes: $$flat_mb MB (Compressed: $$zst_kb_h KB, $$ratio% compressed ratio)" '\033[0m' '\033[92m' "** Total calculated in kernel memory bytes: $$mem_mb MB" '\033[0m'; \
+	if python3 -c "import sys; sys.exit(0 if $$mem_mb < 8.0 else 1)"; then \
+		mem_left=$$(python3 -c "print('%.2f' % (8.0 - $$mem_mb))"); \
+		if python3 -c "import sys; sys.exit(0 if $$mem_left <= 2.0 else 1)"; then \
+			printf '%b[WARNING!]%b %b%s MB remaining to come in reach 8.00 MB RAM limit%b\n' '$(COLOR_ORANGE)' '$(COLOR_RESET)' '$(COLOR_YELLOW)' "$$mem_left" '$(COLOR_RESET)'; \
+		fi; \
+	else \
+		printf '%b[WARNING!]%b %bKernel size has EXCEEDED the 8.00 MB RAM limit!%b\n' '$(COLOR_ORANGE)' '$(COLOR_RESET)' '$(COLOR_YELLOW)' '$(COLOR_RESET)'; \
+	fi
+endef
+
 $(ISO): build/isodir/boot/loader.elf build/isodir/boot/kernel.bin.zst build/isodir/boot/grub/grub.cfg
 	@$(call LOG_COMPILE,build/isodir,$@)
 	@grub-mkrescue -o $@ build/isodir >/dev/null 2>&1 || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@$(KERNEL_SIZE_REPORT)
 	@$(call LOG_OK,Build Finished!)
 
 $(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT) | build
@@ -560,6 +760,7 @@ $(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT)
 	@dd if=$(DISK_CORE) of=$@ bs=512 seek=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(DISK_CORE) into $@); exit 1; }
 	@$(call LOG_COMPILE,$(DESKTOP_LAYOUT),$@)
 	@dd if=$(DESKTOP_LAYOUT) of=$@ bs=512 seek=$(DESKTOP_LAYOUT_LBA) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(DESKTOP_LAYOUT) into $@); exit 1; }
+	@$(KERNEL_SIZE_REPORT)
 	@$(call LOG_OK,Disk Image Finished!)
 
 $(FLOPPY): $(LOADER) $(KERNEL_ZST) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
@@ -598,6 +799,7 @@ $(FLOPPY): $(LOADER) $(KERNEL_ZST) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
 	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=1 skip=510 seek=510 count=2 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write boot signature into $@); exit 1; }
 	@$(call LOG_COMPILE,$(FLOPPY_CORE),$@)
 	@dd if=$(FLOPPY_CORE) of=$@ bs=512 seek=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(FLOPPY_CORE) into $@); exit 1; }
+	@$(KERNEL_SIZE_REPORT)
 	@$(call LOG_OK,Floppy Image Finished!)
 
 # Interactive QEMU launcher: asks for memory size and VGA type, then runs

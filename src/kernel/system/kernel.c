@@ -36,6 +36,20 @@ extern const uint8_t _binary_build_snake_icon_bin_start[];
 extern const uint8_t _binary_build_guessnum_icon_bin_start[];
 extern const uint8_t _binary_build_paint_icon_bin_start[];
 extern const uint8_t _binary_build_power_icon_bin_start[];
+extern const uint8_t _binary_build_run_icon_bin_start[];
+extern const uint8_t _binary_build_box3d_icon_bin_start[];
+extern const uint8_t _binary_build_firecracker_icon_bin_start[];
+
+/* Title Run! game sprites */
+extern const uint8_t _binary_build_run_player_bin_start[];
+extern const uint8_t _binary_build_run_player_died_bin_start[];
+extern const uint8_t _binary_build_run_player16_bin_start[];
+extern const uint8_t _binary_build_run_coin1_bin_start[];
+extern const uint8_t _binary_build_run_coin2_bin_start[];
+extern const uint8_t _binary_build_run_coin3_bin_start[];
+extern const uint8_t _binary_build_run_coin4_bin_start[];
+extern const uint8_t _binary_build_run_brick_bin_start[];
+extern const uint8_t _binary_build_run_skull_bin_start[];
 
 #define OS_WIDTH 640
 #define OS_HEIGHT 480
@@ -103,19 +117,22 @@ extern const uint8_t _binary_build_power_icon_bin_start[];
 #define TRAIL_COUNT 6
 #define MAX_TEXT 4096
 #define TERM_MAX_LINES 32
-#define TERM_LINE_LEN 72
+/* 256 so debugger breakpoint traces fit on one long line; the log
+ * view pans across them horizontally with Ctrl+Left/Right. */
+#define TERM_LINE_LEN 256
 #define DEBUG_HISTORY_COUNT 8
 #define DEBUG_EDITED_RANGE_COUNT 32
 #define DEBUG_MEMORY_BYTES_PER_ROW 16
 #define DEBUG_MEMORY_VISUAL_W 430
 #define DEBUG_MEMORY_VISUAL_H 240
 #define DEBUG_MEMORY_MAX_EDIT_LENGTH 0x10000u
-#define APP_COUNT 11
+#define APP_COUNT 15
 #define SNAKE_MAX_SEGMENTS 128
 #define MINES_SIZE 8
 #define MINES_COUNT 10
 #define TIMER_HZ 60
 #define TERMINAL_CURSOR_BLINK_TICKS 30
+#define DEBUG_LOG_SCROLL_MAX 1024
 #define SNAKE_STEP_TICKS 9
 #define PERF_UPDATE_TICKS 6
 #define PAINT_CANVAS_W 352
@@ -154,7 +171,9 @@ typedef enum {
     KEY_DOWN,
     KEY_LEFT,
     KEY_RIGHT,
-    KEY_DEL
+    KEY_DEL,
+    KEY_HOME,
+    KEY_END
 } KeyCode;
 
 typedef struct {
@@ -292,7 +311,11 @@ typedef enum {
     APP_GAME_CENTER,
     APP_POWER,
     APP_SETTINGS,
-    APP_TASK_MANAGER
+    APP_TASK_MANAGER,
+    APP_DEMO_CENTER,
+    APP_3D_BOX,
+    APP_FIRECRACKER,
+    APP_RUN_GAME
 } AppId;
 
 typedef struct {
@@ -394,7 +417,11 @@ static const char *app_titles[APP_COUNT] = {
     "Games",
     "Power",
     "Settings",
-    "TaskMgr"
+    "TaskMgr",
+    "Demos",
+    "3D Box",
+    "Firecr..",
+    "Run!"
 };
 
 static const uint8_t font8x8_basic[96][8] = {
@@ -458,6 +485,79 @@ static int start_menu_hover_row = -1;
 static uint32_t start_menu_hover_tick = 0;
 static int game_center_hover_row = -1;
 static uint32_t game_center_hover_tick = 0;
+static int demo_center_hover_row = -1;
+static uint32_t demo_center_hover_tick = 0;
+
+/* 3D Box demo: rotating cube, mode 0 = wireframe, mode 1 = solid. */
+static uint8_t box3d_mode = 0;
+static int box3d_angle = 0;      /* yaw (Y axis) */
+static int box3d_angle_x = 0;    /* pitch (X axis): cube tumbles on XY */
+static uint32_t box3d_last_tick = 0;
+
+/* Firecracker demo: particle bursts. */
+#define FIRE_PARTICLES 96
+static int fire_x[FIRE_PARTICLES];
+static int fire_y[FIRE_PARTICLES];
+static int fire_vx[FIRE_PARTICLES];
+static int fire_vy[FIRE_PARTICLES];
+static uint8_t fire_color[FIRE_PARTICLES];
+static bool fire_alive[FIRE_PARTICLES];
+static uint32_t fire_last_tick = 0;
+
+/* Title Run! game state. */
+#define RUN_PLATFORMS 24
+#define RUN_COINS 24
+#define RUN_BRICKS 12
+#define RUN_WATER_Y 168
+typedef struct {
+    int x;
+    int w;
+    int y;
+    int kind;   /* 0 grass top, 1 dirt filler */
+} RunPlatform;
+typedef struct {
+    int x;
+    int y;
+    int frame;  /* 0..9 animation frame */
+    bool taken;
+} RunCoin;
+typedef struct {
+    int x;
+    int y;
+} RunBrick;
+static RunPlatform run_platforms[RUN_PLATFORMS];
+static RunCoin run_coins[RUN_COINS];
+static RunBrick run_bricks[RUN_BRICKS];
+static int run_level_len = 1024;      /* world px length of one level lap */
+/* All motion is stored in 1/16 px subpixels so the run stays smooth
+ * instead of stop-motion; px values below are updated for the render. */
+static int run_player_wx = 0;         /* player world x, 1/16 px */
+static int run_scroll16 = 0;          /* camera world x, 1/16 px */
+static int run_py16 = 0;              /* player y, 1/16 px */
+static int run_vy16 = 0;              /* player fall speed, 1/16 px/tick */
+static int run_player_x = 0;          /* player screen x, px (render) */
+static int run_player_y = 0;          /* player y, px (render) */
+static int run_scroll = 0;            /* camera scroll, px (render) */
+static bool run_player_grounded = false;
+static int run_lives = 3;
+static int run_coins_collected = 0;
+static uint32_t run_time_left = 60 * TIMER_HZ;   /* 1 minute */
+static uint32_t run_countdown = 5 * TIMER_HZ;    /* 5s start countdown */
+static uint32_t run_last_tick = 0;
+static uint32_t run_last_coin_frame = 0;
+static int run_state = 0;   /* 0 countdown, 1 playing, 2 dying, 3 dead, 4 win */
+static int run_death_anim_t = 0;
+static int run_death_start_y = 0;
+/* skull chaser: spawns after a 3-5s cooldown, hunts at the player's
+ * altitude, slower than a running player so it is escapable */
+static int run_skull_wx = 0;          /* skull world x, 1/16 px */
+static bool run_skull_active = false;
+static uint32_t run_skull_cooldown = 0;
+/* eased spacebar jump: y follows a sine arc over RUN_JUMP_FRAMES
+ * (subpixel: start y in 1/16 px) */
+#define RUN_JUMP_FRAMES 26
+static int run_jump_anim_t = RUN_JUMP_FRAMES;   /* finished by default */
+static int run_jump_start_y16 = 0;
 static uint32_t button_hover_id = 0;
 static uint32_t button_hover_tick = 0;
 static bool cursor_hand_hint = false;
@@ -488,6 +588,7 @@ static uint8_t color_green;
 static uint8_t color_green_dark;
 static uint8_t color_blue;
 static uint8_t color_blue_dark;
+static uint8_t color_crash_blue;
 static uint8_t color_red;
 static uint8_t color_yellow;
 static uint8_t color_orange;
@@ -515,6 +616,26 @@ static int debug_memory_edit_nibble = -1;
 static DebugEditedRange debug_edited_ranges[DEBUG_EDITED_RANGE_COUNT];
 static int debug_edited_range_count = 0;
 static const char *debug_forced_fault_reason = NULL;
+static int debug_log_scroll_x = 0;   /* Ctrl+Left/Right log panning */
+
+/* FPS overlay (debugger "show fps" command): frame counting happens in
+ * kernel_main; this only stores what the overlay renders. */
+static bool fps_overlay_on = false;
+static uint32_t fps_display = 0;        /* frames in the current window */
+static uint32_t fps_current = 0;       /* final FPS of the last window */
+static uint32_t fps_avg_ticks_x10 = 0;  /* avg frame time, ticks * 10 */
+static bool fps_lagging = false;        /* current frame dropped/lagged */
+static uint32_t fps_frames_total = 0;   /* frame counter for breakpoints */
+
+/* Breakpoints (debugger "breakpoint" command): one bit per AppId, plus
+ * bit 15 = "all". When a targeted app renders, the debugger terminal
+ * opens itself with a code + opcode trace. */
+static uint16_t debug_bp_mask = 0;
+static bool debug_bp_caught = false;
+static uint32_t debug_bp_frame_base = 0;   /* frame count when resumed */
+static uint32_t debug_bp_catch_count = 0;   /* catches since armed */
+static uint32_t debug_bp_last_catch_tick = 0; /* rate limit: 1 catch per frame */
+static bool debug_bp_armed = false;         /* armed AND resumed */
 
 static uint8_t paint_canvas[PAINT_CANVAS_W * PAINT_CANVAS_H];
 static uint8_t paint_color = 1;
@@ -635,6 +756,7 @@ static uint32_t last_desktop_redraw_second = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_terminal_blink = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_snake_tick = 0xFFFFFFFFu;
+static uint32_t last_desktop_redraw_demos_tick = 0xFFFFFFFFu;
 static uint32_t last_performance_sample_phase = 0xFFFFFFFFu;
 static bool task_manager_gpu_scroll_drag = false;
 static int task_manager_gpu_scroll_drag_offset = 0;
@@ -753,6 +875,16 @@ static void fill_rect(int x, int y, int w, int h, uint8_t color);
 static void draw_text(int x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent);
 static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transparent);
 
+/* New demo/game apps: defined in files included after their first use
+ * (window_manager.c / keyboard_routing.c run before the game logic). */
+static void reset_run(void);
+static void run_handle_key(KeyEvent event);
+static void box3d_handle_key(KeyEvent event);
+
+/* Debugger power breakpoint: defined in debugger.c (included after the
+ * power handlers); called before every shutdown/restart/halt trigger. */
+static void debug_bp_catch_power(const char *action);
+
 
 /*
  * These are all locations which kept from source code path:
@@ -802,6 +934,11 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
 #include "../../modes/states/graphical/desktop/apps/guess_number/render.c"
 #include "../../modes/states/graphical/desktop/apps/mines/render.c"
 #include "../../modes/states/graphical/desktop/apps/game_center/game_center.c"
+#include "../../modes/states/graphical/desktop/apps/demo_center/demo_center.c"
+#include "../../modes/states/graphical/desktop/apps/3DBox/box3d.c"
+#include "../../modes/states/graphical/desktop/apps/firecracker/firecracker.c"
+#include "../../modes/states/graphical/desktop/apps/runGame/logic.c"
+#include "../../modes/states/graphical/desktop/apps/runGame/render.c"
 #include "../../modes/states/graphical/desktop/apps/power/power.c"
 #include "../../modes/states/graphical/desktop/apps/settings/render.c"
 #include "../../modes/states/graphical/desktop/apps/task_manager/render.c"
@@ -823,6 +960,9 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
 #include "../../modes/states/graphical/desktop/apps/paint/handling.c"
 #include "../../modes/states/graphical/desktop/apps/explorer/handling.c"
 #include "../../modes/states/graphical/desktop/apps/game_center/handling.c"
+#include "../../modes/states/graphical/desktop/apps/demo_center/handling.c"
+#include "../../modes/states/graphical/desktop/apps/firecracker/handling.c"
+#include "../../modes/states/graphical/desktop/apps/runGame/handling.c"
 #include "../../modes/states/graphical/desktop/apps/power/handling.c"
 #include "../../modes/states/graphical/desktop/apps/settings/handling.c"
 #include "../../modes/states/graphical/desktop/apps/task_manager/handling.c"

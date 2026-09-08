@@ -10,6 +10,7 @@ static void debug_enter(void) {
     debug_overlay_open = true;
     debug_memory_view_open = false;
     debug_memory_edit_nibble = -1;
+    debug_log_scroll_x = 0;
     terminal_reset(&debug_term);
     terminal_add_line(&debug_term, "Welcome to HaloxOS Debugger!");
     terminal_add_line(&debug_term, "Type 'help' for show all comannds to use.");
@@ -342,6 +343,604 @@ static void debug_memory_handle_key(KeyEvent event) {
             }
         }
     }
+}
+
+/* Breakpoint target lookup: name token -> AppId bit. */
+static AppId app_index_from_bit(uint16_t bit) {
+    for (int app = 0; app < APP_COUNT; ++app) {
+        if (bit == (uint16_t)(1u << app)) {
+            return (AppId)app;
+        }
+    }
+    return APP_NOTEPAD;
+}
+
+static uint16_t debug_bp_target_bit(const char *token) {
+    struct { const char *names; AppId app; } targets[] = {
+        { "n|notepad|text|not",          APP_NOTEPAD },
+        { "c|cmd|prompt|terminal|p|t",    APP_CMD },
+        { "pa|paint|draw|pnt",           APP_PAINT },
+        { "e|exp|explorer|files|fm",      APP_EXPLORER },
+        { "s|snake|sn",                  APP_SNAKE },
+        { "g|guess|guessnum|guess number|num", APP_GUESS },
+        { "m|mines|minesweeper|minesw|mns", APP_MINES },
+        { "gc|games|game|gamecenter|gcen", APP_GAME_CENTER },
+        { "pow|power|power menu",         APP_POWER },
+        { "set|settings|config|conf",    APP_SETTINGS },
+        { "tm|taskmgr|task|taskmanager|tasks", APP_TASK_MANAGER },
+    };
+
+    if (token_is(token, "all", "everything", "every", "*")) {
+        return 0x8000u;
+    }
+    for (int i = 0; i < (int)(sizeof(targets) / sizeof(targets[0])); ++i) {
+        const char *rest = targets[i].names;
+        for (;;) {
+            const char *bar = rest;
+            size_t len;
+
+            while (*bar != '\0' && *bar != '|') {
+                ++bar;
+            }
+            len = (size_t)(bar - rest);
+            if (len == strlen_local(token) && len > 0) {
+                bool match = true;
+                for (size_t j = 0; j < len; ++j) {
+                    if (token[j] != rest[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    return (uint16_t)(1u << targets[i].app);
+                }
+            }
+            if (*bar == '\0') {
+                break;
+            }
+            rest = bar + 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Breakpoint trace: symbol of the caller + decoded instructions at the
+ * crash-symbols entry, rendered in the same "[0xADDR] name at
+ * HaloxOS/src/...; line N" style as the graphical crash handler
+ * backtrace, with the leading opcodes as real instruction text
+ * (MOV EBP,ESP; PUSH EBX; ...) instead of raw hex bytes.
+ */
+static int debug_bp_decode_instruction(uint32_t addr, char *out, size_t out_max);
+
+static void debug_bp_append_trace_line(char *line, size_t *len, size_t max_len, uint32_t addr) {
+    const char *name = "unknown";
+    const char *file = "?";
+    const char *base = "?";
+    int file_line = 0;
+    uint32_t sym_offset = 0;
+    uint32_t symbol_addr = addr;
+
+    if (crash_symbol_lookup(addr, &name, &file, &file_line, &sym_offset)) {
+        symbol_addr = addr - sym_offset;
+        for (const char *p = file; *p != '\0'; ++p) {
+            if (*p == '/' && *(p + 1) != '\0') {
+                base = p + 1;
+            }
+        }
+    } else {
+        name = "unknown";
+    }
+
+    copy_string(line + *len, "[0x", max_len - *len);
+    *len = strlen_local(line);
+    /* NOTE: symbol address, the source line belongs to the symbol start */
+    {
+        static const char digits[] = "0123456789ABCDEF";
+
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            if (*len + 1 >= max_len) {
+                return;
+            }
+            line[(*len)++] = digits[(symbol_addr >> shift) & 0x0Fu];
+        }
+        line[*len] = '\0';
+    }
+    copy_string(line + *len, "] ", max_len - *len);
+    *len = strlen_local(line);
+    copy_string(line + *len, name, max_len - *len);
+    *len = strlen_local(line);
+    copy_string(line + *len, " at ", max_len - *len);
+    *len = strlen_local(line);
+    copy_string(line + *len, base, max_len - *len);
+    *len = strlen_local(line);
+    copy_string(line + *len, "; line ", max_len - *len);
+    *len = strlen_local(line);
+    {
+        char digits[12];
+        int dn = 0;
+        uint32_t v = (uint32_t)file_line;
+
+        if (v == 0) {
+            digits[dn++] = '?';
+        }
+        while (v > 0 && dn < 11) {
+            digits[dn++] = (char)('0' + (v % 10u));
+            v /= 10u;
+        }
+        while (dn > 0 && *len + 1 < max_len) {
+            line[(*len)++] = digits[--dn];
+        }
+        line[*len] = '\0';
+    }
+
+    /* decoded instruction at the symbol entry instead of raw hex:
+     * decodes up to 3 consecutive instructions (MOV EBP,ESP style) */
+    copy_string(line + *len, " (", max_len - *len);
+    *len = strlen_local(line);
+    {
+        uint32_t ip = symbol_addr;
+        int decoded = 0;
+
+        while (decoded < 3 && *len + 2 < max_len) {
+            char ins[24];
+            int inst_len;
+
+            if (decoded > 0) {
+                if (*len + 1 < max_len) {
+                    line[(*len)++] = ';';
+                }
+            }
+            inst_len = debug_bp_decode_instruction(ip, ins, sizeof(ins));
+            copy_string(line + *len, ins, max_len - *len);
+            *len = strlen_local(line);
+            if (inst_len <= 0) {
+                break;
+            }
+            ip += (uint32_t)inst_len;
+            ++decoded;
+        }
+    }
+    if (*len + 1 < max_len) {
+        line[(*len)++] = ')';
+    }
+    line[*len] = '\0';
+}
+
+/*
+ * Minimal 32-bit x86 instruction decoder: decodes ONE instruction at
+ * addr into text like "MOV EAX,[EBX+8]" and returns its length in
+ * bytes. Covers the common kernel opcodes (moves, arithmetic, stack,
+ * jumps, calls); anything else renders as "DB 0xNN" with length 1 so
+ * the trace always advances.
+ */
+static int debug_bp_decode_instruction(uint32_t addr, char *out, size_t out_max) {
+    uint8_t op;
+    uint8_t modrm;
+    uint8_t mod;
+    uint8_t reg;
+    uint8_t rm;
+    int length = 1;
+    bool has_modrm = false;
+    char *p;
+
+    if (addr >= debug_memory_limit()) {
+        copy_string(out, "??", out_max);
+        return 1;
+    }
+    op = *(volatile uint8_t *)(uintptr_t)addr;
+    p = out;
+
+    static const char *const regs32[8] = { "EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI" };
+    static const char *const regs8[8] = { "AL", "CL", "DL", "BL", "AH", "CH", "DH", "BH" };
+
+#define PUTS(s) do { for (const char *q_ = (s); *q_ != '\0'; ++q_) { if ((size_t)(p - out) + 1 < out_max) *p++ = *q_; } } while (0)
+#define PUT_HEX8(v) do { static const char dg_[] = "0123456789ABCDEF"; \
+    if ((size_t)(p - out) + 2 < out_max) { *p++ = dg_[((v) >> 4) & 0x0Fu]; *p++ = dg_[(v) & 0x0Fu]; } } while (0)
+
+    /* skip common prefixes so the decode still lands on the real op */
+    while (op == 0x2E || op == 0x36 || op == 0x3E || op == 0x26 ||
+           op == 0x64 || op == 0x65 || op == 0x66 || op == 0x67 || op == 0xF0) {
+        ++length;
+        if (addr + (uint32_t)length >= debug_memory_limit()) {
+            copy_string(out, "prefix?", out_max);
+            return length;
+        }
+        op = *(volatile uint8_t *)(uintptr_t)(addr + (uint32_t)length);
+    }
+
+    modrm = 0;
+    mod = 0;
+    reg = 0;
+    rm = 0;
+    if (op <= 0x3F || (op >= 0x80 && op <= 0xBF) ||
+        op == 0x8D || op == 0xC6 || op == 0xC7 || op == 0xF6 || op == 0xF7) {
+        uint32_t modrm_addr = addr + (uint32_t)length;
+
+        if (modrm_addr < debug_memory_limit()) {
+            modrm = *(volatile uint8_t *)(uintptr_t)modrm_addr;
+            mod = modrm >> 6;
+            reg = (modrm >> 3) & 7u;
+            rm = modrm & 7u;
+            has_modrm = true;
+        }
+    }
+
+    switch (op) {
+        /* ALU r/m,r and r,r/m groups */
+        case 0x00: case 0x01: case 0x02: case 0x03:
+        case 0x08: case 0x09: case 0x0A: case 0x0B:
+        case 0x10: case 0x11: case 0x12: case 0x13:
+        case 0x18: case 0x19: case 0x1A: case 0x1B:
+        case 0x20: case 0x21: case 0x22: case 0x23:
+        case 0x28: case 0x29: case 0x2A: case 0x2B:
+        case 0x30: case 0x31: case 0x32: case 0x33:
+        case 0x38: case 0x39: case 0x3A: case 0x3B: {
+            static const char *const mnemonics[8] = {
+                "ADD", "OR", "ADC", "SBB", "AND", "SUB", "XOR", "CMP"
+            };
+            bool dir = (op & 0x02u) != 0;
+            bool wide = (op & 0x01u) != 0;
+
+            length += 1;
+            PUTS(mnemonics[op >> 3]);
+            PUTS(" ");
+            if (!has_modrm) {
+                PUTS("?");
+                break;
+            }
+            /* mod=11 -> register operand; otherwise memory (approximate) */
+            if (mod == 3) {
+                if (dir) {
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                    PUTS(",");
+                    PUTS(wide ? regs32[rm] : regs8[rm]);
+                } else {
+                    PUTS(wide ? regs32[rm] : regs8[rm]);
+                    PUTS(",");
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                }
+            } else {
+                /* memory form: show [reg] + disp approximations */
+                if (dir) {
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                    PUTS(",[");
+                    PUTS(regs32[rm]);
+                    PUTS("]");
+                } else {
+                    PUTS("[");
+                    PUTS(regs32[rm]);
+                    PUTS("],");
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                }
+                length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
+                if (mod == 0 && rm == 5) {
+                    length += 4;   /* disp32 only */
+                }
+            }
+            break;
+        }
+        /* push/pop registers */
+        case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
+            PUTS("PUSH ");
+            PUTS(regs32[op & 7u]);
+            break;
+        case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+            PUTS("POP ");
+            PUTS(regs32[op & 7u]);
+            break;
+        /* MOV group */
+        case 0x88: case 0x89: case 0x8A: case 0x8B: {
+            bool dir = (op & 0x02u) != 0;
+            bool wide = (op & 0x01u) != 0;
+
+            length += 1;
+            PUTS("MOV ");
+            if (!has_modrm) {
+                PUTS("?");
+                break;
+            }
+            if (mod == 3) {
+                if (dir) {
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                    PUTS(",");
+                    PUTS(wide ? regs32[rm] : regs8[rm]);
+                } else {
+                    PUTS(wide ? regs32[rm] : regs8[rm]);
+                    PUTS(",");
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                }
+            } else {
+                if (dir) {
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                    PUTS(",[");
+                    PUTS(regs32[rm]);
+                    PUTS("]");
+                } else {
+                    PUTS("[");
+                    PUTS(regs32[rm]);
+                    PUTS("],");
+                    PUTS(wide ? regs32[reg] : regs8[reg]);
+                }
+                length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
+                if (mod == 0 && rm == 5) {
+                    length += 4;
+                }
+            }
+            break;
+        }
+        /* MOV r32, imm32 */
+        case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+            PUTS("MOV ");
+            PUTS(regs32[op & 7u]);
+            PUTS(",0x");
+            {
+                uint8_t ib[4];
+                bool readable = true;
+
+                for (int i = 0; i < 4; ++i) {
+                    uint32_t imm_addr = addr + (uint32_t)length + (uint32_t)i;
+
+                    if (imm_addr >= debug_memory_limit()) {
+                        readable = false;
+                        break;
+                    }
+                    ib[i] = *(volatile uint8_t *)(uintptr_t)imm_addr;
+                }
+                if (readable) {
+                    for (int i = 3; i >= 0; --i) {
+                        PUT_HEX8(ib[i]);
+                    }
+                } else {
+                    PUTS("????");
+                }
+                length += 4;
+            }
+            break;
+        /* LEA */
+        case 0x8D:
+            length += 1;
+            PUTS("LEA ");
+            if (has_modrm && mod != 3) {
+                PUTS(regs32[reg]);
+                PUTS(",[");
+                PUTS(regs32[rm]);
+                PUTS("]");
+                length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
+            } else {
+                PUTS("?");
+            }
+            break;
+        /* group 80/81/83: ALU r/m, imm */
+        case 0x80: case 0x81: case 0x83: {
+            static const char *const mnemonics[8] = {
+                "ADD", "OR", "ADC", "SBB", "AND", "SUB", "XOR", "CMP"
+            };
+
+            length += 1;
+            PUTS(mnemonics[reg]);
+            PUTS(" ");
+            if (has_modrm) {
+                if (mod == 3) {
+                    PUTS(op == 0x81 ? regs32[rm] : regs8[rm]);
+                } else {
+                    PUTS("[");
+                    PUTS(regs32[rm]);
+                    PUTS("]");
+                    length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
+                }
+                PUTS(",0xIMM");
+                length += (op == 0x81) ? 4 : 1;
+            } else {
+                PUTS("?");
+            }
+            break;
+        }
+        /* test/jmp/call/ret/etc: single-byte forms */
+        case 0xE9: PUTS("JMP rel32"); length = 5; break;
+        case 0xEB: PUTS("JMP rel8"); length = 2; break;
+        case 0xE8: PUTS("CALL rel32"); length = 5; break;
+        case 0xC3: PUTS("RET"); break;
+        case 0xC2: PUTS("RET imm16"); length = 3; break;
+        case 0x90: PUTS("NOP"); break;
+        case 0xCC: PUTS("INT3"); break;
+        case 0xCD: PUTS("INT imm8"); length = 2; break;
+        case 0xF4: PUTS("HLT"); break;
+        case 0xFA: PUTS("CLI"); break;
+        case 0xFB: PUTS("STI"); break;
+        case 0x85: PUTS("TEST rm,r"); length += 1; break;
+        default:
+            PUTS("DB 0x");
+            PUT_HEX8(op);
+            break;
+    }
+#undef PUT_HEX8
+#undef PUTS
+
+    if (p == out) {
+        copy_string(out, "DB", out_max);
+    } else if ((size_t)(p - out) < out_max) {
+        *p = '\0';
+    }
+    return length;
+}
+
+/*
+ * Breakpoint hit: called from render_app_window when a targeted app is
+ * being drawn, once per rendered frame per target. AUTO-CONTINUE: the
+ * catch appends its trace to the terminal log but does NOT hold the
+ * system - the run keeps going, and the next frame that touches a
+ * targeted app appends the next catch, so the terminal becomes a live
+ * per-frame trace. Frame numbers are relative to the FIRST catch
+ * (rebased there), so the log counts #1, #2, #3... from the first hit
+ * instead of from the 'continue' that armed the breakpoint.
+ */
+static void debug_bp_catch(AppId app, uint32_t frame_no) {
+    uint32_t ebp;
+
+    /* AUTO-CONTINUE: log the catch, keep the run alive. The overlay
+     * pops open (notification) but the system never waits for input
+     * here - the next targeted frame fires the next catch. */
+    ++debug_bp_catch_count;
+    debug_bp_last_catch_tick = timer_ticks;
+    if (!debug_overlay_open) {
+        debug_overlay_open = true;
+        debug_memory_view_open = false;
+    }
+
+    {
+        char head[TERM_LINE_LEN];
+        size_t len = 0;
+
+        copy_string(head, "** BP frame #", sizeof(head));
+        len = strlen_local(head);
+        append_uint(head, &len, sizeof(head), frame_no);
+        copy_string(head + len, " (#", sizeof(head) - len);
+        len = strlen_local(head);
+        append_uint(head, &len, sizeof(head), debug_bp_catch_count);
+        copy_string(head + len, " hit):", sizeof(head) - len);
+        terminal_add_line(&debug_term, head);
+    }
+    {
+        char line[TERM_LINE_LEN];
+        size_t len = 0;
+
+        copy_string(line, "", sizeof(line));
+        debug_bp_append_trace_line(line, &len, sizeof(line), (uint32_t)(uintptr_t)&debug_bp_catch);
+        terminal_add_line(&debug_term, line);
+    }
+    {
+        char label[TERM_LINE_LEN];
+        size_t len = 0;
+
+        copy_string(label, "app: ", sizeof(label));
+        len = strlen_local(label);
+        for (const char *p = app_titles[app]; *p != '\0'; ++p) {
+            append_char(label, &len, sizeof(label), *p);
+        }
+        terminal_add_line(&debug_term, label);
+    }
+
+    /* current EBP chain like the crash handler, one line per frame */
+    __asm__ volatile("mov %%ebp, %0" : "=r"(ebp));
+    for (int i = 0; i < 8; ++i) {
+        uint32_t next;
+        uint32_t ret;
+
+        if (ebp < 0x10000u || ebp > 0x7F000000u || (ebp & 3u) != 0) {
+            break;
+        }
+        next = *(volatile uint32_t *)ebp;
+        ret = *(volatile uint32_t *)(ebp + 4u);
+        if (next <= ebp || next > ebp + 0x4000u) {
+            break;
+        }
+        if (ret < 0x200000u || ret > 0x780000u) {
+            break;
+        }
+        {
+            char line[TERM_LINE_LEN];
+            size_t len = 0;
+
+            debug_bp_append_trace_line(line, &len, sizeof(line), ret);
+            terminal_add_line(&debug_term, line);
+        }
+        ebp = next;
+    }
+
+    serial_trace_concat("INFO", "Breakpoint caught on app id ", app_titles[app]);
+}
+
+/*
+ * Power breakpoint: catches the destructive power actions (shutdown,
+ * restart, halt) at their trigger sites - Power app buttons, the power
+ * overlay menu, and the terminal commands - BEFORE the action runs, so
+ * the debugger terminal can log and trace the trigger even though the
+ * machine is about to go down/reboot. Only fires when a breakpoint is
+ * armed on the Power app (or 'all'), auto-continues like every other
+ * breakpoint catch: the power action itself still runs right after.
+ */
+static void debug_bp_catch_power(const char *action) {
+    uint32_t ebp;
+
+    if (!debug_bp_armed || debug_bp_mask == 0 ||
+        ((debug_bp_mask & 0x8000u) == 0 && (debug_bp_mask & (uint16_t)(1u << APP_POWER)) == 0)) {
+        return;
+    }
+    if (debug_bp_last_catch_tick == timer_ticks) {
+        return;   /* one catch per timer frame, like app catches */
+    }
+    if (debug_bp_frame_base == 0) {
+        debug_bp_frame_base = fps_frames_total - 1;   /* first catch = #1 */
+    }
+
+    ++debug_bp_catch_count;
+    debug_bp_last_catch_tick = timer_ticks;
+    if (!debug_overlay_open) {
+        debug_overlay_open = true;
+        debug_memory_view_open = false;
+    }
+
+    {
+        char head[TERM_LINE_LEN];
+        size_t len = 0;
+
+        copy_string(head, "** BP frame #", sizeof(head));
+        len = strlen_local(head);
+        append_uint(head, &len, sizeof(head), fps_frames_total - debug_bp_frame_base);
+        copy_string(head + len, " (#", sizeof(head) - len);
+        len = strlen_local(head);
+        append_uint(head, &len, sizeof(head), debug_bp_catch_count);
+        copy_string(head + len, " hit):", sizeof(head) - len);
+        terminal_add_line(&debug_term, head);
+    }
+    {
+        char label[TERM_LINE_LEN];
+        size_t len = 0;
+
+        copy_string(label, "power trigger: ", sizeof(label));
+        len = strlen_local(label);
+        for (const char *p = action; *p != '\0'; ++p) {
+            append_char(label, &len, sizeof(label), *p);
+        }
+        terminal_add_line(&debug_term, label);
+    }
+    {
+        char line[TERM_LINE_LEN];
+        size_t len = 0;
+
+        debug_bp_append_trace_line(line, &len, sizeof(line), (uint32_t)(uintptr_t)&debug_bp_catch_power);
+        terminal_add_line(&debug_term, line);
+    }
+
+    /* caller EBP chain: same walk as the app catch */
+    __asm__ volatile("mov %%ebp, %0" : "=r"(ebp));
+    for (int i = 0; i < 8; ++i) {
+        uint32_t next;
+        uint32_t ret;
+
+        if (ebp < 0x10000u || ebp > 0x7F000000u || (ebp & 3u) != 0) {
+            break;
+        }
+        next = *(volatile uint32_t *)ebp;
+        ret = *(volatile uint32_t *)(ebp + 4u);
+        if (next <= ebp || next > ebp + 0x4000u) {
+            break;
+        }
+        if (ret < 0x200000u || ret > 0x780000u) {
+            break;
+        }
+        {
+            char line[TERM_LINE_LEN];
+            size_t len = 0;
+
+            debug_bp_append_trace_line(line, &len, sizeof(line), ret);
+            terminal_add_line(&debug_term, line);
+        }
+        ebp = next;
+    }
+
+    serial_trace_concat("INFO", "Breakpoint caught on power trigger: ", action);
 }
 
 static void debug_execute_pending(void) {
@@ -737,9 +1336,11 @@ static void debug_help_command(const char *command) {
     if (token[0] == '\0') {
         terminal_add_line(&debug_term, "There are many more commands that you can use freely:");
         terminal_add_line(&debug_term, "help edit | help exception | help fault | help power");
+        terminal_add_line(&debug_term, "help breakpoint | help fps");
         terminal_add_line(&debug_term, "");
         terminal_add_line(&debug_term, "== ALL COMMANDS: ==");
         terminal_add_line(&debug_term, "edit view change continue test");
+        terminal_add_line(&debug_term, "show hide breakpoint");
     } else if (token_is(token, "e", "edit", NULL, NULL)) {
         terminal_add_line(&debug_term, "edit mem 0xADDR ff 0x100");
         terminal_add_line(&debug_term, "view mem [0xADDR] | view vid | view disk");
@@ -768,9 +1369,24 @@ static void debug_help_command(const char *command) {
     } else if (token_is(token, "view", "v", NULL, NULL)) {
         terminal_add_line(&debug_term, "view mem [0xADDR] opens hex/visual memory viewer.");
         terminal_add_line(&debug_term, "F1 hex, F2 visual, arrows move, ESC exits viewer.");
+        terminal_add_line(&debug_term, "In the log: Ctrl+Left/Right scrolls long lines.");
+        terminal_add_line(&debug_term, "<< and >> mark hidden text sides. Home/End jump.");
     } else if (token_is(token, "change", "ch", NULL, NULL)) {
         terminal_add_line(&debug_term, "change vid 800x600 | change vid bpp 4|8|16");
         terminal_add_line(&debug_term, "change bg 1 | change bg 2");
+    } else if (token_is(token, "bp", "br", "breakpoint", NULL)) {
+        terminal_add_line(&debug_term, "breakpoint all: catch every app on next frame.");
+        terminal_add_line(&debug_term, "breakpoint <app>: catch one app when it updates.");
+        terminal_add_line(&debug_term, "Auto-continues: each new catch re-opens this log.");
+        terminal_add_line(&debug_term, "Frame #1 is the FIRST catch after continue.");
+        terminal_add_line(&debug_term, "breakpoint stop | s | off | o: stop all.");
+        terminal_add_line(&debug_term, "power: shutdown/restart/halt triggers log");
+        terminal_add_line(&debug_term, "a trace before the action runs.");
+        terminal_add_line(&debug_term, "apps: notepad prompt paint explorer snake guess");
+        terminal_add_line(&debug_term, "mines games power settings taskmgr all");
+    } else if (token_is(token, "fps", "show", "hide", NULL)) {
+        terminal_add_line(&debug_term, "show fps | s fps: toggle FPS overlay top-right.");
+        terminal_add_line(&debug_term, "hide fps | h fps: hide it. Red = frame lag blink.");
     } else if (token_is(token, "continue", "con", "c", NULL)) {
         terminal_add_line(&debug_term, "continue: close debugger and resume desktop.");
     } else if (token_is(token, "t", "test", NULL, NULL)) {
@@ -818,6 +1434,17 @@ static void debug_execute_command(void) {
     } else if (streq(command, "c") || streq(command, "con") || streq(command, "continue")) {
         debug_overlay_open = false;
         debug_memory_view_open = false;
+        /* Arm the breakpoint now: frame counting does NOT start here.
+         * The base is captured at the FIRST catch, so the first hit
+         * logs as frame #1 no matter how long the target app stayed
+         * closed or unfocused after 'continue'. */
+        if (debug_bp_mask != 0) {
+            debug_bp_armed = true;
+            debug_bp_caught = false;
+            debug_bp_frame_base = 0;
+            debug_bp_catch_count = 0;
+            debug_bp_last_catch_tick = 0;
+        }
         serial_trace("INFO", "Debugger continued");
         debug_execute_pending();
     } else if (streq(command, "crash") || starts_with(command, "crash ")) {
@@ -930,6 +1557,71 @@ static void debug_execute_command(void) {
         debug_view_command(command);
     } else if (streq(command, "edit ") || starts_with(command, "edit ")) {
         debug_edit_command(command);
+    } else if (starts_with(command, "show ") || starts_with(command, "s ")) {
+        const char *arg = command[0] == 's' ? skip_spaces(command + 2) : skip_spaces(command + 5);
+        if (token_is(arg, "fps", "frames", "frame", NULL)) {
+            fps_overlay_on = true;
+            terminal_add_line(&debug_term, "FPS overlay shown (top-right).");
+        } else {
+            terminal_add_line(&debug_term, "Usage: show fps");
+        }
+    } else if (starts_with(command, "hide ") || starts_with(command, "h ")) {
+        const char *arg = command[0] == 'h' ? skip_spaces(command + 2) : skip_spaces(command + 5);
+        if (token_is(arg, "fps", "frames", "frame", NULL)) {
+            fps_overlay_on = false;
+            terminal_add_line(&debug_term, "FPS overlay hidden.");
+        } else {
+            terminal_add_line(&debug_term, "Usage: hide fps");
+        }
+    } else if (streq(command, "bp") || streq(command, "br") || streq(command, "breakpoint") ||
+               starts_with(command, "bp ") || starts_with(command, "br ") || starts_with(command, "breakpoint ")) {
+        char token[24];
+        const char *cursor = command;
+
+        cursor = read_token(cursor, token, sizeof(token));
+        cursor = read_token(cursor, token, sizeof(token));
+        if (token[0] == '\0') {
+            terminal_add_line(&debug_term, "Usage: breakpoint all|<app> | breakpoint stop");
+            terminal_add_line(&debug_term, "apps: notepad prompt paint explorer snake");
+            terminal_add_line(&debug_term, "guess mines games power settings taskmgr");
+            return;
+        }
+        if (token_is(token, "stop", "s", "off", "o")) {
+            debug_bp_mask = 0;
+            debug_bp_caught = false;
+            terminal_add_line(&debug_term, "Breakpoints cleared.");
+            serial_trace("INFO", "debugger breakpoints cleared");
+            return;
+        }
+        {
+            uint16_t bit = debug_bp_target_bit(token);
+
+            if (bit == 0) {
+                terminal_add_line(&debug_term, "Unknown breakpoint target.");
+                terminal_add_line(&debug_term, "apps: notepad prompt paint explorer snake");
+                terminal_add_line(&debug_term, "guess mines games power settings taskmgr all");
+                return;
+            }
+            debug_bp_mask |= bit;
+            debug_bp_caught = false;
+            debug_bp_catch_count = 0;
+            debug_bp_armed = false;   /* counts start after 'continue' */
+            if (bit == 0x8000u) {
+                terminal_add_line(&debug_term, "Breakpoint set on ALL apps. Type continue.");
+            } else {
+                char msg[TERM_LINE_LEN];
+                size_t len = 0;
+
+                copy_string(msg, "Breakpoint set on ", sizeof(msg));
+                len = strlen_local(msg);
+                for (const char *p = app_titles[app_index_from_bit(bit)]; *p != '\0'; ++p) {
+                    append_char(msg, &len, sizeof(msg), *p);
+                }
+                copy_string(msg + len, ". Type continue.", sizeof(msg) - len);
+                terminal_add_line(&debug_term, msg);
+            }
+            serial_trace_concat("INFO", "breakpoint armed for ", command);
+        }
     } else if (starts_with(command, "test ")) {
         char subcmd[24];
         const char *cursor = command;
@@ -980,6 +1672,28 @@ static void debug_execute_command(void) {
 static void debug_handle_key(KeyEvent event) {
     if (debug_memory_view_open) {
         debug_memory_handle_key(event);
+        return;
+    }
+
+    /* Extended horizontal log: Ctrl+Left/Right pans the log view so
+     * long breakpoint trace lines can be inspected. Pan is clamped
+     * in the renderer against the longest visible line. */
+    if (keyboard_ctrl && event.code == KEY_LEFT) {
+        if (debug_log_scroll_x > 0) {
+            debug_log_scroll_x -= 8;
+        }
+        return;
+    }
+    if (keyboard_ctrl && event.code == KEY_RIGHT) {
+        debug_log_scroll_x += 8;
+        return;
+    }
+    if (event.code == KEY_HOME) {
+        debug_log_scroll_x = 0;
+        return;
+    }
+    if (event.code == KEY_END) {
+        debug_log_scroll_x = DEBUG_LOG_SCROLL_MAX;
         return;
     }
 

@@ -197,6 +197,29 @@ static void render_debug_overlay(void) {
     int start = debug_term.line_count > max_lines ? debug_term.line_count - max_lines : 0;
     int line_y = y + 32;
 
+    /* FPS overlay: white rect top-right, black text, red blink when a
+     * frame took clearly longer than the rolling average (lag/drop). */
+    if (fps_overlay_on) {
+        char text[32] = {0};
+        size_t len = 0;
+        uint32_t whole = fps_current / 10u;
+        uint32_t frac = fps_current % 10u;
+        int width;
+        bool blink_red = fps_lagging && ((timer_ticks / 6u) & 1u) != 0u;
+
+        copy_string(text, "FPS ", sizeof(text));
+        len = strlen_local(text);
+        append_uint(text, &len, sizeof(text), whole);
+        append_char(text, &len, sizeof(text), '.');
+        append_uint(text, &len, sizeof(text), frac);
+        width = (int)strlen_local(text) * 8;
+
+        fill_rect(OS_WIDTH - width - 18, 6, width + 12, 14, color_black);
+        fill_rect(OS_WIDTH - width - 17, 7, width + 10, 12, blink_red ? color_red : color_white);
+        draw_text(OS_WIDTH - width - 12, 10, text, color_black,
+                  blink_red ? color_red : color_white, true);
+    }
+
     if (!debug_overlay_open) {
         return;
     }
@@ -209,10 +232,72 @@ static void render_debug_overlay(void) {
     fill_rect(x, y, w, h, color_white);
     draw_rect(x, y, w, h, color_black);
     draw_text(x + 10, y + 10, "HaloxOS Debugger", color_blue_dark, color_white, true);
-    for (int i = start; i < debug_term.line_count; ++i) {
-        uint8_t text_color = debug_terminal_line_color(i, debug_term.lines[i]);
-        draw_text_clipped(x + 10, line_y, w - 20, debug_term.lines[i], text_color, color_white, true);
-        line_y += 10;
+
+    /* Extended horizontal log: Ctrl+Left/Right pans the log so the
+     * very long breakpoint trace lines can be read past the window
+     * edge - the same way the crash handler's backtrace view scrolls.
+     * The pan is clamped to what the longest visible line still hides;
+     * a <NNN> hint in the title bar shows the current column. */
+    {
+        int max_len = 0;
+        int visible_chars = (w - 20) / 8;
+
+        for (int i = start; i < debug_term.line_count; ++i) {
+            int len = (int)strlen_local(debug_term.lines[i]);
+            if (len > max_len) {
+                max_len = len;
+            }
+        }
+        if (debug_log_scroll_x < 0) {
+            debug_log_scroll_x = 0;
+        }
+        if (max_len <= visible_chars) {
+            debug_log_scroll_x = 0;
+        } else if (debug_log_scroll_x > (max_len - visible_chars) * 8) {
+            debug_log_scroll_x = (max_len - visible_chars) * 8;
+        }
+
+        if (debug_log_scroll_x > 0 || max_len > visible_chars) {
+            char pos[32] = {0};
+            size_t plen = 0;
+
+            append_char(pos, &plen, sizeof(pos), '<');
+            append_uint(pos, &plen, sizeof(pos), (uint32_t)(debug_log_scroll_x / 8));
+            append_char(pos, &plen, sizeof(pos), '>');
+            draw_text(x + w - 60, y + 10, pos, color_gray_dark, color_white, true);
+        }
+    }
+
+    line_y = y + 32;
+    {
+        int visible_chars = (w - 20) / 8;
+        int skip_chars = debug_log_scroll_x / 8;
+
+        for (int i = start; i < debug_term.line_count; ++i) {
+            uint8_t text_color = debug_terminal_line_color(i, debug_term.lines[i]);
+            const char *line_text = debug_term.lines[i];
+            int full_len = (int)strlen_local(line_text);
+            int shown_len = full_len - skip_chars;
+
+            if (skip_chars > 0) {
+                if (skip_chars >= full_len) {
+                    line_text = "";
+                    shown_len = 0;
+                } else {
+                    line_text += skip_chars;
+                }
+            }
+            draw_text_clipped(x + 10, line_y, w - 20, line_text, text_color, color_white, true);
+            /* edge horns like the crash handler backtrace: << marks
+             * hidden text on the left, >> hidden text on the right */
+            if (skip_chars > 0 && shown_len > 0) {
+                draw_text(x + 10, line_y, "<<", color_yellow, color_white, true);
+            }
+            if (shown_len > visible_chars) {
+                draw_text(x + w - 26, line_y, ">>", color_yellow, color_white, true);
+            }
+            line_y += 10;
+        }
     }
     draw_text(x + 10, y + h - 18, "DBG:", color_black, color_white, true);
     {

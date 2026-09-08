@@ -11,6 +11,7 @@ static bool start_menu_row_app(int row, AppId *app_out) {
         case 3: *app_out = APP_EXPLORER; return true;
         case 4: *app_out = APP_TASK_MANAGER; return true;
         case 6: *app_out = APP_GAME_CENTER; return true;
+        case 7: *app_out = APP_DEMO_CENTER; return true;
         case 9: *app_out = APP_POWER; return true;
         case 10: *app_out = APP_SETTINGS; return true;
         default: return false;
@@ -19,13 +20,13 @@ static bool start_menu_row_app(int row, AppId *app_out) {
 
 static void handle_start_menu_click(void) {
     int x = 0;
-    int y = OS_HEIGHT - TASKBAR_H - 214;
+    int y = OS_HEIGHT - TASKBAR_H - 232;
 
     if (!menu_open || ((!mouse.left || mouse.prev_left) && (!mouse.right || mouse.prev_right))) {
         return;
     }
 
-    if (!point_in_rect(mouse.x, mouse.y, x, y, 180, 214)) {
+    if (!point_in_rect(mouse.x, mouse.y, x, y, 180, 232)) {
         menu_open = false;
         return;
     }

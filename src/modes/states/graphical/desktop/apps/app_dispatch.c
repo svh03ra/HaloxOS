@@ -9,7 +9,28 @@ static void render_app_window(AppId app) {
         return;
     }
 
+    /* Debugger breakpoint: AUTO-CONTINUE mode. Once armed (after
+     * 'continue'), every rendered frame that touches a targeted app
+     * appends a live trace to the debugger terminal - at most one
+     * catch per timer frame. The system never pauses. Frame numbers
+     * count from the FIRST catch (frame #1), not from when the
+     * breakpoint was typed: each catch's frame number is relative to
+     * the previous one, so the log reads #1, #2, #3... as new catches
+     * fire. */
+    if (debug_bp_armed && debug_bp_mask != 0 &&
+        (debug_bp_mask & 0x8000u || (debug_bp_mask & (uint16_t)(1u << app)) != 0) &&
+        debug_bp_last_catch_tick != timer_ticks) {
+        if (debug_bp_frame_base == 0) {
+            debug_bp_frame_base = fps_frames_total - 1; /* first catch = #1 */
+        }
+        debug_bp_catch(app, fps_frames_total - debug_bp_frame_base);
+    }
+
     draw_window_chrome(window);
+
+    /* Clip every app's drawing to this window's client area so scenes
+     * (Title Run!, firecracker, 3D box) can never bleed outside. */
+    set_window_clip(window->x + 1, window->y + 19, window->w - 2, window->h - 20);
 
     switch (app) {
         case APP_NOTEPAD: render_notepad(window); break;
@@ -23,5 +44,11 @@ static void render_app_window(AppId app) {
         case APP_POWER: render_power(window); break;
         case APP_SETTINGS: render_settings(window); break;
         case APP_TASK_MANAGER: render_task_manager(window); break;
+        case APP_DEMO_CENTER: render_demo_center(window); break;
+        case APP_3D_BOX: render_3d_box(window); break;
+        case APP_FIRECRACKER: render_firecracker(window); break;
+        case APP_RUN_GAME: render_run(window); break;
     }
+
+    clear_window_clip();
 }

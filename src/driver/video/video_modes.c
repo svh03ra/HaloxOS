@@ -100,6 +100,11 @@ static void build_system_palette(void) {
         uint8_t shade = (uint8_t)((i * 255) / 39);
         palette[index++] = (Color){shade, shade, shade};
     }
+
+    /* Grayscale slot 216 is repurposed as the exact crash-screen blue
+     * (#0909BF). On 8bpp indexed framebuffers the theme color can then
+     * hit this slot exactly instead of snapping to the 6x6x6 cube. */
+    palette[216] = (Color){9, 9, 191};
 }
 
 static Color quantize_color_16(Color input) {
@@ -521,6 +526,8 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
             return false;
         }
 
+        boot_text_mode = false;
+        vga_clear_native_text_flag();
         update_present_maps();
         return true;
     }
@@ -577,6 +584,13 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
     bga_write(VBE_DISPI_INDEX_X_OFFSET, 0);
     bga_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
     bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_NOCLEARMEM);
+
+    /* Leaving the boot text menu through a real DISPI graphics mode:
+     * the classic VGA text flag is stale now (enter_boot_text_mode set
+     * it, and this path bypasses vga_set_graphics_mode which would clear
+     * it), so clear it here or the crash screen would refuse to render. */
+    boot_text_mode = false;
+    vga_clear_native_text_flag();
 
     fb.width = bga_read(VBE_DISPI_INDEX_XRES);
     fb.height = bga_read(VBE_DISPI_INDEX_YRES);
