@@ -13,7 +13,16 @@ static uint8_t from_bcd(uint8_t value) {
     return (uint8_t)((value & 0x0F) + ((value / 16) * 10));
 }
 
-static void read_datetime(char *buffer, size_t max_len) {
+/* Cached datetime string. CMOS reads are expensive port I/O on real
+ * hardware and under cycle-accurate emulators (each outb/inb pair is
+ * ~1us of ISA bus time); the old path re-read 14+ registers with
+ * double-validation on every caller - three times per frame. Refresh
+ * at most once per second instead, keyed on the RTC seconds field. */
+static char datetime_cache[24];
+static bool datetime_cache_valid = false;
+static uint8_t datetime_cache_second = 0xFF;
+
+static void read_datetime_uncached(char *buffer, size_t max_len) {
     uint8_t second;
     uint8_t minute;
     uint8_t hour;
@@ -77,4 +86,25 @@ static void read_datetime(char *buffer, size_t max_len) {
     append_padded_uint(buffer, &len, max_len, minute, 2);
     append_char(buffer, &len, max_len, ':');
     append_padded_uint(buffer, &len, max_len, second, 2);
+}
+
+static void read_datetime(char *buffer, size_t max_len) {
+    uint8_t now_second;
+
+    /* Poll the update-in-progress flag once; only when it is clear can
+     * the seconds register be read directly without a validation lap. */
+    if (cmos_read(0x0A) & 0x80) {
+        /* Update in progress: last cached string is still correct. */
+    } else {
+        now_second = cmos_read(0x00);
+        if (!datetime_cache_valid || now_second != datetime_cache_second) {
+            read_datetime_uncached(datetime_cache, sizeof(datetime_cache));
+            /* Re-read seconds after the validated lap; BCD handled above. */
+            now_second = cmos_read(0x00);
+            datetime_cache_second = now_second;
+            datetime_cache_valid = true;
+        }
+    }
+
+    copy_string(buffer, datetime_cache, max_len);
 }

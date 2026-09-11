@@ -835,7 +835,7 @@ static void debug_bp_catch(AppId app, uint32_t frame_no) {
         if (next <= ebp || next > ebp + 0x4000u) {
             break;
         }
-        if (ret < 0x200000u || ret > 0x780000u) {
+        if (ret < 0x200000u || ret > 0x5D0000u) {
             break;
         }
         {
@@ -927,7 +927,7 @@ static void debug_bp_catch_power(const char *action) {
         if (next <= ebp || next > ebp + 0x4000u) {
             break;
         }
-        if (ret < 0x200000u || ret > 0x780000u) {
+        if (ret < 0x200000u || ret > 0x5D0000u) {
             break;
         }
         {

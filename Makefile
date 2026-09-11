@@ -31,11 +31,13 @@ CONFIG_DEBUG := $(shell sed -n 's/^#define HALOXOS_CONFIG_DEBUG[[:space:]]*//p' 
 CONFIG_DEV_MODE := $(shell sed -n 's/^#define HALOXOS_CONFIG_DEV_MODE[[:space:]]*//p' src/config/config.h)
 CONFIG_SCREEN_DEPTH := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_BPP[[:space:]]*//p' src/config/config.h)
 ASFLAGS := -DHALOXOS_BOOT_SCREEN_WIDTH=$(CONFIG_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(CONFIG_SCREEN_HEIGHT) -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH)
-CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -Ibuild/generated
+CFLAGS := -std=gnu11 -O3 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -fno-asynchronous-unwind-tables -fno-unwind-tables -Ibuild/generated
 LDFLAGS := -T linker.ld
 # Debug builds keep EBP frame pointers so the crash handler can walk the
 # stack chain, embed debug line info for the BSOD backtrace symbol table,
 # and get the addr2line symbol data generated after the final link.
+# Release builds omit the frame pointer: one less register spill per call
+# in the rendering hot paths.
 ifeq ($(CONFIG_DEBUG),1)
 CFLAGS += -fno-omit-frame-pointer -g
 endif

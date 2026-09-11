@@ -5,6 +5,7 @@
 
 global idt_load
 global irq0_stub
+global irq12_stub
 global irq_default_stub
 global isr_default_stub
 global isr0_stub
@@ -42,6 +43,7 @@ global isr31_stub
 global cpu_halt_once
 
 extern timer_tick_from_isr
+extern mouse_packet_from_isr
 extern cpu_exception_handler
 
 idt_load:
@@ -53,6 +55,19 @@ irq0_stub:
     pusha
     call timer_tick_from_isr
     mov al, 0x20
+    out 0x20, al
+    popa
+    iretd
+
+; IRQ12 (PS/2 mouse): drains the 8042 output queue in real time. Without
+; this, packets wait in the queue until the next 60Hz poll_input() and a
+; heavy render frame (~120ms) batch-applies them -> cursor teleport and
+; felt "desync". Consuming here keeps latency to interrupt time (~1ms).
+irq12_stub:
+    pusha
+    call mouse_packet_from_isr
+    mov al, 0x20
+    out 0xA0, al
     out 0x20, al
     popa
     iretd

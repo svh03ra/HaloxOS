@@ -287,7 +287,7 @@ static int crash_capture_trace(uint32_t start_ebp, uint32_t start_eip,
         if (next_ebp <= ebp || next_ebp > ebp + 0x4000u) {
             break;   /* chain must grow upward and stay plausible */
         }
-        if (ret < 0x200000u || ret > 0x780000u) {
+        if (ret < 0x200000u || ret > 0x5D0000u) {
             break;   /* return address must lie inside the kernel image */
         }
         frames[count++] = ret;

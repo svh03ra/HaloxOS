@@ -172,42 +172,151 @@ static void init_mouse(void) {
     }
 }
 
-static void poll_input(void) {
-    mouse.prev_left = mouse.left;
-    mouse.prev_right = mouse.right;
-    mouse.prev_middle = mouse.middle;
+/*
+ * Real-time mouse input.
+ *
+ * Packets are consumed by IRQ12 the instant they arrive (cursor moves
+ * with interrupt latency, ~1ms, instead of waiting for the next 60Hz
+ * frame poll - the old path batch-applied ~120ms of movement on heavy
+ * emulator frames and the cursor teleported / felt desynced).
+ *
+ * Split state model:
+ *  - mouse.x / mouse.y / mouse.middle: written live by the ISR (real
+ *    time position, handlers read them mid-frame).
+ *  - mouse.left / mouse.right / prev_*: shaped once per frame in
+ *    poll_input from the physical hw state. Buttons are frame-granular
+ *    so each physical press produces exactly one "clicked" edge, even
+ *    when a press+release completes inside a single slow frame.
+ *  - press latch counters: the ISR counts release->press edges; poll
+ *    replays one pending edge per frame. Without this, a fast click
+ *    that fully lands between two frames would be lost.
+ */
+static bool mouse_hw_left = false;
+static bool mouse_hw_right = false;
+static uint8_t mouse_press_latch_left = 0;
+static uint8_t mouse_press_latch_right = 0;
+static bool mouse_click_replay_left = false;
+static bool mouse_click_replay_right = false;
 
-    while (inb(0x64) & 0x01) {
+static void mouse_apply_byte(uint8_t data) {
+    /* Byte 0 must have bit 3 set; else the stream desynced - resync. */
+    if (mouse_packet_index == 0 && (data & 0x08) == 0) {
+        return;
+    }
+
+    mouse_packet[mouse_packet_index++] = data;
+    if (mouse_packet_index != 3) {
+        return;
+    }
+    mouse_packet_index = 0;
+
+    {
+        int dx = (mouse_packet[0] & 0x10) ? (int)mouse_packet[1] - 256 : (int)mouse_packet[1];
+        int dy = (mouse_packet[0] & 0x20) ? (int)mouse_packet[2] - 256 : (int)mouse_packet[2];
+        int nx = mouse.x + dx;
+        int ny = mouse.y - dy;
+        bool new_left = (mouse_packet[0] & 0x01) != 0;
+        bool new_right = (mouse_packet[0] & 0x02) != 0;
+        bool new_middle = (mouse_packet[0] & 0x04) != 0;
+
+        if (nx < 0) nx = 0;
+        else if (nx > OS_WIDTH - 1) nx = OS_WIDTH - 1;
+        if (ny < 0) ny = 0;
+        else if (ny > OS_HEIGHT - 1) ny = OS_HEIGHT - 1;
+
+        if (nx != mouse.x || ny != mouse.y || new_left != mouse_hw_left ||
+            new_right != mouse_hw_right || new_middle != mouse.middle) {
+            last_input_tick = timer_ticks;
+        }
+
+        if (new_left && !mouse_hw_left && mouse_press_latch_left < 255) {
+            ++mouse_press_latch_left;
+        }
+        if (new_right && !mouse_hw_right && mouse_press_latch_right < 255) {
+            ++mouse_press_latch_right;
+        }
+        mouse_hw_left = new_left;
+        mouse_hw_right = new_right;
+
+        mouse.x = nx;
+        mouse.y = ny;
+        mouse.middle = new_middle;
+    }
+}
+
+/* IRQ12 (PS/2 mouse): drain everything the 8042 queued while the CPU was
+ * busy. This is what kills the ~120ms batch-apply lag on heavy emulators.
+ * Stray keyboard bytes share the same output queue and MUST be routed to
+ * the scancode handler here, otherwise a mouse burst would eat them. */
+void mouse_packet_from_isr(void) {
+    for (;;) {
         uint8_t status = inb(0x64);
+        if ((status & 0x01) == 0) {
+            return;
+        }
         uint8_t data = inb(0x60);
-
         if (status & 0x20) {
-            if (mouse_packet_index == 0 && (data & 0x08) == 0) {
-                continue;
-            }
-
-            mouse_packet[mouse_packet_index++] = data;
-            if (mouse_packet_index == 3) {
-                int dx = (mouse_packet[0] & 0x10) ? (int)mouse_packet[1] - 256 : (int)mouse_packet[1];
-                int dy = (mouse_packet[0] & 0x20) ? (int)mouse_packet[2] - 256 : (int)mouse_packet[2];
-                int next_x = clampi(mouse.x + dx, 0, OS_WIDTH - 1);
-                int next_y = clampi(mouse.y - dy, 0, OS_HEIGHT - 1);
-                bool next_left = (mouse_packet[0] & 0x01) != 0;
-                bool next_right = (mouse_packet[0] & 0x02) != 0;
-                bool next_middle = (mouse_packet[0] & 0x04) != 0;
-                if (next_x != mouse.x || next_y != mouse.y ||
-                    next_left != mouse.left || next_right != mouse.right || next_middle != mouse.middle) {
-                    last_input_tick = timer_ticks;
-                }
-                mouse.x = next_x;
-                mouse.y = next_y;
-                mouse.left = next_left;
-                mouse.right = next_right;
-                mouse.middle = next_middle;
-                mouse_packet_index = 0;
-            }
+            mouse_apply_byte(data);
         } else {
             handle_scancode(data);
         }
     }
+}
+
+static void poll_input(void) {
+    /* End a replayed one-frame click hold: restore physical state. */
+    if (mouse_click_replay_left) {
+        mouse.left = mouse_hw_left;
+        mouse_click_replay_left = false;
+    }
+    if (mouse_click_replay_right) {
+        mouse.right = mouse_hw_right;
+        mouse_click_replay_right = false;
+    }
+
+    mouse.prev_left = mouse.left;
+    mouse.prev_right = mouse.right;
+    mouse.prev_middle = mouse.middle;
+
+    mouse.left = mouse_hw_left;
+    mouse.right = mouse_hw_right;
+
+    /* Deliver one pending press edge per frame. When the physical button
+     * is already held, just expose the edge (prev=false). When the click
+     * completed entirely inside the last frame, hold the button for this
+     * single frame so click handlers see it exactly once. */
+    if (mouse_press_latch_left != 0) {
+        --mouse_press_latch_left;
+        mouse.prev_left = false;
+        if (!mouse.left) {
+            mouse.left = true;
+            mouse_click_replay_left = true;
+        }
+    }
+    if (mouse_press_latch_right != 0) {
+        --mouse_press_latch_right;
+        mouse.prev_right = false;
+        if (!mouse.right) {
+            mouse.right = true;
+            mouse_click_replay_right = true;
+        }
+    }
+
+    /* 8042 drain: keyboard bytes always, mouse bytes as a fallback for
+     * boxes where IRQ12 never fires. Runs with IRQs off so the ISR and
+     * this loop can never interleave a packet byte pair. */
+    __asm__ volatile ("cli");
+    for (;;) {
+        uint8_t status = inb(0x64);
+        if ((status & 0x01) == 0) {
+            break;
+        }
+        uint8_t data = inb(0x60);
+        if (status & 0x20) {
+            mouse_apply_byte(data);
+        } else {
+            handle_scancode(data);
+        }
+    }
+    __asm__ volatile ("sti");
 }

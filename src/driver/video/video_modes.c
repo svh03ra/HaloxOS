@@ -147,6 +147,12 @@ static void update_present_maps(void) {
     present_offset_x = (fb.width - present_content_width) / 2u;
     present_offset_y = (fb.height - present_content_height) / 2u;
 
+    /* Full clear first: the mapped window moves between modes, so stale
+     * entries outside the new content area must read as 0, not leftover
+     * values from the previous geometry. */
+    memset_local(present_x_map, 0, sizeof(present_x_map));
+    memset_local(present_y_map, 0, sizeof(present_y_map));
+
     for (uint32_t x = 0; x < present_content_width; ++x) {
         present_x_map[present_offset_x + x] =
             (uint16_t)((x * OS_WIDTH) / present_content_width);

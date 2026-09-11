@@ -140,35 +140,49 @@ int main(int argc, char **argv) {
     }
 
     {
+        /* Asset format v2. Header: u16 width, u16 height, u8 format,
+         * u8 reserved. Formats: 0xA2 = opaque (rgb565 plane only),
+         * 0xB3 = transparent (alpha plane + rgb565 plane). The palette
+         * index plane of the old 4-byte-per-pixel v1 layout is
+         * synthesized at runtime from rgb565 via the kernel's quant
+         * LUT, and the alpha plane of opaque images was pure 0xFF
+         * padding (never read). Halves .data RAM of fullscreen
+         * backgrounds and trims every sprite. Old v1 assets are still
+         * recognized by the kernel for compatibility. */
+        bool has_transparent = false;
+        for (int y = 0; y < height && !has_transparent; ++y) {
+            png_bytep row = rows[y];
+            for (int x = 0; x < width; ++x) {
+                if (row[x * 4 + 3] < 128) {
+                    has_transparent = true;
+                    break;
+                }
+            }
+        }
+
         uint16_t dims[2] = {(uint16_t)width, (uint16_t)height};
         fwrite(dims, sizeof(uint16_t), 2, output);
-    }
+        fputc(has_transparent ? 0xB3 : 0xA2, output);
+        fputc(0x48, output);
 
-    for (int y = 0; y < height; ++y) {
-        png_bytep row = rows[y];
-        for (int x = 0; x < width; ++x) {
-            png_bytep px = &row[x * 4];
-            uint8_t index = nearest_color(palette, px[0], px[1], px[2]);
-            fwrite(&index, 1, 1, output);
+        if (has_transparent) {
+            for (int y = 0; y < height; ++y) {
+                png_bytep row = rows[y];
+                for (int x = 0; x < width; ++x) {
+                    fputc(row[x * 4 + 3] >= 128 ? 0xFF : 0x00, output);
+                }
+            }
         }
-    }
 
-    for (int y = 0; y < height; ++y) {
-        png_bytep row = rows[y];
-        for (int x = 0; x < width; ++x) {
-            uint8_t alpha = row[x * 4 + 3];
-            fwrite(&alpha, 1, 1, output);
-        }
-    }
-
-    for (int y = 0; y < height; ++y) {
-        png_bytep row = rows[y];
-        for (int x = 0; x < width; ++x) {
-            png_bytep px = &row[x * 4];
-            uint16_t rgb565 = (uint16_t)(((uint16_t)(px[0] >> 3) << 11) |
-                                          ((uint16_t)(px[1] >> 2) << 5) |
-                                          (uint16_t)(px[2] >> 3));
-            fwrite(&rgb565, sizeof(rgb565), 1, output);
+        for (int y = 0; y < height; ++y) {
+            png_bytep row = rows[y];
+            for (int x = 0; x < width; ++x) {
+                png_bytep px = &row[x * 4];
+                uint16_t rgb565 = (uint16_t)(((uint16_t)(px[0] >> 3) << 11) |
+                                              ((uint16_t)(px[1] >> 2) << 5) |
+                                              (uint16_t)(px[2] >> 3));
+                fwrite(&rgb565, sizeof(rgb565), 1, output);
+            }
         }
     }
 

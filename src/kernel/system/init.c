@@ -94,7 +94,7 @@ static void init_state(void) {
  * at a fixed address before jumping into the kernel. Shown on the serial
  * debugger trace in debug builds.
  */
-#define LOADER_INFO_ADDR   0x750000u
+#define LOADER_INFO_ADDR   0x5D0000u
 #define LOADER_INFO_MAGIC  0x484C585Au
 
 typedef struct {

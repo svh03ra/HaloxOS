@@ -6,8 +6,13 @@ _100% **REAL** OS, Built from **SCRATCH**, Made with **AI**:_
 _<sup>(Graphical Demonstration included)</sup>_
 
 ## ❓ What's that?
-This was actually made in VS Code with Codex while I was developing my own OS.
+My AI-powered hobby OS aims to be **fully implemented**, stability compatible with ancient machines which I've ever made in Codex.
+
 I’ve been handling things carefully and delicately for progress... So what’s going to be build lads?
+
+This was included as part of the Kernel Compression feature, powered by [Zstandard (ZSTD)](https://github.com/facebook/zstd) technology.
+_In the V1.1 development version that we're working on it_: please check the [ZSTD license](https://github.com/facebook/zstd/blob/dev/LICENSE) which I used.
+
 
 ## 🧭 Source Layout
 The source tree is arranged around the OS parts that own the behavior:
@@ -35,7 +40,7 @@ Let’s take a look at some requirements you may need for _pinchy salt_!
 
 **Minimum Requirements:**
 - **CPU:** `Intel i386(?)` or Fewer
-- **RAM:** `8 MB` _(Required to boot from the GRUB bootloader)_
+- **RAM:** `6 MB` _(Required to boot from the GRUB bootloader)_
 - **VRAM:** `2 MB` or Fewer
 - **Run as Boot:** `CDROM` _(ISO)_ Only, not the disk.
 - **Architecture:** `32-Bit` _(x86)_ Only, x64 can run as well.
@@ -59,6 +64,7 @@ First of all, you need to understand what you will do in order to follow the ins
 ```
 - nasm
 - gcc
+- gcc-multilib
 - binutils
 - grub-pc-bin
 - grub-common
@@ -66,11 +72,11 @@ First of all, you need to understand what you will do in order to follow the ins
 - mtools
 - dosfstools
 - parted
-- gzip
+- zstd
 - python3
 - pkg-config
 - libpng-dev
-- qemu
+- qemu-system-x86 (i386)
 ```
 
 - **If you want to get a latest build from the development progress, you need to compile yourself.**

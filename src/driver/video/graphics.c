@@ -219,8 +219,11 @@ static Color present_color_for(uint16_t rgb565) {
  * small rebuild cost is amortized over millions of pixels. This removes
  * ~10 arithmetic ops + a 16-entry nearest-color search per pixel from
  * every scanout of the 24/32bpp present paths.
+ *
+ * Storage is the render_scratch union declared in vga.c: present LUT
+ * (24/32bpp present paths) and the VGA 4bpp plane staging buffers are
+ * never live in the same video mode, so they share 256 KB of BSS.
  */
-static uint32_t present_pixel_lut[65536];
 static int8_t present_pixel_lut_mode = -1;
 static uint8_t present_pixel_lut_bpp = 0;
 
@@ -370,6 +373,60 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
     return true;
 }
 
+/* Letterbox margins only need to go black once per output geometry:
+ * every scanout writes only the content area, so the bands survive
+ * until the next mode change. Tracked with a small geometry cache. */
+static void present_fill_margins(void) {
+    static uint32_t last_w;
+    static uint32_t last_h;
+    static uint32_t last_pitch;
+    static uint32_t last_bpp;
+    static uintptr_t last_addr;
+    static bool margins_done;
+    uint8_t index_black;
+
+    if (margins_done && last_w == fb.width && last_h == fb.height &&
+        last_pitch == fb.pitch && last_bpp == fb.bpp && last_addr == (uintptr_t)fb.address) {
+        return;
+    }
+
+    last_w = fb.width;
+    last_h = fb.height;
+    last_pitch = fb.pitch;
+    last_bpp = fb.bpp;
+    last_addr = (uintptr_t)fb.address;
+    margins_done = true;
+
+    if (fb.bpp == 8) {
+        index_black = color_black;
+        for (uint32_t y = 0; y < fb.height; ++y) {
+            uint8_t *row = fb.address + (size_t)y * fb.pitch;
+            if (y < present_offset_y || y >= present_offset_y + present_content_height) {
+                memset_local(row, index_black, fb.pitch);
+            } else {
+                memset_local(row, index_black, present_offset_x);
+                memset_local(row + present_offset_x + present_content_width, index_black,
+                             fb.width - present_offset_x - present_content_width);
+            }
+        }
+        return;
+    }
+
+    {
+        for (uint32_t y = 0; y < fb.height; ++y) {
+            uint32_t row_off = (size_t)y * fb.pitch;
+            if (y < present_offset_y || y >= present_offset_y + present_content_height) {
+                memset_local(fb.address + row_off, 0, fb.pitch);
+            } else {
+                uint32_t left_bytes = present_offset_x * (fb.bpp / 8u);
+                uint32_t right_bytes = (fb.width - present_offset_x - present_content_width) * (fb.bpp / 8u);
+                memset_local(fb.address + row_off, 0, left_bytes);
+                memset_local(fb.address + row_off + left_bytes + present_content_width * (fb.bpp / 8u), 0, right_bytes);
+            }
+        }
+    }
+}
+
 static void present(void) {
     if (boot_text_mode && !framebuffer_text_mode_active()) {
         return;
@@ -388,6 +445,60 @@ static void present(void) {
         for (int y = 0; y < OS_HEIGHT; ++y) {
             uint8_t *dest = fb.address + (size_t)y * fb.pitch;
             memcpy_local(dest, &backbuffer[y * OS_WIDTH], OS_WIDTH);
+        }
+        if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+            vmware_update_screen();
+        }
+        return;
+    }
+
+    /* Common case: 1:1 mapping, no scaling. Every row is one bulk copy
+     * out of the shadow buffers; no per-pixel sampling maps at all. */
+    if (present_content_width == OS_WIDTH && present_content_height == OS_HEIGHT &&
+        fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT) {
+        for (uint32_t y = 0; y < OS_HEIGHT; ++y) {
+            const uint8_t *src = &backbuffer[y * OS_WIDTH];
+            const uint16_t *src_rgb = &backbuffer_rgb565[y * OS_WIDTH];
+            size_t row_off = (size_t)(y + present_offset_y) * fb.pitch + present_offset_x;
+
+            if (fb.bpp == 8) {
+                memcpy_local(fb.address + row_off, src, OS_WIDTH);
+            } else if (fb.bpp == 15 || fb.bpp == 16) {
+                uint16_t *dest = (uint16_t *)(fb.address + row_off);
+                if (fb.bpp == 16 && fb.red_position == 11 && fb.green_position == 5 &&
+                    fb.blue_position == 0 && fb.red_mask_size == 5 &&
+                    fb.green_mask_size == 6 && fb.blue_mask_size == 5 &&
+                    settings_applied.palette_mode == 2) {
+                    /* True-color and the framebuffer layout IS RGB565:
+                     * straight bulk copy, zero per-pixel math. */
+                    memcpy_local(dest, src_rgb, OS_WIDTH * 2u);
+                } else {
+                    for (uint32_t x = 0; x < OS_WIDTH; ++x) {
+                        Color c = rgb565_to_color(src_rgb[x]);
+                        if (settings_applied.palette_mode == 1) {
+                            c = quantize_color_16(c);
+                        }
+                        dest[x] = (uint16_t)pack_framebuffer_color(c);
+                    }
+                }
+            } else if (fb.bpp == 24) {
+                uint8_t *dest = fb.address + row_off;
+                for (uint32_t x = 0; x < OS_WIDTH; ++x) {
+                    uint32_t packed = present_pixel_fast(src_rgb[x]);
+                    dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
+                    dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
+                    dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
+                }
+            } else {
+                uint32_t *dest = (uint32_t *)(fb.address + row_off);
+                for (uint32_t x = 0; x < OS_WIDTH; ++x) {
+                    dest[x] = present_pixel_fast(src_rgb[x]);
+                }
+            }
+        }
+        /* Black letterbox margins (fb larger than the desktop). */
+        if (fb.height > OS_HEIGHT || fb.width > OS_WIDTH) {
+            present_fill_margins();
         }
         if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
             vmware_update_screen();
@@ -456,9 +567,7 @@ static void clear_screen(uint8_t color) {
     uint16_t rgb = pixel_rgb565_fast(color);
 
     memset_local(backbuffer, color, sizeof(backbuffer));
-    for (int i = 0; i < OS_WIDTH * OS_HEIGHT; ++i) {
-        backbuffer_rgb565[i] = rgb;
-    }
+    memset16_local(backbuffer_rgb565, rgb, OS_WIDTH * OS_HEIGHT);
 }
 
 /*
@@ -512,22 +621,33 @@ static void fill_rect(int x, int y, int w, int h, uint8_t color) {
     int x1 = clampi(x + w, 0, OS_WIDTH);
     int y1 = clampi(y + h, 0, OS_HEIGHT);
     uint16_t rgb = pixel_rgb565_fast(color);
+    int row_len = x1 - x0;
 
     if (clip_enabled) {
         if (x0 < clip_x0) x0 = clip_x0;
         if (y0 < clip_y0) y0 = clip_y0;
         if (x1 > clip_x1) x1 = clip_x1;
         if (y1 > clip_y1) y1 = clip_y1;
+        row_len = x1 - x0;
     }
 
-    for (int py = y0; py < y1; ++py) {
-        uint8_t *dest = &backbuffer[py * OS_WIDTH];
-        uint16_t *dest_rgb = &backbuffer_rgb565[py * OS_WIDTH];
+    if (row_len <= 0 || y1 <= y0) {
+        return;
+    }
 
-        for (int px = x0; px < x1; ++px) {
-            dest[px] = color;
-            dest_rgb[px] = rgb;
+    /* Full-width rows collapse to two bulk memset passes per row. */
+    if (row_len == OS_WIDTH) {
+        for (int py = y0; py < y1; ++py) {
+            memset_local(&backbuffer[py * OS_WIDTH], color, (size_t)row_len);
+            memset16_local(&backbuffer_rgb565[py * OS_WIDTH], rgb, (size_t)row_len);
         }
+        return;
+    }
+
+    /* Wider chunks: both shadow buffers get their own bulk fill. */
+    for (int py = y0; py < y1; ++py) {
+        memset_local(&backbuffer[py * OS_WIDTH + x0], color, (size_t)row_len);
+        memset16_local(&backbuffer_rgb565[py * OS_WIDTH + x0], rgb, (size_t)row_len);
     }
 }
 
@@ -558,13 +678,35 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
             uint8_t *dest = &backbuffer[(y + row) * OS_WIDTH + x];
             uint16_t *dest_rgb = &backbuffer_rgb565[(y + row) * OS_WIDTH + x];
 
-            for (int col = 0; col < 8; ++col) {
-                if ((bits >> col) & 1u) {
-                    dest[col] = fg;
-                    dest_rgb[col] = fg_rgb;
-                } else if (!transparent) {
-                    dest[col] = bg;
-                    dest_rgb[col] = bg_rgb;
+            if (bits == 0) {
+                if (!transparent) {
+                    memset_local(dest, bg, 8);
+                    memset16_local(dest_rgb, bg_rgb, 8);
+                }
+                continue;
+            }
+            if (bits == 0xFFu) {
+                memset_local(dest, fg, 8);
+                memset16_local(dest_rgb, fg_rgb, 8);
+                continue;
+            }
+
+            if (transparent) {
+                for (int col = 0; col < 8; ++col) {
+                    if ((bits >> col) & 1u) {
+                        dest[col] = fg;
+                        dest_rgb[col] = fg_rgb;
+                    }
+                }
+            } else {
+                for (int col = 0; col < 8; ++col) {
+                    if ((bits >> col) & 1u) {
+                        dest[col] = fg;
+                        dest_rgb[col] = fg_rgb;
+                    } else {
+                        dest[col] = bg;
+                        dest_rgb[col] = bg_rgb;
+                    }
                 }
             }
         }
@@ -817,18 +959,128 @@ static uint16_t image_height(const uint8_t *image) {
     return (uint16_t)(image[2] | ((uint16_t)image[3] << 8));
 }
 
+/*
+ * Image asset formats:
+ *   v1 (legacy, 4 B/px): index, alpha, rgb565 planes after the w/h u16s.
+ *   v2: w/h u16s, then u8 format (0xA2 opaque / 0xB3 transparent), u8
+ *       reserved, then optional 1 B/px alpha plane and the 2 B/px
+ *       rgb565 plane. The index plane is synthesized on demand below.
+ * Detection: byte 5 == 0 is impossible in v2 (format byte is 0xA2/0xB3),
+ * while every v1 asset starts its index plane with a real palette index
+ * that can be 0 - so a nonzero byte 5 signals v2.
+ */
+static bool image_is_v2(const uint8_t *image) {
+    return (image[4] == 0xA2 || image[4] == 0xB3) && image[5] == 0x48;
+}
+
+static bool image_has_alpha(const uint8_t *image) {
+    return image_is_v2(image) ? image[4] == 0xB3 : true;
+}
+
 static const uint8_t *image_pixels(const uint8_t *image) {
     return image + 4;
 }
 
 static const uint8_t *image_alpha(const uint8_t *image) {
+    if (image_is_v2(image)) {
+        return image + 6;
+    }
     size_t count = (size_t)image_width(image) * image_height(image);
     return image + 4 + count;
 }
 
 static const uint16_t *image_rgb565(const uint8_t *image) {
+    if (image_is_v2(image)) {
+        size_t count = (size_t)image_width(image) * image_height(image);
+        return (const uint16_t *)(const void *)(image + 6 + (image[4] == 0xB3 ? count : 0));
+    }
     size_t count = (size_t)image_width(image) * image_height(image);
     return (const uint16_t *)(const void *)(image + 4 + count + count);
+}
+
+/*
+ * v2 asset index synthesis: a 64K-entry rgb565 -> palette-index LUT
+ * built once (lazily, on first v2 draw) with the closed-form
+ * nearest-color (per-channel cube scan + gray-ramp bracket probe),
+ * verified to match brute-force nearest_color for all 65536 inputs.
+ * draw_image_at converts each drawn pixel with one LUT load - no
+ * per-asset index planes are stored anymore. 64KB BSS total.
+ */
+static uint8_t rgb565_index_lut[65536];
+static bool rgb565_index_lut_ready = false;
+
+static void rgb565_index_lut_build(void) {
+    static const uint8_t cube[6] = {0, 51, 102, 153, 204, 255};
+
+    for (uint32_t v = 0; v < 65536u; ++v) {
+        uint32_t r = (((v >> 11) & 0x1Fu) * 255u) / 31u;
+        uint32_t g = (((v >> 5) & 0x3Fu) * 255u) / 63u;
+        uint32_t b = ((v & 0x1Fu) * 255u) / 31u;
+        uint32_t ri = 0;
+        uint32_t gi = 0;
+        uint32_t bi = 0;
+        uint32_t best_r = (r > cube[0]) ? r : cube[0] - r;
+        uint32_t best_g = (g > cube[0]) ? g : cube[0] - g;
+        uint32_t best_b = (b > cube[0]) ? b : cube[0] - b;
+        uint32_t dc;
+        uint32_t gray_best = 0xFFFFFFFFu;
+        uint32_t gray_index = 216;
+
+        best_r *= best_r;
+        best_g *= best_g;
+        best_b *= best_b;
+
+        for (uint32_t v2c = 1; v2c < 6; ++v2c) {
+            uint32_t qr = (r > cube[v2c]) ? r - cube[v2c] : cube[v2c] - r;
+            uint32_t qg = (g > cube[v2c]) ? g - cube[v2c] : cube[v2c] - g;
+            uint32_t qb = (b > cube[v2c]) ? b - cube[v2c] : cube[v2c] - b;
+            if (qr * qr < best_r) { best_r = qr * qr; ri = v2c; }
+            if (qg * qg < best_g) { best_g = qg * qg; gi = v2c; }
+            if (qb * qb < best_b) { best_b = qb * qb; bi = v2c; }
+        }
+
+        dc = best_r + best_g + best_b;
+
+        {
+            /* Gray ramp: squared distance is quadratic in shade s,
+             * minimized near m=(r+g+b)/3 - probing the ramp entries
+             * bracketing that minimum is sufficient. */
+            uint32_t m = (r + g + b) / 3u;
+            int32_t i0 = (int32_t)((m * 39u) / 255u);
+
+            for (int32_t k = i0 - 1; k <= i0 + 1; ++k) {
+                if (k < 0 || k >= 40) {
+                    continue;
+                }
+                uint32_t s = (uint32_t)((k * 255u) / 39u);
+                uint32_t qr = (s > r ? s - r : r - s);
+                uint32_t qg = (s > g ? s - g : g - s);
+                uint32_t qb = (s > b ? s - b : b - s);
+                uint32_t d = qr * qr + qg * qg + qb * qb;
+                if (d < gray_best) {
+                    gray_best = d;
+                    gray_index = (uint32_t)k;
+                }
+            }
+        }
+
+        if (gray_best < dc) {
+            rgb565_index_lut[v] = (uint8_t)(216u + gray_index);
+        } else {
+            rgb565_index_lut[v] = (uint8_t)(36u * ri + 6u * gi + bi);
+        }
+    }
+    rgb565_index_lut_ready = true;
+}
+
+static uint8_t image_pixel_index(const uint8_t *image, size_t i) {
+    if (image_is_v2(image)) {
+        if (!rgb565_index_lut_ready) {
+            rgb565_index_lut_build();
+        }
+        return rgb565_index_lut[image_rgb565(image)[i]];
+    }
+    return image_pixels(image)[i];
 }
 
 static uint16_t palette_rgb565(uint8_t color) {
@@ -878,22 +1130,60 @@ static int text_pixel_width(const char *text) {
 static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) {
     uint16_t width = image_width(image);
     uint16_t height = image_height(image);
-    const uint8_t *pixels = image_pixels(image);
-    const uint8_t *alpha = image_alpha(image);
     const uint16_t *rgb565 = image_rgb565(image);
+    /* v1 assets keep a stored index plane; v2 assets synthesize per
+     * pixel via the rgb565_index_lut (see image_pixel_index). */
+    const uint8_t *pixels = image_is_v2(image) ? NULL : image_pixels(image);
+    const uint8_t *alpha = image_has_alpha(image) ? image_alpha(image) : NULL;
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + (int)width;
+    int y1 = y + (int)height;
+    int src_x0 = 0;
+    int src_y0 = 0;
 
-    for (uint16_t py = 0; py < height; ++py) {
-        for (uint16_t px = 0; px < width; ++px) {
-            size_t index = (size_t)py * width + px;
-            if (!transparent || alpha[index] >= 128) {
-                int dx = x + px;
-                int dy = y + py;
-                if (dx >= 0 && dy >= 0 && dx < OS_WIDTH && dy < OS_HEIGHT &&
-                    clip_contains(dx, dy)) {
-                    backbuffer[dy * OS_WIDTH + dx] = pixels[index];
-                    backbuffer_rgb565[dy * OS_WIDTH + dx] = rgb565[index];
-                }
+    /* Intersect against screen and window clip once, not per pixel. */
+    if (x0 < 0) { src_x0 = -x0; x0 = 0; }
+    if (y0 < 0) { src_y0 = -y0; y0 = 0; }
+    if (x1 > OS_WIDTH) x1 = OS_WIDTH;
+    if (y1 > OS_HEIGHT) y1 = OS_HEIGHT;
+    if (clip_enabled) {
+        if (clip_x0 > x0) { src_x0 += clip_x0 - x0; x0 = clip_x0; }
+        if (clip_y0 > y0) { src_y0 += clip_y0 - y0; y0 = clip_y0; }
+        if (x1 > clip_x1) x1 = clip_x1;
+        if (y1 > clip_y1) y1 = clip_y1;
+    }
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+
+    if (!rgb565_index_lut_ready && image_is_v2(image)) {
+        rgb565_index_lut_build();
+    }
+
+    for (int py = 0; y0 + py < y1; ++py) {
+        int sy = src_y0 + py;
+        int dy = y0 + py;
+        size_t row_base = (size_t)sy * width + src_x0;
+        const uint8_t *src_p = pixels != NULL ? pixels + row_base : NULL;
+        const uint16_t *src_r = rgb565 + row_base;
+        const uint8_t *src_a = alpha != NULL ? alpha + row_base : NULL;
+        uint8_t *dest_p = &backbuffer[(size_t)dy * OS_WIDTH + x0];
+        uint16_t *dest_r = &backbuffer_rgb565[(size_t)dy * OS_WIDTH + x0];
+        int row_w = x1 - x0;
+
+        if ((!transparent || alpha == NULL) && pixels != NULL) {
+            memcpy_local(dest_p, src_p, (size_t)row_w);
+            memcpy_local(dest_r, src_r, (size_t)row_w * 2u);
+            continue;
+        }
+
+        for (int px = 0; px < row_w; ++px) {
+            if (transparent && alpha != NULL && src_a[px] < 128) {
+                continue;
             }
+            dest_r[px] = src_r[px];
+            dest_p[px] = pixels != NULL ? src_p[px] : rgb565_index_lut[src_r[px]];
         }
     }
 }

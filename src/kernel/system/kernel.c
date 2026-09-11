@@ -819,6 +819,7 @@ static int desktop_icon_menu_hover_row = -1;
 static uint32_t desktop_icon_menu_hover_tick = 0;
 
 extern void irq0_stub(void);
+extern void irq12_stub(void);
 extern void irq_default_stub(void);
 extern void isr_default_stub(void);
 extern void isr0_stub(void);

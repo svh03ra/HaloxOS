@@ -3,9 +3,26 @@
 
 // This repository is licensed under the GNU General Public License.
 
+/* rep stosl/movsl bulk paths: 1 emulated instruction per 4 bytes instead
+ * of a ~5-instruction byte loop (big win under cycle-accurate emulators
+ * where every guest instruction costs fixed host time). DF is cleared on
+ * CPU reset and nothing here ever executes `std`. */
 static void *memset_local(void *dest, int value, size_t len) {
     uint8_t *ptr = (uint8_t *)dest;
-    for (size_t i = 0; i < len; ++i) {
+    uint32_t fill = (uint32_t)(uint8_t)value * 0x01010101u;
+    size_t i = 0;
+
+    if (len >= 16) {
+        uint8_t *bulk = ptr;
+        uint32_t count = (uint32_t)(len >> 2);
+        __asm__ volatile ("cld; rep stosl"
+                          : "+D"(bulk), "+c"(count)
+                          : "a"(fill)
+                          : "memory");
+        ptr = bulk;
+        i = len & ~(size_t)3u;
+    }
+    for (; i < len; ++i) {
         ptr[i] = (uint8_t)value;
     }
     return dest;
@@ -14,10 +31,42 @@ static void *memset_local(void *dest, int value, size_t len) {
 static void *memcpy_local(void *dest, const void *src, size_t len) {
     uint8_t *d = (uint8_t *)dest;
     const uint8_t *s = (const uint8_t *)src;
-    for (size_t i = 0; i < len; ++i) {
+    size_t i = 0;
+
+    if (len >= 16) {
+        uint8_t *bd = d;
+        const uint8_t *bs = s;
+        uint32_t count = (uint32_t)(len >> 2);
+        __asm__ volatile ("cld; rep movsl"
+                          : "+D"(bd), "+S"(bs), "+c"(count)
+                          :
+                          : "memory");
+        d = bd;
+        s = bs;
+        i = len & ~(size_t)3u;
+    }
+    for (; i < len; ++i) {
         d[i] = s[i];
     }
     return dest;
+}
+
+/* Bulk RGB565 fill for the rgb565 shadow buffer: one rep stosl per two
+ * pixels instead of a per-element loop (fill_rect/clear_screen rows). */
+static void memset16_local(void *dest, uint16_t value, size_t count) {
+    uint32_t pattern = ((uint32_t)value << 16) | value;
+    uint32_t *d = (uint32_t *)dest;
+    uint32_t pairs = (uint32_t)(count >> 1);
+
+    if (pairs != 0) {
+        __asm__ volatile ("cld; rep stosl"
+                          : "+D"(d), "+c"(pairs)
+                          : "a"(pattern)
+                          : "memory");
+    }
+    if ((count & 1u) != 0) {
+        ((uint16_t *)dest)[count - 1u] = value;
+    }
 }
 
 static size_t strlen_local(const char *text) {

@@ -75,15 +75,15 @@ static void render_run(const Window *window) {
                 /* horizontal flip draw for the return half of the spin */
                 int w = image_width(sprite);
                 int h = image_height(sprite);
-                const uint8_t *pixels = image_pixels(sprite);
-                const uint8_t *alpha = image_alpha(sprite);
+                const uint8_t *alpha = image_has_alpha(sprite) ? image_alpha(sprite) : NULL;
 
                 for (int yy = 0; yy < h; ++yy) {
                     for (int xx = 0; xx < w; ++xx) {
                         size_t idx = (size_t)yy * w + xx;
 
-                        if (alpha[idx] >= 128) {
-                            draw_pixel(ox + sx + (w - 1 - xx), oy + run_coins[i].y + yy, pixels[idx]);
+                        if (alpha == NULL || alpha[idx] >= 128) {
+                            draw_pixel(ox + sx + (w - 1 - xx), oy + run_coins[i].y + yy,
+                                       image_pixel_index(sprite, idx));
                         }
                     }
                 }

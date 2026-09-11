@@ -12,12 +12,15 @@
  * 1.5.7 decompressor, and jumps to the kernel's real entry point with the
  * original multiboot registers restored.
  *
- * Memory layout (must stay under 8 MB):
+ * Memory layout (must stay under 6 MB):
  *   0x100000  loader itself (ELF loaded by GRUB)
- *   ~0x120000 kernel.bin.zst module (placed by GRUB, page aligned)
+ *   ~0x12E000 kernel.bin.zst module (placed by GRUB, page aligned)
  *   0x200000  kernel decompression target (kernel links at 2M)
- *   0x700000  loader info struct handed to the kernel (debug trace data)
- *   0x710000  zstd DCtx scratch (256K, above kernel bss end)
+ *   0x500000  zstd DCtx scratch (256K; sits inside the kernel's future
+ *             .bss range - free RAM during decompression, reclaimed when
+ *             the kernel zeroes .bss at entry)
+ *   0x5D0000  loader info struct handed to the kernel (debug trace data;
+ *             above the kernel bss end at ~0x5C5000, below the 6 MB limit)
  */
 
 #define LOADER_DEBUG 1
@@ -32,11 +35,16 @@
 #define SERIAL_PORT 0x3F8
 
 #define KERNEL_LOAD_ADDR   0x200000u
-#define KERNEL_SCRATCH     0x710000u
+/* zstd DCtx scratch: inside the kernel's future .bss range - that RAM is
+ * free while decompressing (the kernel image only reaches ~0x416000 and
+ * .bss zeroing happens at kernel entry, after the scratch is dead) - so
+ * it costs no extra memory on any machine. */
+#define KERNEL_SCRATCH     0x500000u
 #define KERNEL_SCRATCH_SIZE 0x40000u
-/* Above the kernel bss end (0x70A2C4) and the zstd scratch: the kernel's
- * boot code zeroes its whole .bss, so this block must live outside it. */
-#define LOADER_INFO_ADDR   0x750000u
+/* Above the kernel bss end (~0x5C5000) and below the 6 MB floor: the
+ * kernel's boot code zeroes its whole .bss, so this block must live
+ * outside it. */
+#define LOADER_INFO_ADDR   0x5D0000u
 
 #define MB_MAGIC_EXPECTED 0x2BADB002u
 #define MB_FLAG_MODS       (1u << 3)
@@ -46,14 +54,15 @@
 
 #define HALOXOS_MODULE_MAGIC 0x484C585Au
 
-/* Minimum RAM the boot chain really needs. The highest byte the loader
- * writes is the info block end at 0x750028, and the kernel's .bss ends
- * at 0x70A2C4 - so the chain physically tops out at ~7.52 MiB. An 8 MB
- * machine reports slightly under 8 MiB usable (QEMU -m 8: 8257536 bytes,
- * because the 128 KiB legacy I/O hole is excluded), so requiring a full
- * 8 MiB rejected every real 8 MB PC by 128 KiB. 0x780000 (7.5 MiB) is
- * the true floor with margin and accepts every 8 MB machine. */
-#define MIN_RAM_BYTES 0x780000u
+/* Minimum RAM the boot chain really needs. The kernel's .bss now ends
+ * at ~0x5C5000 (asset format v2 halved the embedded images), the loader
+ * info struct tops out at 0x5D0028, and the zstd scratch lives inside
+ * the kernel's future .bss so it costs nothing extra. 6 MB machines
+ * report slightly under 6 MiB usable (QEMU -m 6: 6160384 bytes, the
+ * 128 KiB legacy I/O hole is excluded), so requiring a full 6 MiB would
+ * reject every real 6 MB PC by 128 KiB. 0x5C0000 (5.75 MiB) is the
+ * true floor with margin and accepts every 6 MB machine. */
+#define MIN_RAM_BYTES 0x5C0000u
 
 /* VGA text mode screen geometry. */
 #define VGA_TEXT_BUFFER 0xB8000u
@@ -817,7 +826,7 @@ static void text_append_hex32(char *buffer, int *len, int max_len, uint32_t valu
  * Report installed/advertised physical RAM rather than summing only the
  * usable E820 fragments.  Firmware commonly reserves small regions inside
  * the RAM address space; summing usable ranges therefore makes an 8 MiB
- * machine look like roughly 7.5 MiB and incorrectly trips an "8 MB minimum"
+ * machine look like roughly 5.7 MiB and incorrectly trips a "6 MB minimum"
  * check.  Multiboot's mem_lower/mem_upper fields describe the conventional
  * and extended physical-memory size, so use that as the baseline.
  *
@@ -922,7 +931,7 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
 
     const char *warning[] = {
         "Looks like you don't have enough memory in this system to run properly!",
-        "HaloxOS requires at least 8MB of RAM to boot...",
+        "HaloxOS requires at least 6MB of RAM to boot...",
         "Please make sure to upgrade the memory to more."
     };
 
@@ -1139,7 +1148,7 @@ static void show_ram_error_screen(const MbInfo *mbi) {
      * header/message lines, while debugger data remains left-aligned. */
     text_screen_write_center(1, "***** BOOT ERROR!!! *****", 0x4F);
     text_screen_write_center(3, "Looks like you don't have enough memory in this system to run properly!", 0x4F);
-    text_screen_write_center(4, "HaloxOS requires at least 8MB of RAM to boot...", 0x4F);
+    text_screen_write_center(4, "HaloxOS requires at least 6MB of RAM to boot...", 0x4F);
     text_screen_write_center(5, "Please make sure to upgrade the memory to more.", 0x4F);
 
     /* Build the RAM amount before rendering it so it can be centered exactly. */

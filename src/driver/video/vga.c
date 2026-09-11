@@ -488,32 +488,66 @@ static void present_vga_linear_256(void) {
     }
 }
 
+/* 4bpp planar staging: the classic 4-plane loop recomputes the RGB565->EGA
+ * lookup and bit assembly once per plane (4x redundant per pixel). Here
+ * all four plane bytes are built in a single pass over the row, then each
+ * plane is committed with one bulk copy while its sequencer mask is set.
+ * One 64K LUT load + 4 bit extracts per pixel instead of 4 full passes.
+ *
+ * RAM overlay: these staging buffers are only touched by the native VGA
+ * 4bpp backend, while present_pixel_lut (see graphics.c) is only built
+ * and read by the 24/32bpp present paths - the two can never be live in
+ * the same video mode, so they share one union. Saves 150 KB of BSS. */
+#define VGA_PLANAR_MAX_BYTES (640u / 8u * 480u)
+union RenderScratch {
+    uint8_t plane_stage[4][VGA_PLANAR_MAX_BYTES];
+    uint32_t present_pixel_lut_storage[65536];
+};
+static union RenderScratch render_scratch;
+#define vga_plane_stage (render_scratch.plane_stage)
+#define present_pixel_lut (render_scratch.present_pixel_lut_storage)
+
 static void present_vga_planar_16(void) {
     uint8_t *vram = (uint8_t *)(uintptr_t)VGA_FB_ADDRESS;
+    uint32_t stage_bytes = fb.pitch * fb.height;
     uint32_t plane;
+    uint32_t y;
+
+    if (stage_bytes > VGA_PLANAR_MAX_BYTES) {
+        stage_bytes = VGA_PLANAR_MAX_BYTES;
+    }
+
+    for (y = 0; y < fb.height && (y + 1u) * fb.pitch <= stage_bytes; ++y) {
+        uint16_t sy = present_y_map[y];
+        const uint16_t *src_rgb = &backbuffer_rgb565[(size_t)sy * OS_WIDTH];
+        uint8_t *row0 = vga_plane_stage[0] + (size_t)y * fb.pitch;
+        uint8_t *row1 = vga_plane_stage[1] + (size_t)y * fb.pitch;
+        uint8_t *row2 = vga_plane_stage[2] + (size_t)y * fb.pitch;
+        uint8_t *row3 = vga_plane_stage[3] + (size_t)y * fb.pitch;
+        uint32_t byte_col;
+
+        for (byte_col = 0; byte_col < fb.pitch; ++byte_col) {
+            uint32_t x0 = byte_col * 8;
+            uint8_t bits[4] = {0, 0, 0, 0};
+            uint32_t b;
+
+            for (b = 0; b < 8; ++b) {
+                uint8_t ega = rgb565_to_ega[src_rgb[present_x_map[x0 + b]]];
+                bits[0] |= (uint8_t)(((ega >> 0) & 1u) << (7 - b));
+                bits[1] |= (uint8_t)(((ega >> 1) & 1u) << (7 - b));
+                bits[2] |= (uint8_t)(((ega >> 2) & 1u) << (7 - b));
+                bits[3] |= (uint8_t)(((ega >> 3) & 1u) << (7 - b));
+            }
+            row0[byte_col] = bits[0];
+            row1[byte_col] = bits[1];
+            row2[byte_col] = bits[2];
+            row3[byte_col] = bits[3];
+        }
+    }
 
     for (plane = 0; plane < 4; ++plane) {
-        uint32_t y;
-
         vga_write_seq(0x02, (uint8_t)(1u << plane));
-        for (y = 0; y < fb.height; ++y) {
-            uint16_t sy = present_y_map[y];
-            uint8_t *dest = vram + (size_t)y * fb.pitch;
-            uint32_t byte_col;
-
-            for (byte_col = 0; byte_col < fb.pitch; ++byte_col) {
-                uint32_t x0 = byte_col * 8;
-                uint8_t bits = 0;
-                uint32_t b;
-
-                for (b = 0; b < 8; ++b) {
-                    uint16_t rgb = backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x0 + b]];
-                    uint8_t ega = rgb565_to_ega[rgb];
-                    bits |= (uint8_t)(((ega >> plane) & 1u) << (7 - b));
-                }
-                dest[byte_col] = bits;
-            }
-        }
+        memcpy_local(vram, vga_plane_stage[plane], stage_bytes);
     }
 }
 /* Present the software backbuffer using the active native VGA format. */
