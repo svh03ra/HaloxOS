@@ -786,7 +786,7 @@ build/loader_main.o: loader/main.c loader/include/string.h src/config/config.h $
 # after KERNEL exists. The KERNEL recipe explicitly invokes this target for
 # the real generation pass (two-pass build like crash_symbols).
 $(RAM_REQUIREMENT_H): Makefile tools/gen_rr.sh | build/generated
-	@if [ ! -f $(KERNEL) ]; then \
+	@if [ ! -f $(KERNEL) ] || ! nm $(KERNEL) 2>/dev/null | grep -q ' B __bss_end$$'; then \
 		$(call LOG_COMPILE,ram requirement stub,$@); \
 		{ \
 			echo '#ifndef HALOXOS_RAM_REQUIREMENT_H'; \
@@ -910,10 +910,19 @@ $(KERNEL): $(KERNEL_OBJS)
 		$(call LOG_ERROR,Failed to link $@); \
 		exit 1; \
 	fi
-	@# Pass 2: generate real ram_requirement.h from linked kernel,
-	@# rebuild kernel.o, and relink. The ram_requirement.h values
-	@# come from the kernel's actual __bss_end symbol.
-	@$(MAKE) --no-print-directory $(RAM_REQUIREMENT_H)
+	@# Pass 2: generate the real ram_requirement.h from the linked kernel,
+	@# rebuild kernel.o and relink. The values come from the kernel's
+	@# actual __bss_end symbol.
+	@#
+	@# The generator is invoked directly rather than through its target:
+	@# after a clean build the header ALREADY exists - it is the pre-link
+	@# stub kernel.o had to compile against - and it is newer than the
+	@# rule's prerequisites, so make would call the target up to date and
+	@# the kernel would keep the stub's gate forever. That is what made a
+	@# 6 MB machine fail even though the real span only needs 5.5 MB.
+	@# gen_rr.sh content-compares, so kernel.o is recompiled (and relinked)
+	@# only when the real span actually differs from the stub.
+	@bash tools/gen_rr.sh $(KERNEL) $(RAM_REQUIREMENT_H) $(DOOM_WAD_EMBED_STATE) || { $(call LOG_ERROR,Failed to generate $(RAM_REQUIREMENT_H)); exit 1; }
 	@$(MAKE) --no-print-directory build/kernel.o
 	@$(call RUN_LOG,$(LD) -m elf_i386 $(LDFLAGS) -o $@ $(KERNEL_OBJS)) || { $(call LOG_ERROR,Failed to link $@); exit 1; }
 ifeq ($(CONFIG_DEBUG),1)

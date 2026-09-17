@@ -233,7 +233,8 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
         poll_input();
         update_state();
         if (system_state != STATE_DESKTOP || desktop_should_redraw()) {
-            if (system_state == STATE_DESKTOP && desktop_cursor_only_redraw()) {
+            bool cursor_only = system_state == STATE_DESKTOP && desktop_cursor_only_redraw();
+            if (cursor_only) {
                 /* Only the pointer moved: put back the saved background,
                  * redraw the pointer and scan out those two small boxes.
                  * On a slow machine this is the difference between a
@@ -244,8 +245,17 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
                 present();
             }
             if (system_state == STATE_DESKTOP) {
-                mark_desktop_redrawn();
+                /* A pointer-only frame does not repaint the clock box, so
+                 * it must not claim the clock's second - see the note on
+                 * mark_desktop_redrawn(). */
+                mark_desktop_redrawn(!cursor_only);
             }
+        } else if (system_state == STATE_DESKTOP && !fps_overlay_on && desktop_clock_only_redraw()) {
+            /* Nothing changed but the clock's second: repaint the clock
+             * box and scan out just its rectangle plus the pointer's,
+             * instead of recompositing the whole desktop every second. */
+            desktop_clock_only_frame();
+            mark_desktop_redrawn(true);
         }
         if (cpu_has_tsc) {
             frame_cycle_end = (uint32_t)rdtsc_read();
@@ -296,7 +306,7 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
                 fps_last_redraw_tick = timer_ticks;
                 draw_everything();
                 present();
-                mark_desktop_redrawn();
+                mark_desktop_redrawn(true);
             }
         }
 

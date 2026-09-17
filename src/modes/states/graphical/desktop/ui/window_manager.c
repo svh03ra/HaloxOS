@@ -39,6 +39,53 @@ static int app_window_height(AppId app) {
     }
 }
 
+/*
+ * Keep the button of the app that was just opened or switched to on the
+ * taskbar.
+ *
+ * The row shows TASKBAR_APP_SLOTS buttons starting at taskbar_scroll, so an
+ * app activated from the Start menu, by a keyboard shortcut or by another
+ * app's own logic can fall outside that window - leaving a running app with
+ * no visible button and no obvious sign of which app you are in.
+ *
+ * When that happens the window slides BACK so the active app takes the last
+ * slot. Sliding it forward instead (taskbar_scroll = app) would be a one-line
+ * fix, but with a late app - 3D Box, Demo Center, DOOM - it would leave the
+ * row showing that single button and four empty slots while five other apps
+ * are still open. Sliding back keeps every visible slot filled.
+ *
+ * Scrolling with the overflow arrows does NOT re-reveal: you can scroll away
+ * from the active app and stay there until you activate something again.
+ */
+static void taskbar_reveal_app(int app) {
+    int idx = taskbar_scroll;
+    int slot = 0;
+    int start;
+    int filled;
+
+    if (app < 0 || app >= APP_COUNT) {
+        return;
+    }
+
+    /* Already inside the visible window? Leave the scroll alone. */
+    for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
+        if (!windows[idx].open) continue;
+        if (idx == app) {
+            return;
+        }
+        ++slot;
+    }
+
+    start = app;
+    filled = 0;
+    for (int i = app; i >= 0 && filled < TASKBAR_APP_SLOTS; --i) {
+        if (!windows[i].open) continue;
+        start = i;
+        ++filled;
+    }
+    taskbar_scroll = start;
+}
+
 static void open_window(AppId app) {
     Window *window = &windows[app];
     menu_open = false;
@@ -106,11 +153,13 @@ static void open_window(AppId app) {
     }
 
     active_window = app;
+    taskbar_reveal_app((int)app);
     serial_trace_concat("INFO", "Application Opened - ", app_titles[app]);
 }
 
 static void set_active_window(AppId app) {
     active_window = app;
+    taskbar_reveal_app((int)app);
     menu_open = false;
     context_menu_open = false;
     desktop_icon_menu_open = false;
@@ -155,6 +204,9 @@ static void close_window(AppId app) {
                 break;
             }
         }
+        /* The app that just became active must not be hidden by the row's
+         * scroll position either. */
+        taskbar_reveal_app(active_window);
     }
 }
 

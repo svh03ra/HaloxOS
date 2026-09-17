@@ -289,3 +289,52 @@ static void cursor_render_motion_only(void) {
     }
     present_rect(x0, y0, x1 - x0, y1 - y0);
 }
+
+/*
+ * Clock-only repaint: the taskbar clock shows seconds, so it needs a touch
+ * every second, but the desktop must not be recomposited for it.
+ *
+ * Order matters. Put the pointer's save-under back first (only the desktop
+ * changed underneath, so those pixels are still the truth), then repaint
+ * the clock box, then redraw the pointer - which re-captures the background
+ * there, now including the new time, so the next motion-only frame restores
+ * the right pixels. The scanout is the union of the three rectangles that
+ * can differ: the clock box, the pointer's old box and its new one.
+ *
+ * Unlike the motion path this does not require a valid capture: if there is
+ * none there is simply nothing to restore, and render_cursor() creates one.
+ */
+static void cursor_render_clock_only(void) {
+    int x0 = clock_widget_x();
+    int y0 = clock_widget_y();
+    int x1 = x0 + CLOCK_BOX_W;
+    int y1 = y0 + CLOCK_BOX_H;
+    int old_x = cursor_capture_x;
+    int old_y = cursor_capture_y;
+    int old_w = cursor_capture_w;
+    int old_h = cursor_capture_h;
+    bool had_old = cursor_capture_ok;
+
+    cursor_capture_restore();
+    render_taskbar_clock();
+    render_cursor();
+
+    if (had_old) {
+        if (old_x < x0) x0 = old_x;
+        if (old_y < y0) y0 = old_y;
+        if (old_x + old_w > x1) x1 = old_x + old_w;
+        if (old_y + old_h > y1) y1 = old_y + old_h;
+    }
+    if (cursor_capture_ok) {
+        if (cursor_capture_x < x0) x0 = cursor_capture_x;
+        if (cursor_capture_y < y0) y0 = cursor_capture_y;
+        if (cursor_capture_x + cursor_capture_w > x1) {
+            x1 = cursor_capture_x + cursor_capture_w;
+        }
+        if (cursor_capture_y + cursor_capture_h > y1) {
+            y1 = cursor_capture_y + cursor_capture_h;
+        }
+    }
+
+    present_rect(x0, y0, x1 - x0, y1 - y0);
+}

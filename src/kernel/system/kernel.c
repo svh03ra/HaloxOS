@@ -844,6 +844,12 @@ static bool desktop_undo_visible[DESKTOP_ICON_COUNT];
 static int desktop_undo_x[DESKTOP_ICON_COUNT];
 static int desktop_undo_y[DESKTOP_ICON_COUNT];
 static char desktop_undo_names[DESKTOP_ICON_COUNT][DESKTOP_ICON_NAME_MAX + 1];
+/* How many open apps the taskbar row shows before the overflow arrows
+ * appear. Five buttons (58 + slot * 88, 84 wide) end at x = 494, which
+ * still leaves the arrows at clock_widget_x() - 32 = 512 and the clock box
+ * at 544 clear. */
+#define TASKBAR_APP_SLOTS 5
+
 static int taskbar_scroll = 0;
 static bool taskbar_menu_open = false;
 static int taskbar_menu_x = 0;
@@ -924,6 +930,7 @@ static bool vga_native_text_mode_active(void);
 static void present(void);
 static void fill_rect(int x, int y, int w, int h, uint8_t color);
 static void draw_text(int x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent);
+static void graphics_reset_window_clip(void);
 static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transparent);
 
 /* New demo/game apps: defined in files included after their first use

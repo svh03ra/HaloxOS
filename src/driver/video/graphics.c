@@ -792,6 +792,19 @@ static void clear_window_clip(void) {
     clip_enabled = false;
 }
 
+/* Crash-safe variant for the exception handler: app windows set the clip
+ * in app_dispatch.c and clear it after drawing, but a crash INSIDE an
+ * app render (e.g. DOOM) leaves the clip stuck on that window's client
+ * rectangle. Without this reset the BSOD is squeezed into the crashed
+ * app's window face instead of covering the full screen. */
+static void graphics_reset_window_clip(void) {
+    clip_x0 = 0;
+    clip_y0 = 0;
+    clip_x1 = OS_WIDTH;
+    clip_y1 = OS_HEIGHT;
+    clip_enabled = false;
+}
+
 static bool clip_contains(int x, int y) {
     if (!clip_enabled) {
         return true;

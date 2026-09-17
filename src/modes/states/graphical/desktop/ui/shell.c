@@ -3,8 +3,26 @@
 
 // This repository is licensed under the GNU General Public License.
 
+/*
+ * The taskbar clock box on its own.
+ *
+ * Separate from render_taskbar() because it is also the entire job of the
+ * once-per-second clock tick (cursor_render_clock_only), which must not
+ * recomposite the desktop. The box is filled first: draw_text() is
+ * transparent, so the previous digits have to be painted out.
+ */
+static void render_taskbar_clock(void) {
+    char clock_time[16] = {0};
+    char clock_date[16] = {0};
+    int clock_y = clock_widget_y();
+
+    fill_rect(clock_widget_x(), clock_y, CLOCK_BOX_W, CLOCK_BOX_H, color_gray_dark);
+    clock_widget_lines(clock_time, sizeof(clock_time), clock_date, sizeof(clock_date));
+    draw_text(clock_line_x(clock_time), clock_y, clock_time, color_white, color_gray_dark, true);
+    draw_text(clock_line_x(clock_date), clock_y + CLOCK_LINE_ADVANCE, clock_date, color_white, color_gray_dark, true);
+}
+
 static void render_taskbar(void) {
-    char datetime[40] = {0};
     int total_open = 0;
     int idx;
 
@@ -20,7 +38,7 @@ static void render_taskbar(void) {
 
     idx = taskbar_scroll;
     int slot = 0;
-    for (; slot < 4 && idx < APP_COUNT; ++idx) {
+    for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
         if (!windows[idx].open) continue;
         const char *title = app_titles[idx];
         char label[13];
@@ -35,7 +53,7 @@ static void render_taskbar(void) {
                     active_window == idx ? color_white : color_black);
         ++slot;
     }
-    if (open_test > 0 && idx >= APP_COUNT && slot < 4) {
+    if (open_test > 0 && idx >= APP_COUNT && slot < TASKBAR_APP_SLOTS) {
         char test_label[16];
         size_t nlen = 0;
         memcpy_local(test_label, "Test (", 7);
@@ -49,10 +67,9 @@ static void render_taskbar(void) {
         ++idx;
     }
 
-    read_datetime(datetime, sizeof(datetime));
-    int clock_x = OS_WIDTH - (int)strlen_local(datetime) * 8 - 8;
+    int clock_x = clock_widget_x();
 
-    if (total_open > 4) {
+    if (total_open > TASKBAR_APP_SLOTS) {
         int arrow_x = clock_x - 4 - 28;
         bool can_left = false;
         for (int i = taskbar_scroll - 1; i >= 0; --i) {
@@ -66,7 +83,7 @@ static void render_taskbar(void) {
         draw_button(arrow_x + 16, OS_HEIGHT - 24, 12, 18, ">", can_right ? color_gray_light : color_gray, color_black, color_black);
     }
 
-    draw_text(clock_x, OS_HEIGHT - 20, datetime, color_white, color_gray_dark, true);
+    render_taskbar_clock();
 }
 
 static int start_menu_item_y(int menu_y, int row) {

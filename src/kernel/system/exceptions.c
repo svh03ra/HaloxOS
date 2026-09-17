@@ -798,6 +798,13 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
     serial_trace_hex_value("RENDER", "framebuffer size", ((uint32_t)fb.width << 16) | fb.height);
     serial_trace_hex_value("RENDER", "framebuffer bpp", fb.bpp);
 
+    /* A crash inside an app render leaves the window clip stuck on that
+     * app's client rectangle (app_dispatch.c sets it around each app draw
+     * and only clears it after the call returns, which never happens on a
+     * fault). Reset to the full canvas so the BSOD covers the whole
+     * screen instead of being clipped to the crashed window's face. */
+    graphics_reset_window_clip();
+
     fill_rect(0, 0, OS_WIDTH, OS_HEIGHT, color_crash_blue);
 
     draw_text(text_x, y, "A problem has been detected!!! HaloxOS has been shut down to prevent damage", color_white, color_crash_blue, false);

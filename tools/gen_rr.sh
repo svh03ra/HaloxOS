@@ -14,10 +14,17 @@ KERNEL=$1
 OUT=$2
 EMBED=$3
 
-mem_end=$(nm "$KERNEL" | awk '/ B __bss_end$/ {print $1}')
+# No kernel yet (fresh tree, or called from the pre-link pass): keep the
+# existing header instead of breaking the build. The Makefile's second pass
+# calls this again right after the link, when the symbol does exist.
+if [ ! -f "$KERNEL" ]; then
+    printf '[WARNING!] %s not linked yet - keeping the current boot requirement\n' "$KERNEL"
+    exit 0
+fi
+mem_end=$(nm "$KERNEL" 2>/dev/null | awk '/ B __bss_end$/ {print $1}')
 if [ -z "$mem_end" ]; then
-    echo "gen_rr.sh: could not find __bss_end in $KERNEL" >&2
-    exit 1
+    printf '[WARNING!] No __bss_end in %s - keeping the current boot requirement\n' "$KERNEL"
+    exit 0
 fi
 mem_bytes=$(python3 -c "print(int('$mem_end', 16))")
 

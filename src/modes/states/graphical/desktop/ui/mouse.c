@@ -47,16 +47,16 @@ static void handle_desktop_mouse(void) {
     }
 
     {
-        char dt[40] = {0};
-        read_datetime(dt, sizeof(dt));
-        int clock_x = OS_WIDTH - (int)strlen_local(dt) * 8 - 8;
+        /* The clock's clickable zone comes from the widget geometry the
+         * taskbar draws with, so the two can never drift apart. */
+        int clock_x = clock_widget_x();
         int total_open = 0;
         for (int i = 0; i < APP_COUNT; ++i) {
             if (windows[i].open) ++total_open;
         }
         int open_test = count_open_test_windows();
         if (open_test > 0) ++total_open;
-        if (total_open > 4) {
+        if (total_open > TASKBAR_APP_SLOTS) {
             int arrow_x = clock_x - 4 - 28;
             bool can_left = false;
             for (int i = taskbar_scroll - 1; i >= 0; --i) {
@@ -66,11 +66,11 @@ static void handle_desktop_mouse(void) {
             bool can_right = false;
             int scan = taskbar_scroll;
             int slot = 0;
-            for (; slot < 4 && scan < APP_COUNT; ++scan) {
+            for (; slot < TASKBAR_APP_SLOTS && scan < APP_COUNT; ++scan) {
                 if (!windows[scan].open) continue;
                 ++slot;
             }
-            if (slot < 4 && open_test > 0) {
+            if (slot < TASKBAR_APP_SLOTS && open_test > 0) {
                 ++slot;
                 ++scan;
             }
@@ -93,7 +93,7 @@ static void handle_desktop_mouse(void) {
     {
         int idx = taskbar_scroll;
         int slot = 0;
-        for (; slot < 4 && idx < APP_COUNT; ++idx) {
+        for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
             if (!windows[idx].open) continue;
             if (button_clicked(58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
                 set_active_window((AppId)idx);
@@ -101,7 +101,7 @@ static void handle_desktop_mouse(void) {
             }
             ++slot;
         }
-        if (slot < 4 && idx >= APP_COUNT && count_open_test_windows() > 0) {
+        if (slot < TASKBAR_APP_SLOTS && idx >= APP_COUNT && count_open_test_windows() > 0) {
             if (button_clicked(58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
                 for (int i = test_window_count - 1; i >= 0; --i) {
                     if (test_windows[i].open) { active_test_window = i; break; }
@@ -117,28 +117,26 @@ static void handle_desktop_mouse(void) {
         if (!on_button) {
             int idx = taskbar_scroll;
             int slot = 0;
-            for (; slot < 4 && idx < APP_COUNT; ++idx) {
+            for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
                 if (!windows[idx].open) continue;
                 if (point_in_rect(mouse.x, mouse.y, 58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
                     on_button = true; break;
                 }
                 ++slot;
             }
-            if (!on_button && slot < 4 && idx >= APP_COUNT && count_open_test_windows() > 0) {
+            if (!on_button && slot < TASKBAR_APP_SLOTS && idx >= APP_COUNT && count_open_test_windows() > 0) {
                 if (point_in_rect(mouse.x, mouse.y, 58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
                     on_button = true;
                 }
             }
         }
         if (!on_button) {
-            char dt[40] = {0};
-            read_datetime(dt, sizeof(dt));
-            int clock_x = OS_WIDTH - (int)strlen_local(dt) * 8 - 8;
+            int clock_x = clock_widget_x();
             int total_open = 0;
             for (int i = 0; i < APP_COUNT; ++i) {
                 if (windows[i].open) ++total_open;
             }
-            int right_zone = total_open > 4 ? clock_x - 32 : clock_x;
+            int right_zone = total_open > TASKBAR_APP_SLOTS ? clock_x - 32 : clock_x;
             if (mouse.x >= right_zone) on_button = true;
         }
         if (!on_button) {
