@@ -147,6 +147,24 @@ static void update_present_maps(void) {
     present_offset_x = (fb.width - present_content_width) / 2u;
     present_offset_y = (fb.height - present_content_height) / 2u;
 
+    /* Elect the shadow plane this output format presents (see the comment
+     * on present_index_plane_live in vga.c) and, when the election
+     * changes, blank the storage so the plane that is about to become
+     * visible can never show bytes of the other format - index 0 and
+     * RGB565 0 are both black.
+     *
+     * The live plane is the one present() actually reads: 8bpp indexed
+     * output scans the index plane, everything else scans RGB565 (native
+     * VGA 640x480x16 included, via the RGB565->EGA map). Only the larger
+     * union member needs clearing, because both planes overlay one buffer. */
+    {
+        bool index_live = (fb.bpp == 8);
+        if (index_live != present_index_plane_live) {
+            present_index_plane_live = index_live;
+            memset_local(backbuffer, 0, sizeof(backbuffer_rgb565));
+        }
+    }
+
     /* Full clear first: the mapped window moves between modes, so stale
      * entries outside the new content area must read as 0, not leftover
      * values from the previous geometry. */

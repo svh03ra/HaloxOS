@@ -67,6 +67,12 @@ static void handle_text_target(KeyEvent event) {
         return;
     }
 
+    if (active_window == APP_DOOM && windows[APP_DOOM].open &&
+        keyboard_shift && event.code == KEY_TAB) {
+        doom_toggle_pointer_lock();
+        return;
+    }
+
     if (desktop_rename_active) {
         if (event.code == KEY_ENTER) {
             desktop_finish_rename(true);
@@ -124,6 +130,8 @@ static void handle_text_target(KeyEvent event) {
         }
     } else if (active_window == APP_RUN_GAME) {
         run_handle_key(event);
+    } else if (active_window == APP_DOOM) {
+        doom_app_handle_key(event);
     } else if (active_window == APP_3D_BOX) {
         box3d_handle_key(event);
     } else if (active_window == APP_PAINT) {

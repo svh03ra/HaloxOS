@@ -11,6 +11,26 @@ static void handle_desktop_mouse(void) {
         return;
     }
 
+    /* DOOM has an explicit mouse-capture gesture.  Middle-click always
+     * toggles capture while DOOM is focused; when released, a left click
+     * inside the actual 320x200 client frame captures the pointer again.
+     * That capture click is consumed and is NEVER forwarded as a DOOM
+     * fire/use action. */
+    if (active_window == APP_DOOM && windows[APP_DOOM].open) {
+        bool middle_clicked = mouse.middle && !mouse.prev_middle;
+        if (middle_clicked) {
+            doom_toggle_pointer_lock();
+            return;
+        }
+        if (doom_pointer_locked()) {
+            return;
+        }
+        if (clicked && doom_point_in_client(mouse.x, mouse.y)) {
+            doom_set_pointer_lock(true);
+            return;
+        }
+    }
+
     if (clicked && desktop_rename_active) {
         int hit = desktop_icon_hit_test(mouse.x, mouse.y);
         if (hit != desktop_rename_icon) {

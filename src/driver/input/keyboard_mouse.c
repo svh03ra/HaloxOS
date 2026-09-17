@@ -14,6 +14,20 @@ static void enqueue_key(KeyCode code, char ch) {
     key_tail = next;
 }
 
+/* Physical key state per scancode ([0] = plain, [1] = E0-extended).
+ * The OS queue only delivers press events; apps that need HELD keys
+ * (the DOOM port's movement/fire) sync from this table instead. */
+static bool key_held[2][128];
+
+/* PS/2 Set-1 Pause is a six-byte make sequence (E1 1D 45 E1 9D C5)
+ * with no normal break code.  Keep a tiny decoder so applications such
+ * as DOOM can receive KEY_PAUSE just like a PC keyboard. */
+static uint8_t keyboard_pause_state = 0;
+
+static bool keyboard_key_held(uint8_t base, bool extended) {
+    return key_held[extended ? 1 : 0][base & 0x7Fu];
+}
+
 static bool dequeue_key(KeyEvent *event) {
     if (key_head == key_tail) {
         return false;
@@ -23,62 +37,128 @@ static bool dequeue_key(KeyEvent *event) {
     return true;
 }
 
-static char scancode_to_char(uint8_t scancode, bool shifted) {
+static char scancode_to_char(uint8_t scancode, bool shifted, bool capslock, bool numlock) {
     static const char normal[] =
         "\0\0331234567890-=\0\tqwertyuiop[]\n\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
     static const char shifted_map[] =
         "\0\033!@#$%^&*()_+\0\tQWERTYUIOP{}\n\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
 
+    /* Numeric keypad in NumLock mode becomes printable input.  When
+     * NumLock is clear the same physical keys are left for navigation
+     * handling below (or ignored if DOOM has no binding for them). */
+    if (numlock) {
+        switch (scancode) {
+            case 0x37: return '*';
+            case 0x4A: return '-';
+            case 0x4E: return '+';
+            case 0x35: return '/';
+            case 0x4F: return '1';
+            case 0x50: return '2';
+            case 0x51: return '3';
+            case 0x4B: return '4';
+            case 0x4C: return '5';
+            case 0x4D: return '6';
+            case 0x47: return '7';
+            case 0x48: return '8';
+            case 0x49: return '9';
+            case 0x52: return '0';
+            case 0x53: return '.';
+            default: break;
+        }
+    }
+
     if (scancode >= sizeof(normal) - 1) {
         return 0;
     }
-    return shifted ? shifted_map[scancode] : normal[scancode];
+    char normal_ch = normal[scancode];
+    char shifted_ch = shifted_map[scancode];
+    /* Caps Lock changes alphabetic keys only; punctuation remains
+     * controlled exclusively by Shift.  Shift+Caps therefore returns
+     * lowercase letters, matching normal PC keyboard behavior. */
+    if (capslock && normal_ch >= 'a' && normal_ch <= 'z') {
+        return shifted ? normal_ch : (char)(normal_ch - 'a' + 'A');
+    }
+    return shifted ? shifted_ch : normal_ch;
 }
 
 static void handle_scancode(uint8_t code) {
+    bool released;
+    uint8_t base;
+
+    /* Decode the special six-byte Set-1 Pause make sequence without
+     * allowing its bytes to fall through as ordinary keys. */
+    if (keyboard_pause_state != 0) {
+        static const uint8_t pause_seq[] = {0x1D, 0x45, 0xE1, 0x9D, 0xC5};
+        uint8_t expected = pause_seq[keyboard_pause_state - 1];
+        if (code == expected) {
+            ++keyboard_pause_state;
+            if (keyboard_pause_state == 6) {
+                keyboard_pause_state = 0;
+                enqueue_key(KEY_PAUSE, 0);
+            }
+            return;
+        }
+        keyboard_pause_state = 0;
+        /* The sequence was malformed. Continue handling this byte as a
+         * fresh scancode so a normal key cannot get swallowed. */
+    }
+
+    if (code == 0xE1) {
+        keyboard_pause_state = 1;
+        return;
+    }
+
     if (code == 0xE0) {
         keyboard_extended = true;
         return;
     }
 
-    if (code == 0x2A || code == 0x36) {
-        keyboard_shift = true;
+    released = (code & 0x80u) != 0;
+    base = code & 0x7Fu;
+    key_held[keyboard_extended ? 1 : 0][base] = !released;
+
+    if (base == 0x2A || base == 0x36) {
+        keyboard_shift = !released;
+        keyboard_extended = false;
         return;
     }
 
-    if (code == 0x38) {
-        keyboard_alt = true;
+    if (base == 0x38) {
+        keyboard_alt = !released;
+        keyboard_extended = false;
         return;
     }
 
-    if (code == 0x1D) {
-        keyboard_ctrl = true;
+    if (base == 0x3A) {
+        if (!released) {
+            keyboard_capslock = !keyboard_capslock;
+        }
+        keyboard_extended = false;
         return;
     }
 
-    if (code == 0xAA || code == 0xB6) {
-        keyboard_shift = false;
+    if (base == 0x45) {
+        if (!released) {
+            keyboard_numlock = !keyboard_numlock;
+        }
+        keyboard_extended = false;
         return;
     }
 
-    if (code == 0xB8) {
-        keyboard_alt = false;
+    if (base == 0x1D) {
+        keyboard_ctrl = !released;
+        keyboard_extended = false;
         return;
     }
 
-    if (code == 0x9D) {
-        keyboard_ctrl = false;
-        return;
-    }
-
-    if (code & 0x80) {
+    if (released) {
         keyboard_extended = false;
         return;
     }
 
     if (keyboard_extended) {
         keyboard_extended = false;
-        switch (code) {
+        switch (base) {
             case 0x48: enqueue_key(KEY_UP, 0); return;
             case 0x50: enqueue_key(KEY_DOWN, 0); return;
             case 0x4B: enqueue_key(KEY_LEFT, 0); return;
@@ -90,17 +170,26 @@ static void handle_scancode(uint8_t code) {
         }
     }
 
-    switch (code) {
+    switch (base) {
         case 0x01: enqueue_key(KEY_ESC, 0); return;
         case 0x0E: enqueue_key(KEY_BACKSPACE, 0); return;
         case 0x0F: enqueue_key(KEY_TAB, 0); return;
         case 0x1C: enqueue_key(KEY_ENTER, '\n'); return;
         case 0x3B: enqueue_key(KEY_F1, 0); return;
         case 0x3C: enqueue_key(KEY_F2, 0); return;
+        case 0x3D: enqueue_key(KEY_F3, 0); return;
         case 0x3E: enqueue_key(KEY_F4, 0); return;
+        case 0x3F: enqueue_key(KEY_F5, 0); return;
+        case 0x40: enqueue_key(KEY_F6, 0); return;
+        case 0x41: enqueue_key(KEY_F7, 0); return;
+        case 0x42: enqueue_key(KEY_F8, 0); return;
+        case 0x43: enqueue_key(KEY_F9, 0); return;
+        case 0x44: enqueue_key(KEY_F10, 0); return;
+        case 0x57: enqueue_key(KEY_F11, 0); return;
+        case 0x58: enqueue_key(KEY_F12, 0); return;
         case 0x53: enqueue_key(KEY_DEL, 0); return;
         default: {
-            char ch = scancode_to_char(code, keyboard_shift);
+            char ch = scancode_to_char(base, keyboard_shift, keyboard_capslock, keyboard_numlock);
             if (ch) {
                 enqueue_key(KEY_NONE, ch);
             }
@@ -193,10 +282,13 @@ static void init_mouse(void) {
  */
 static bool mouse_hw_left = false;
 static bool mouse_hw_right = false;
+static bool mouse_hw_middle = false;
 static uint8_t mouse_press_latch_left = 0;
 static uint8_t mouse_press_latch_right = 0;
+static uint8_t mouse_press_latch_middle = 0;
 static bool mouse_click_replay_left = false;
 static bool mouse_click_replay_right = false;
+static bool mouse_click_replay_middle = false;
 
 static void mouse_apply_byte(uint8_t data) {
     /* Byte 0 must have bit 3 set; else the stream desynced - resync. */
@@ -235,8 +327,12 @@ static void mouse_apply_byte(uint8_t data) {
         if (new_right && !mouse_hw_right && mouse_press_latch_right < 255) {
             ++mouse_press_latch_right;
         }
+        if (new_middle && !mouse_hw_middle && mouse_press_latch_middle < 255) {
+            ++mouse_press_latch_middle;
+        }
         mouse_hw_left = new_left;
         mouse_hw_right = new_right;
+        mouse_hw_middle = new_middle;
 
         mouse.x = nx;
         mouse.y = ny;
@@ -273,6 +369,10 @@ static void poll_input(void) {
         mouse.right = mouse_hw_right;
         mouse_click_replay_right = false;
     }
+    if (mouse_click_replay_middle) {
+        mouse.middle = mouse_hw_middle;
+        mouse_click_replay_middle = false;
+    }
 
     mouse.prev_left = mouse.left;
     mouse.prev_right = mouse.right;
@@ -280,6 +380,7 @@ static void poll_input(void) {
 
     mouse.left = mouse_hw_left;
     mouse.right = mouse_hw_right;
+    mouse.middle = mouse_hw_middle;
 
     /* Deliver one pending press edge per frame. When the physical button
      * is already held, just expose the edge (prev=false). When the click
@@ -299,6 +400,14 @@ static void poll_input(void) {
         if (!mouse.right) {
             mouse.right = true;
             mouse_click_replay_right = true;
+        }
+    }
+    if (mouse_press_latch_middle != 0) {
+        --mouse_press_latch_middle;
+        mouse.prev_middle = false;
+        if (!mouse.middle) {
+            mouse.middle = true;
+            mouse_click_replay_middle = true;
         }
     }
 

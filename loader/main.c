@@ -12,18 +12,35 @@
  * 1.5.7 decompressor, and jumps to the kernel's real entry point with the
  * original multiboot registers restored.
  *
- * Memory layout (must stay under 6 MB):
+ * Memory layout. The kernel image size depends on whether the DOOM WAD
+ * is embedded in the build (kernel links at 2M):
  *   0x100000  loader itself (ELF loaded by GRUB)
  *   ~0x12E000 kernel.bin.zst module (placed by GRUB, page aligned)
- *   0x200000  kernel decompression target (kernel links at 2M)
+ *   0x200000  kernel decompression target
  *   0x500000  zstd DCtx scratch (256K; sits inside the kernel's future
  *             .bss range - free RAM during decompression, reclaimed when
- *             the kernel zeroes .bss at entry)
- *   0x5D0000  loader info struct handed to the kernel (debug trace data;
- *             above the kernel bss end at ~0x5C5000, below the 6 MB limit)
+ *             the kernel zeroes .bss at entry) - valid while the kernel
+ *             image stays under 0x500000, true without the embedded WAD
+ *             (data ends ~0x416000)
+ *   0x780000  loader info struct handed to the kernel (debug trace data;
+ *             above the kernel bss end at ~0x733000, below the DOOM zone
+ *             which starts at 0x800000) - also only valid WITHOUT the
+ *             embedded WAD
+ *   0xE00000  relocated WAD multiboot module on larger RAM machines; on
+ *              16 MB-class machines the loader parks it at the top of RAM
+ *              and the kernel puts the DOOM heap below it.
+ *
+ * With DOOM_EMBED_WAD=1 the WAD rodata grows the kernel to ~0xB37000,
+ * so both 0x500000 and 0x780000 would land INSIDE the image; the Makefile
+ * then compiles the loader with HALOXOS_KERNEL_IMAGE_SPAN and the build
+ * uses KERNEL_IMAGE_SPAN addresses (0x1400000 scratch, 0x1500000 info)
+ * and a higher WAD-reloc target. The kernel's DOOM zone base moves to
+ * 0x1500000 the same way (doom_i_system.c).
  */
 
 #define LOADER_DEBUG 1
+
+#include "ram_requirement.h"
 
 /* Test build hook (make noram): pretend the machine has too little RAM so
  * the BOOT ERROR screen is forced at boot, even on real hardware with
@@ -36,15 +53,61 @@
 
 #define KERNEL_LOAD_ADDR   0x200000u
 /* zstd DCtx scratch: inside the kernel's future .bss range - that RAM is
- * free while decompressing (the kernel image only reaches ~0x416000 and
- * .bss zeroing happens at kernel entry, after the scratch is dead) - so
- * it costs no extra memory on any machine. */
+ * free while decompressing (the kernel image without the embedded WAD
+ * only reaches ~0x416000 and .bss zeroing happens at kernel entry, after
+ * the scratch is dead) - so it costs no extra memory on any machine.
+ * With the embedded WAD the scratch moves above the whole image span. */
+#ifdef HALOXOS_KERNEL_IMAGE_SPAN
+#define KERNEL_SCRATCH     KERNEL_SCRATCH_SPAN
+#else
 #define KERNEL_SCRATCH     0x500000u
+#endif
 #define KERNEL_SCRATCH_SIZE 0x40000u
-/* Above the kernel bss end (~0x5C5000) and below the 6 MB floor: the
+/* Above the kernel's real bss end and below the DOOM zone floor: the
  * kernel's boot code zeroes its whole .bss, so this block must live
- * outside it. */
-#define LOADER_INFO_ADDR   0x5D0000u
+ * outside it. The address is GENERATED per build (see the Makefile's
+ * ram_requirement rule): span end rounded up to 64 KiB plus one 64 KiB
+ * guard, so it always sits just above the actual image instead of a
+ * guessed size - that is what lets a 5.3 MB kernel boot in a 6 MB
+ * machine (the old fixed 0x780000 block did not even fit in 6 MB RAM).
+ * (With the embedded WAD the kernel grows past any near address, so the
+ * build switches to KERNEL_IMAGE_SPAN vars.) */
+#ifdef HALOXOS_KERNEL_IMAGE_SPAN
+#define LOADER_INFO_ADDR   LOADER_INFO_SPAN
+#else
+#define LOADER_INFO_ADDR   HALOXOS_LOADER_INFO_ADDR
+#endif
+
+/* With the kernel-embedded DOOM WAD (HALOXOS_KERNEL_IMAGE_SPAN defined
+ * by the Makefile for that build) the kernel image span grows to ~11.2
+ * MB; every fixed address in the kernel's shadow must move above it.
+ * These mirror the kernel-side definitions in doom_i_system.c (zone)
+ * and init.c (loader info block). */
+#ifdef HALOXOS_KERNEL_IMAGE_SPAN
+#define KERNEL_IMAGE_SPAN_END 0x1500000u /* 21 MB: rounded kernel span */
+#define KERNEL_SCRATCH_SPAN   0x1400000u /* 20 MB zstd scratch          */
+#define LOADER_INFO_SPAN      0x1500000u /* 21 MB loader info block     */
+#define WAD_MODULE_RELOC_SPAN 0x1900000u /* 25 MB WAD module target     */
+#define MIN_RAM_SPAN_BYTES    0x1600000u /* needs a 22 MB machine       */
+#else
+#define KERNEL_IMAGE_SPAN_END 0x800000u  /* 8 MB: classic 8 MB design   */
+#endif
+
+/* Non-kernel multiboot modules (the DOOM WAD blob) are copied out of
+ * GRUB's low-memory module area before the kernel is decompressed.  The
+ * loader prefers the historical 0xE00000 location when it fits.  On a
+ * nominal 16 MB machine the WAD is too large for that fixed slot, so the
+ * non-embedded build instead parks the module near the top of physical RAM.
+ * The kernel then shrinks its DOOM zone to the free range below that module.
+ * If there is not enough safe RAM for both, the module is disabled rather
+ * than left in a location the kernel decompression could overwrite. */
+#ifdef HALOXOS_KERNEL_IMAGE_SPAN
+#define WAD_MODULE_RELOC_ADDR WAD_MODULE_RELOC_SPAN
+#else
+#define WAD_MODULE_RELOC_ADDR 0xE00000u
+#define WAD_MODULE_RELOC_FLOOR 0x800000u
+#define WAD_MODULE_RELOC_GUARD 0x10000u
+#endif
 
 #define MB_MAGIC_EXPECTED 0x2BADB002u
 #define MB_FLAG_MODS       (1u << 3)
@@ -54,15 +117,13 @@
 
 #define HALOXOS_MODULE_MAGIC 0x484C585Au
 
-/* Minimum RAM the boot chain really needs. The kernel's .bss now ends
- * at ~0x5C5000 (asset format v2 halved the embedded images), the loader
- * info struct tops out at 0x5D0028, and the zstd scratch lives inside
- * the kernel's future .bss so it costs nothing extra. 6 MB machines
- * report slightly under 6 MiB usable (QEMU -m 6: 6160384 bytes, the
- * 128 KiB legacy I/O hole is excluded), so requiring a full 6 MiB would
- * reject every real 6 MB PC by 128 KiB. 0x5C0000 (5.75 MiB) is the
- * true floor with margin and accepts every 6 MB machine. */
-#define MIN_RAM_BYTES 0x5C0000u
+/* Minimum RAM is generated from the linked kernel image (auto-fit): the
+ * handoff-block address plus one 64 KiB guard, rounded up to whole MB for
+ * the nominal figure. With the current 5.34 MB span that is a 6 MB boot
+ * floor; the Makefile never lets the gate fall below the legacy 7.5625 MiB
+ * 8 MB-PC tolerance, so nothing that booted before stops booting.
+ * Embedded-WAD span builds keep the existing 22 MB floor. */
+#define MIN_RAM_BYTES HALOXOS_KERNEL_RAM_GATE_BYTES
 
 /* VGA text mode screen geometry. */
 #define VGA_TEXT_BUFFER 0xB8000u
@@ -813,6 +874,24 @@ static void text_append_uint(char *buffer, int *len, int max_len, uint32_t value
     }
 }
 
+static void format_ram_requirement(char *buffer, int max_len) {
+    int len = 0;
+    const char *prefix = "HaloxOS requires at least ";
+    const char *suffix = "MB of RAM to boot...";
+    int i;
+
+    while (prefix[len] != '\0' && len < max_len - 1) {
+        buffer[len] = prefix[len];
+        ++len;
+    }
+    text_append_uint(buffer, &len, max_len, HALOXOS_KERNEL_RAM_REQUIRED_MB);
+    i = 0;
+    while (suffix[i] != '\0' && len < max_len - 1) {
+        buffer[len++] = suffix[i++];
+    }
+    buffer[len] = '\0';
+}
+
 static void text_append_hex32(char *buffer, int *len, int max_len, uint32_t value) {
     static const char digits[] = "0123456789ABCDEF";
 
@@ -926,14 +1005,18 @@ static void capture_regs(LoaderRegs *regs) {
  */
 static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
     char line[VGA_TEXT_COLS + 1];
+    char ram_line[VGA_TEXT_COLS + 1];
     uint32_t fg = fb_white(mbi);
     uint32_t bg = fb_red(mbi);
 
     const char *warning[] = {
         "Looks like you don't have enough memory in this system to run properly!",
-        "HaloxOS requires at least 6MB of RAM to boot...",
+        0,
         "Please make sure to upgrade the memory to more."
     };
+
+    format_ram_requirement(ram_line, sizeof(ram_line));
+    warning[1] = ram_line;
 
     err_begin(mbi);
 
@@ -1148,7 +1231,8 @@ static void show_ram_error_screen(const MbInfo *mbi) {
      * header/message lines, while debugger data remains left-aligned. */
     text_screen_write_center(1, "***** BOOT ERROR!!! *****", 0x4F);
     text_screen_write_center(3, "Looks like you don't have enough memory in this system to run properly!", 0x4F);
-    text_screen_write_center(4, "HaloxOS requires at least 6MB of RAM to boot...", 0x4F);
+    format_ram_requirement(line, sizeof(line));
+    text_screen_write_center(4, line, 0x4F);
     text_screen_write_center(5, "Please make sure to upgrade the memory to more.", 0x4F);
 
     /* Build the RAM amount before rendering it so it can be centered exactly. */
@@ -1410,6 +1494,11 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     const MbModule *modules;
     const ModuleHeader *header;
     const MbModule *kernel_module = 0;
+    /* Track the kernel module's bounds in writable locals: the multiboot
+     * table entries are const, and the bounds change once when the module
+     * is moved out of its own decompression target (see below). */
+    uint32_t kernel_mod_start = 0;
+    uint32_t kernel_mod_end = 0;
     LoaderInfo *info = (LoaderInfo *)LOADER_INFO_ADDR;
     ZSTD_DCtx *dctx;
     size_t result;
@@ -1448,7 +1537,8 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     {
         uint32_t total_ram = detect_total_ram(mbi);
 
-        serial_line_uint("required RAM bytes", MIN_RAM_BYTES);
+        serial_line_uint("required RAM nominal bytes", HALOXOS_KERNEL_RAM_REQUIRED_BYTES);
+        serial_line_uint("required RAM gate bytes", MIN_RAM_BYTES);
         serial_line_uint("detected/advertised RAM bytes", total_ram);
 #if HALOXOS_FORCE_RAM_ERROR
         serial_line("TEST BUILD: forcing the not-enough-RAM error screen");
@@ -1503,18 +1593,161 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
         }
     }
 
+    /*
+     * Relocate non-kernel modules (the DOOM WAD) out of the decompression
+     * zone. GRUB puts modules right after the loader; the kernel image is
+     * 2.6 MB and lands at 0x200000, overwriting them. Prefer the historical
+     * fixed target when it fits. Otherwise, for the non-embedded 16 MB-class
+     * build, park the WAD at the top of detected RAM and let the kernel shrink
+     * its DOOM zone to the free space below it. A byte-exact overlap check
+     * picks forward or backward copy so even self-overlapping ranges stay
+     * correct.
+     */
+    {
+        uint32_t detected_ram = detect_total_ram(mbi);
+        for (i = 0; i < mods; ++i) {
+            uint32_t ms = modules[i].mod_start;
+            uint32_t me = modules[i].mod_end;
+            const volatile uint32_t *sig;
+            if (me <= ms || (me - ms) < 16u) {
+                continue;
+            }
+            sig = (const volatile uint32_t *)(size_t_)ms;
+            if (*sig != 0x44415744u /* 'DWAD' */) {
+                continue;
+            }
+            {
+                uint32_t bytes = me - ms;
+                uint32_t target = WAD_MODULE_RELOC_ADDR;
+#ifndef HALOXOS_KERNEL_IMAGE_SPAN
+                /* First try 0xE00000 so systems with enough RAM preserve the
+                 * original 6 MB DOOM heap.  If the WAD would overrun physical
+                 * RAM, park it at the highest 64 KiB-aligned address that still
+                 * leaves a guard below the reported RAM ceiling. */
+                if (target + bytes > detected_ram) {
+                    if (detected_ram <= WAD_MODULE_RELOC_FLOOR + bytes + WAD_MODULE_RELOC_GUARD) {
+                        serial_puts("[LDR]: WAD module has no safe RAM relocation slot; disabling module\n");
+                        ((volatile uint32_t *)(size_t_)(&modules[i]))[0] = 0;
+                        ((volatile uint32_t *)(size_t_)(&modules[i]))[1] = 0;
+                        continue;
+                    }
+                    target = (detected_ram - bytes - WAD_MODULE_RELOC_GUARD) & ~0xFFFFu;
+                    if (target < WAD_MODULE_RELOC_FLOOR || target + bytes > detected_ram) {
+                        serial_puts("[LDR]: WAD module relocation target invalid; disabling module\n");
+                        ((volatile uint32_t *)(size_t_)(&modules[i]))[0] = 0;
+                        ((volatile uint32_t *)(size_t_)(&modules[i]))[1] = 0;
+                        continue;
+                    }
+                    serial_puts("[LDR]: using low-RAM top placement for WAD module\n");
+                }
+#else
+                if (target + bytes > detected_ram) {
+                    serial_puts("[LDR]: WAD module exceeds embedded-span RAM target; disabling module\n");
+                    ((volatile uint32_t *)(size_t_)(&modules[i]))[0] = 0;
+                    ((volatile uint32_t *)(size_t_)(&modules[i]))[1] = 0;
+                    continue;
+                }
+#endif
+                {
+                    uint8_t *dst = (uint8_t *)(size_t_)target;
+                    const uint8_t *src = (const uint8_t *)(size_t_)ms;
+                    uint32_t n;
+                    serial_puts("[LDR]: relocating WAD module ");
+                    serial_put_hex32(ms);
+                    serial_puts(" -> ");
+                    serial_put_hex32(target);
+                    serial_puts(" ( ");
+                    serial_put_uint(bytes);
+                    serial_puts(" bytes )\n");
+                    if (dst < src) {
+                        for (n = 0; n < bytes; ++n) {
+                            dst[n] = src[n];
+                        }
+                    } else {
+                        n = bytes;
+                        while (n-- > 0) {
+                            dst[n] = src[n];
+                        }
+                    }
+                    /* Patch the module table so the kernel sees the new
+                     * range. The table lives inside the Multiboot info block
+                     * and is intentionally mutable in this loader. */
+                    {
+                        volatile uint32_t *entry =
+                            (volatile uint32_t *)(size_t_)(&modules[i]);
+                        entry[0] = target;
+                        entry[1] = target + bytes;
+                    }
+                }
+            }
+        }
+    }
+
     if (kernel_module == 0) {
         loader_hang("no module carries the HaloxOS zstd header", mbi);
     }
 
-    header = (const ModuleHeader *)(size_t_)kernel_module->mod_start;
+    /*
+     * The compressed kernel frame must not overlap its own decompression
+     * target. GRUB parks the modules right after the loader, and the
+     * kernel-embedded WAD build tripled the compressed size (~2.1 MB),
+     * so the module now spans past 0x200000 where the decompressed image
+     * lands - the decoder would overwrite its own input mid-stream and
+     * die with 'data corruption'. (The old 2.6 MB kernel compressed to
+     * under 0.8 MB and always ended below the target.) Copy the whole
+     * module above the decompression footprint first; the WAD module has
+     * already been relocated, so the footprint up to the relocation
+     * target is free.
+     */
+    if (kernel_module->mod_end > KERNEL_LOAD_ADDR) {
+        uint32_t bytes = kernel_module->mod_end - kernel_module->mod_start;
+        uint32_t image_size_hint =
+            ((const ModuleHeader *)(size_t_)kernel_module->mod_start)->image_size;
+        uint32_t move_dst = (KERNEL_LOAD_ADDR + image_size_hint + 0xFFFu) & ~0xFFFu;
+        uint32_t move_end = move_dst + bytes;
+        uint32_t detected = detect_total_ram(mbi);
+        if (image_size_hint == 0 || move_end > detected ||
+            move_end > WAD_MODULE_RELOC_ADDR) {
+            loader_hang("no room to move the compressed kernel out of its decompression target", mbi);
+        }
+        {
+            uint8_t *dst = (uint8_t *)(size_t_)move_dst;
+            const uint8_t *src = (const uint8_t *)(size_t_)kernel_module->mod_start;
+            uint32_t n;
+            serial_puts("[LDR]: compressed kernel overlaps its target; moving ");
+            serial_put_hex32(kernel_module->mod_start);
+            serial_puts(" -> ");
+            serial_put_hex32(move_dst);
+            serial_puts(" ( ");
+            serial_put_uint(bytes);
+            serial_puts(" bytes )\n");
+            if (dst < src) {
+                for (n = 0; n < bytes; ++n) {
+                    dst[n] = src[n];
+                }
+            } else {
+                n = bytes;
+                while (n-- > 0) {
+                    dst[n] = src[n];
+                }
+            }
+            kernel_mod_start = move_dst;
+            kernel_mod_end = move_end;
+        }
+    }
+    if (kernel_mod_start == 0) {
+        kernel_mod_start = kernel_module->mod_start;
+        kernel_mod_end = kernel_module->mod_end;
+    }
+
+    header = (const ModuleHeader *)(size_t_)kernel_mod_start;
     serial_line("compressed kernel module found");
     serial_line_hex("kernel entry", header->kernel_entry);
     serial_line_uint("original kernel bytes", header->image_size);
     serial_line_uint("zstd frame bytes", header->frame_size);
 
     if (header->frame_size == 0 ||
-        kernel_module->mod_start + sizeof(ModuleHeader) + header->frame_size > kernel_module->mod_end) {
+        kernel_mod_start + sizeof(ModuleHeader) + header->frame_size > kernel_mod_end) {
         loader_hang("module header frame size does not match module bounds", mbi);
     }
 
@@ -1543,7 +1776,7 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     {
         ZSTD_FrameHeader fh;
         size_t_ fh_result = ZSTD_getFrameHeader(&fh,
-                                                (const void *)(kernel_module->mod_start + sizeof(ModuleHeader)),
+                                                (const void *)(kernel_mod_start + sizeof(ModuleHeader)),
                                                 header->frame_size);
         if (ZSTD_isError(fh_result)) {
             serial_puts("[LDR]: FATAL frame header error: ");
@@ -1567,7 +1800,7 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     result = ZSTD_decompressDCtx(dctx,
                                  (void *)KERNEL_LOAD_ADDR,
                                  (size_t_)header->image_size,
-                                 (const void *)(kernel_module->mod_start + sizeof(ModuleHeader)),
+                                 (const void *)(kernel_mod_start + sizeof(ModuleHeader)),
                                  (size_t_)header->frame_size);
 
     if (ZSTD_isError(result)) {
@@ -1604,8 +1837,8 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     /* hand the measured stats to the kernel for its own debug trace */
     loader_memset(info, 0, sizeof(*info));
     info->magic = HALOXOS_MODULE_MAGIC;
-    info->module_start = kernel_module->mod_start;
-    info->module_end = kernel_module->mod_end;
+    info->module_start = kernel_mod_start;
+    info->module_end = kernel_mod_end;
     info->compressed_size = header->frame_size;
     info->original_size = header->image_size;
     if (header->image_size != 0) {

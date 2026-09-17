@@ -94,7 +94,20 @@ static void init_state(void) {
  * at a fixed address before jumping into the kernel. Shown on the serial
  * debugger trace in debug builds.
  */
-#define LOADER_INFO_ADDR   0x5D0000u
+/* The loader writes its info block just above the kernel's real image
+ * span at an address GENERATED per build and shared through
+ * ram_requirement.h (the loader compiles the same header), so both sides
+ * always agree: 64 KiB-aligned span end + one 64 KiB guard without the
+ * embedded WAD (≈5.5 MB → boots a 6 MB machine); 0x1500000 with it,
+ * matching the LOADER_INFO_SPAN address compiled into the loader. */
+/* Generated boot-chain addresses (see the Makefile's ram_requirement rule). */
+#include "ram_requirement.h"
+
+#ifdef DOOM_WAD_EMBED_BUILD
+#define LOADER_INFO_ADDR   0x1500000u
+#else
+#define LOADER_INFO_ADDR   HALOXOS_LOADER_INFO_ADDR
+#endif
 #define LOADER_INFO_MAGIC  0x484C585Au
 
 typedef struct {
@@ -149,6 +162,28 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     }
     detect_boot_drive_info(mbi);
     serial_trace_disk_details();
+    /* WAD multiboot module scan: GRUB loaded /boot/doom.wadmodule into
+     * RAM via BIOS, so the game data travels with the kernel on any
+     * boot media - USB/Ventoy, CD, or disk. */
+    if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & (1u << 3)) != 0 && mbi->mods_count > 0) {
+        const uint32_t *mods = (const uint32_t *)(uintptr_t)mbi->mods_addr;
+        for (uint32_t i = 0; i < mbi->mods_count; ++i) {
+            uint32_t mod_start = mods[i * 4 + 0];
+            uint32_t mod_end = mods[i * 4 + 1];
+            if (mod_end <= mod_start + 16u || (mod_end - mod_start) > 0x2000000u) {
+                continue;
+            }
+            const volatile uint32_t *mod_magic = (const volatile uint32_t *)(uintptr_t)mod_start;
+            if (*mod_magic != 0x44415744u /* 'DWAD' */) {
+                continue;
+            }
+            doom_wad_module_addr = mod_start;
+            doom_wad_module_bytes = mod_end - mod_start;
+            serial_trace_hex_value("INFO", "DOOM WAD module in RAM at", mod_start);
+            serial_trace_uint_value("INFO", "DOOM WAD module bytes", doom_wad_module_bytes);
+            break;
+        }
+    }
     ram_total_bytes = detect_total_ram_bytes(mbi);
     serial_trace_uint_value("INFO", "RAM total bytes", ram_total_bytes);
 
@@ -171,6 +206,11 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     present();
     init_mouse();
     __asm__ volatile ("sti");
+    /* Dev-mode self-test with interrupts live (matches the DOOM app
+     * environment): raw ATA probes + the port read of the WAD lump
+     * directory, so read failures surface at boot on COM1 instead of
+     * deep inside the engine boot. */
+    doom_wad_selftest();
     init_cpu_monitoring();
     serial_trace("INFO", cpu_has_cpuid ? "CPU CPUID available" : "CPU CPUID unavailable");
     serial_trace("INFO", cpu_has_tsc ? "CPU TSC available" : "CPU TSC unavailable");
@@ -193,8 +233,16 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
         poll_input();
         update_state();
         if (system_state != STATE_DESKTOP || desktop_should_redraw()) {
-            draw_everything();
-            present();
+            if (system_state == STATE_DESKTOP && desktop_cursor_only_redraw()) {
+                /* Only the pointer moved: put back the saved background,
+                 * redraw the pointer and scan out those two small boxes.
+                 * On a slow machine this is the difference between a
+                 * pointer that glides and one that steps. */
+                desktop_cursor_only_frame();
+            } else {
+                draw_everything();
+                present();
+            }
             if (system_state == STATE_DESKTOP) {
                 mark_desktop_redrawn();
             }

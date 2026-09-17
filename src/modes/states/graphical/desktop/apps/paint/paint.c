@@ -50,9 +50,10 @@ static void render_paint(const Window *window) {
         int row_off = base + y * OS_WIDTH;
         int src_off = y * PAINT_CANVAS_W;
         for (int x = 0; x < canvas_w; ++x) {
-            uint8_t c = paint_canvas[src_off + x];
-            backbuffer[row_off + x] = c;
-            backbuffer_rgb565[row_off + x] = palette_rgb565(c);
+            /* Plane-aware: the two shadows overlay one buffer, so writing
+             * both here would corrupt the live plane (and waste half the
+             * writes even before that). */
+            plane_set_pixel((uint32_t)(row_off + x), paint_canvas[src_off + x]);
         }
     }
     draw_rect(canvas_x - 1, canvas_y - 1, canvas_w + 2, canvas_h + 2, color_black);

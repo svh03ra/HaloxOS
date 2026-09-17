@@ -123,7 +123,9 @@ static void update_performance_metrics(uint64_t frame_cycles) {
     uint32_t framebuffer_bytes = fb.pitch * fb.height;
     uint8_t gpu_estimate;
     uint32_t total_cycles = 0;
-    uint32_t static_ram = (uint32_t)(sizeof(backbuffer) +
+    /* Both shadow planes overlay one buffer, so the footprint is the
+     * larger of the two, not the sum. */
+    uint32_t static_ram = (uint32_t)(sizeof(backbuffer_rgb565) +
                                      sizeof(palette) +
                                      sizeof(idt) +
                                      sizeof(key_queue) +

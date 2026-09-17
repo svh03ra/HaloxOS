@@ -39,6 +39,7 @@ extern const uint8_t _binary_build_power_icon_bin_start[];
 extern const uint8_t _binary_build_run_icon_bin_start[];
 extern const uint8_t _binary_build_box3d_icon_bin_start[];
 extern const uint8_t _binary_build_firecracker_icon_bin_start[];
+extern const uint8_t _binary_build_doom_icon_bin_start[];
 
 /* Title Run! game sprites */
 extern const uint8_t _binary_build_run_player_bin_start[];
@@ -126,7 +127,7 @@ extern const uint8_t _binary_build_run_skull_bin_start[];
 #define DEBUG_MEMORY_VISUAL_W 430
 #define DEBUG_MEMORY_VISUAL_H 240
 #define DEBUG_MEMORY_MAX_EDIT_LENGTH 0x10000u
-#define APP_COUNT 15
+#define APP_COUNT 16
 #define SNAKE_MAX_SEGMENTS 128
 #define MINES_SIZE 8
 #define MINES_COUNT 10
@@ -166,7 +167,17 @@ typedef enum {
     KEY_TAB,
     KEY_F1,
     KEY_F2,
+    KEY_F3,
     KEY_F4,
+    KEY_F5,
+    KEY_F6,
+    KEY_F7,
+    KEY_F8,
+    KEY_F9,
+    KEY_F10,
+    KEY_F11,
+    KEY_F12,
+    KEY_PAUSE,
     KEY_UP,
     KEY_DOWN,
     KEY_LEFT,
@@ -315,7 +326,8 @@ typedef enum {
     APP_DEMO_CENTER,
     APP_3D_BOX,
     APP_FIRECRACKER,
-    APP_RUN_GAME
+    APP_RUN_GAME,
+    APP_DOOM
 } AppId;
 
 typedef struct {
@@ -421,7 +433,8 @@ static const char *app_titles[APP_COUNT] = {
     "Demos",
     "3D Box",
     "Firecr..",
-    "Run!"
+    "Run!",
+    "DOOM"
 };
 
 static const uint8_t font8x8_basic[96][8] = {
@@ -455,8 +468,29 @@ static Framebuffer fb;
 static SystemState system_state = STATE_BOOT_MENU;
 static MouseState mouse = {320, 240, false, false, false, false, false, false};
 static Window windows[APP_COUNT];
-static uint8_t backbuffer[OS_WIDTH * OS_HEIGHT];
-static uint16_t backbuffer_rgb565[OS_WIDTH * OS_HEIGHT];
+/*
+ * Desktop shadow storage.
+ *
+ * The desktop is kept in two interchangeable formats - 8-bit palette
+ * indices and RGB565 - and exactly one of them is ever read: present()
+ * scans out whichever plane update_present_maps() elected for the active
+ * output format, and every writer in graphics.c goes through the
+ * plane-aware helpers so the other one is never touched (see
+ * present_need_index_plane in vga.c).
+ *
+ * They therefore overlay one buffer instead of occupying two: the kernel
+ * reserves the larger (RGB565, 600 KB) rather than both (900 KB). The
+ * names below keep every existing reference working unchanged.
+ */
+typedef union {
+    uint8_t index[OS_WIDTH * OS_HEIGHT];
+    uint16_t rgb565[OS_WIDTH * OS_HEIGHT];
+} ShadowPlaneStorage;
+
+static ShadowPlaneStorage shadow_planes;
+
+#define backbuffer (shadow_planes.index)
+#define backbuffer_rgb565 (shadow_planes.rgb565)
 static Color palette[256];
 static IdtEntry idt[256];
 static KeyEvent key_queue[64];
@@ -468,6 +502,8 @@ static bool keyboard_extended = false;
 static bool keyboard_shift = false;
 static bool keyboard_alt = false;
 static bool keyboard_ctrl = false;
+static bool keyboard_capslock = false;
+static bool keyboard_numlock = false;
 static bool menu_open = false;
 static bool context_menu_open = false;
 static int context_menu_x = 0;
@@ -711,6 +747,13 @@ static bool cpu_has_cpuid = false;
 static bool cpu_has_tsc = false;
 static bool boot_drive_valid = false;
 static uint8_t boot_drive_number = 0;
+
+/* WAD multiboot module: GRUB loads the game data into RAM via BIOS, so
+ * the kernel reads it straight from memory on ANY boot media (USB/
+ * Ventoy, CD, disk) - the ATA/ATAPI bus is not involved at all. Filled
+ * in kernel_main from the multiboot module list. */
+static uint32_t doom_wad_module_addr = 0;
+static uint32_t doom_wad_module_bytes = 0;
 static uintptr_t crash_mmap_addr = 0;
 static uint32_t crash_mmap_length = 0;
 static bool boot_drive_info_available = false;
@@ -752,6 +795,13 @@ static uint32_t present_content_height = OS_HEIGHT;
 static uint32_t present_offset_x = 0;
 static uint32_t present_offset_y = 0;
 static uint32_t last_desktop_redraw_input_tick = 0xFFFFFFFFu;
+/* Pointer position at the last desktop repaint, and the tick of the last
+ * handled key press. Together with the redraw flags below they let the
+ * desktop tell "only the pointer moved" apart from a real repaint, which
+ * is what keeps the cursor responsive on slow machines. */
+static int last_redraw_mouse_x = -1;
+static int last_redraw_mouse_y = -1;
+static uint32_t last_key_input_tick = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_second = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_terminal_blink = 0xFFFFFFFFu;
@@ -882,6 +932,19 @@ static void reset_run(void);
 static void run_handle_key(KeyEvent event);
 static void box3d_handle_key(KeyEvent event);
 
+/* DOOM app (apps/DOOM/port/doom_engine.c amalgamation): renderer and
+ * frame pump are defined in files included after their first use. */
+static void render_doom(const Window *window);
+static void update_doom(void);
+static void doom_app_handle_key(KeyEvent event);
+static bool doom_pointer_locked(void);
+static bool doom_point_in_client(int x, int y);
+static void doom_set_pointer_lock(bool locked);
+static void doom_toggle_pointer_lock(void);
+static bool doom_app_needs_redraw(void);
+static void doom_app_mark_presented(void);
+void doom_wad_selftest(void);
+
 /* Debugger power breakpoint: defined in debugger.c (included after the
  * power handlers); called before every shutdown/restart/halt trigger. */
 static void debug_bp_catch_power(const char *action);
@@ -970,3 +1033,9 @@ static void debug_bp_catch_power(const char *action);
 #include "../../modes/states/graphical/desktop/ui/mouse.c"
 #include "state_update.c"
 #include "init.c"
+
+/* DOOM engine amalgamation: included LAST. Its headers #define
+ * KEY_ENTER/KEY_TAB/etc. as DOOM key codes (doomdef.h), which would
+ * clobber the kernel's KeyCode enum names for every file below - so
+ * nothing kernel-side may follow this include. */
+#include "../../modes/states/graphical/desktop/apps/DOOM/port/doom_engine.c"

@@ -4,9 +4,11 @@
 // This repository is licensed under the GNU General Public License.
 
 /* Debug-build backtrace/calltrace support. The build generates
- * build/generated/crash_symbols.h (nm + addr2line over the final kernel)
- * with a FIXED-SIZE table so embedding it never shifts kernel addresses.
- * Release builds get CRASH_SYMBOLS_EMPTY and only raw addresses render. */
+ * build/generated/crash_symbols.h/.c (one nm + one addr2line pass over
+ * the final kernel) with a FIXED-SIZE table, so filling in the real
+ * symbols never shifts a kernel address and the kernel itself is built
+ * in a single pass. Release builds get a zero-filled table and only raw
+ * addresses render. */
 #include "crash_symbols.h"
 
 #if defined(HALOXOS_CONFIG_DEBUG) && HALOXOS_CONFIG_DEBUG
@@ -192,7 +194,10 @@ static void crash_render_cube_badge(void) {
 #define CRASH_CUBE_SAVE_H 120
 #define CRASH_CUBE_SAVE_X (OS_WIDTH - 148)
 #define CRASH_CUBE_SAVE_Y 140
-static uint8_t crash_cube_saved_bg[CRASH_CUBE_SAVE_W * CRASH_CUBE_SAVE_H];
+/* Snapshot in RGB565, not palette index: only one shadow plane is live at
+ * a time (see present_index_plane_live in vga.c), so reading the indexed
+ * plane directly would snapshot stale bytes on every RGB output. */
+static uint16_t crash_cube_saved_bg[CRASH_CUBE_SAVE_W * CRASH_CUBE_SAVE_H];
 static bool crash_cube_bg_saved = false;
 
 static void crash_cube_badge_redraw(void) {
@@ -204,7 +209,7 @@ static void crash_cube_badge_redraw(void) {
                 int sy = CRASH_CUBE_SAVE_Y + yy;
 
                 if (sx >= 0 && sy >= 0 && sx < OS_WIDTH && sy < OS_HEIGHT) {
-                    crash_cube_saved_bg[yy * CRASH_CUBE_SAVE_W + xx] = backbuffer[sy * OS_WIDTH + sx];
+                    crash_cube_saved_bg[yy * CRASH_CUBE_SAVE_W + xx] = plane_get_pixel_rgb(sx, sy);
                 }
             }
         }
@@ -213,8 +218,13 @@ static void crash_cube_badge_redraw(void) {
         /* restore the snapshot, then draw the new frame on top */
         for (int yy = 0; yy < CRASH_CUBE_SAVE_H; ++yy) {
             for (int xx = 0; xx < CRASH_CUBE_SAVE_W; ++xx) {
-                draw_pixel(CRASH_CUBE_SAVE_X + xx, CRASH_CUBE_SAVE_Y + yy,
-                           crash_cube_saved_bg[yy * CRASH_CUBE_SAVE_W + xx]);
+                int sx = CRASH_CUBE_SAVE_X + xx;
+                int sy = CRASH_CUBE_SAVE_Y + yy;
+
+                if (sx >= 0 && sy >= 0 && sx < OS_WIDTH && sy < OS_HEIGHT) {
+                    plane_set_pixel_rgb((uint32_t)sy * OS_WIDTH + (uint32_t)sx,
+                                        crash_cube_saved_bg[yy * CRASH_CUBE_SAVE_W + xx]);
+                }
             }
         }
     }
@@ -227,40 +237,42 @@ static void crash_cube_badge_redraw(void) {
 static int crash_symbol_lookup(uint32_t addr, const char **name,
                                 const char **file, int *line, uint32_t *offset);
 
-/* Binary search over the addr-ordered nm table in crash_symbols.h. */
+/* Binary search over the addr-ordered nm table in crash_symbols.c. The
+ * table is always CRASH_SYMBOL_MAX entries long (unused slots zeroed) so
+ * the symbol data never moves; crash_symbol_count says how many slots
+ * hold real symbols. */
 static int crash_symbol_lookup(uint32_t addr, const char **name,
                                const char **file, int *line, uint32_t *offset) {
-#if CRASH_SYMBOL_COUNT > 0
-    int lo = 0;
-    int hi = (int)CRASH_SYMBOL_COUNT - 1;
-    int best = -1;
+    if (crash_symbol_count > 0) {
+        int lo = 0;
+        int hi = crash_symbol_count - 1;
+        int best = -1;
 
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
 
-        if (crash_symbol_table_data[mid].addr <= addr) {
-            best = mid;
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
+            if (crash_symbol_table_data[mid].addr <= addr) {
+                best = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if (best >= 0) {
+            *name = crash_symbol_table_data[best].name;
+            *file = crash_symbol_table_data[best].file;
+            *line = crash_symbol_table_data[best].line;
+            *offset = addr - (uint32_t)crash_symbol_table_data[best].addr;
+            return 1;
         }
     }
-    if (best < 0) {
-        return 0;
-    }
-    *name = crash_symbol_table_data[best].name;
-    *file = crash_symbol_table_data[best].file;
-    *line = crash_symbol_table_data[best].line;
-    *offset = addr - (uint32_t)crash_symbol_table_data[best].addr;
-    return 1;
-#else
+
     (void)addr;
     *name = "unknown";
     *file = "?";
     *line = 0;
     *offset = 0;
     return 0;
-#endif
 }
 
 /*

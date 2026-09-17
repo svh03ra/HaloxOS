@@ -89,6 +89,47 @@ static bool vga_native_text_active = false;
 static void update_present_maps(void);
 static void vga_enter_text_mode(void);
 
+/*
+ * Shadow-plane liveness.
+ *
+ * The OS keeps two shadows of the desktop: an 8-bit palette-index plane
+ * and an RGB565 plane. Only ONE of them is ever read: present() scans the
+ * index plane on 8bpp indexed output and the RGB565 plane on every other
+ * format (VGA 4bpp planar goes through rgb565_to_ega, native VGA 320x200
+ * 256-colour scans the index plane). Maintaining the other one is pure
+ * memory traffic: on a 640x480 desktop it doubles the cost of the
+ * wallpaper blit, every fill and every glyph, which is exactly what a
+ * weak machine or a slow emulator cannot afford.
+ *
+ * update_present_maps() (called on every mode change) elects the live
+ * plane and blanks the shared storage; the primitives in graphics.c then
+ * write that one plane only. Because exactly one plane is ever needed, the
+ * two live in one buffer in kernel.c (ShadowPlaneStorage) and the kernel
+ * reserves the larger of the two instead of both.
+ *
+ * The election must mirror what present() actually reads. Electing the
+ * index plane for every VGA mode (as this used to) left the RGB565 plane
+ * untouched on the native 640x480x16 fallback, which scans the EGA map -
+ * i.e. a permanently black screen.
+ */
+static bool present_index_plane_live = true;
+
+/* Defined in graphics.c (same translation unit, included later); they let
+ * code that runs before graphics.c - the crash handler's save-under
+ * snapshot - read and restore a pixel through the live plane. */
+static void plane_set_pixel(uint32_t index, uint8_t color);
+static void plane_set_pixel_rgb(uint32_t index, uint16_t rgb);
+static uint16_t plane_get_pixel_rgb(int x, int y);
+
+/* The live plane is the only one a draw pass has to touch, ever. */
+static bool present_need_index_plane(void) {
+    return present_index_plane_live;
+}
+
+static bool present_need_rgb_plane(void) {
+    return !present_index_plane_live;
+}
+
 static uint8_t vga_nearest_ega_color(Color color) {
     uint32_t best_distance = 0xFFFFFFFFu;
     uint8_t best_index = 0;

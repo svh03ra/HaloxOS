@@ -19,6 +19,7 @@ static const uint8_t *app_icon_image(AppId app) {
         case APP_RUN_GAME: return _binary_build_run_icon_bin_start;
         case APP_3D_BOX: return _binary_build_box3d_icon_bin_start;
         case APP_FIRECRACKER: return _binary_build_firecracker_icon_bin_start;
+        case APP_DOOM: return _binary_build_doom_icon_bin_start;
         case APP_DEMO_CENTER:
         default: return _binary_build_program_icon_bin_start;
     }

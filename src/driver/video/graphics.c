@@ -7,6 +7,11 @@
  * (defined near palette_rgb565 at the bottom of this file). */
 static uint16_t pixel_rgb565_fast(uint8_t color);
 
+/* Inverse direction (RGB565 -> palette index), used by the quantizing
+ * present path and the raw-RGB565 restore paths; defined with the v2
+ * asset index LUT further down. */
+static uint8_t plane_index_for_rgb565(uint16_t rgb);
+
 static uint8_t nearest_color(uint8_t r, uint8_t g, uint8_t b) {
     uint32_t best_distance = 0xFFFFFFFFu;
     uint8_t best_index = 0;
@@ -167,48 +172,41 @@ static void program_vga_palette(void) {
  * colors) the presented RGB image is quantized in software. True-Color!
  * keeps the full RGB path untouched.
  *
- * A 64K RGB565 lookup table is built once per color-mode change so the
- * per-frame cost is a simple array lookup instead of a 256-entry nearest
- * search per pixel.
+ * Only the *final* 64K output LUT (present_pixel_lut below) is kept in
+ * memory. Its two ingredients already exist:
+ *   - 256-colour mode: rgb565_index_lut, the closed-form nearest palette
+ *     index (verified to match brute-force nearest_color for all inputs),
+ *   - 16-colour mode: a 16-entry scan of the EGA palette, run only while
+ *     the LUT is being (re)built, i.e. once per colour-mode change.
+ * The previous implementation cached that intermediate in a second 64 KB
+ * table (quant_lut) that nothing else ever read.
  */
-static uint8_t quant_lut[65536];
-static int8_t quant_lut_mode = -1;
+static uint8_t nearest_ega16_index(Color c) {
+    uint32_t best_distance = 0xFFFFFFFFu;
+    uint8_t best_index = 0;
 
-static void build_quant_lut(uint8_t mode) {
-    for (uint32_t v = 0; v < 65536; ++v) {
-        Color c = rgb565_to_color((uint16_t)v);
-        if (mode == 1) {
-            uint32_t best_distance = 0xFFFFFFFFu;
-            uint8_t best_index = 0;
-            for (int j = 0; j < 16; ++j) {
-                int dr = (int)vga_ega16_colors[j].r - (int)c.r;
-                int dg = (int)vga_ega16_colors[j].g - (int)c.g;
-                int db = (int)vga_ega16_colors[j].b - (int)c.b;
-                uint32_t distance = (uint32_t)(dr * dr + dg * dg + db * db);
-                if (distance < best_distance) {
-                    best_distance = distance;
-                    best_index = (uint8_t)j;
-                }
-            }
-            quant_lut[v] = best_index;
-        } else {
-            quant_lut[v] = nearest_color(c.r, c.g, c.b);
+    for (int j = 0; j < 16; ++j) {
+        int dr = (int)vga_ega16_colors[j].r - (int)c.r;
+        int dg = (int)vga_ega16_colors[j].g - (int)c.g;
+        int db = (int)vga_ega16_colors[j].b - (int)c.b;
+        uint32_t distance = (uint32_t)(dr * dr + dg * dg + db * db);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_index = (uint8_t)j;
         }
     }
-    quant_lut_mode = (int8_t)mode;
+
+    return best_index;
 }
 
 static Color present_color_for(uint16_t rgb565) {
     if (settings_applied.palette_mode == 2) {
         return rgb565_to_color(rgb565);
     }
-    if (quant_lut_mode != (int8_t)settings_applied.palette_mode) {
-        build_quant_lut(settings_applied.palette_mode);
-    }
     if (settings_applied.palette_mode == 1) {
-        return vga_ega16_colors[quant_lut[rgb565]];
+        return vga_ega16_colors[nearest_ega16_index(rgb565_to_color(rgb565))];
     }
-    return palette[quant_lut[rgb565]];
+    return palette[plane_index_for_rgb565(rgb565)];
 }
 
 /*
@@ -227,11 +225,6 @@ static Color present_color_for(uint16_t rgb565) {
 static int8_t present_pixel_lut_mode = -1;
 static uint8_t present_pixel_lut_bpp = 0;
 
-static void present_pixel_lut_invalidate(void) {
-    present_pixel_lut_mode = -1;
-    present_pixel_lut_bpp = 0;
-}
-
 static void present_pixel_lut_build(uint8_t mode, uint8_t bpp) {
     for (uint32_t v = 0; v < 65536; ++v) {
         present_pixel_lut[v] = pack_framebuffer_color(present_color_for((uint16_t)v));
@@ -240,12 +233,157 @@ static void present_pixel_lut_build(uint8_t mode, uint8_t bpp) {
     present_pixel_lut_bpp = bpp;
 }
 
-static uint32_t present_pixel_fast(uint16_t rgb565) {
+/*
+ * Fetch the ready-to-store output LUT for this frame.
+ *
+ * The old per-pixel helper re-tested "is the LUT current?" (two loads
+ * plus two compares) for every one of the 307200 pixels of a 640x480
+ * scanout. The rebuild check is a per-frame event, so it is hoisted here
+ * and the inner loops only do a table lookup + store.
+ */
+static const uint32_t *present_lut_ready(void) {
     if (present_pixel_lut_mode != (int8_t)settings_applied.palette_mode ||
         present_pixel_lut_bpp != fb.bpp) {
         present_pixel_lut_build(settings_applied.palette_mode, fb.bpp);
     }
-    return present_pixel_lut[rgb565];
+    return present_pixel_lut;
+}
+
+/*
+ * 16-bit RGB565 stores, four pixels per iteration.
+ *
+ * The LUT already returns the packed framebuffer pixel, so two pixels
+ * are merged into one 32-bit store and four into two. That removes most
+ * of the per-pixel loop overhead (address scaling, compare, branch) from
+ * the 15/16bpp scanout, which is what 86Box, v86 and every weak machine
+ * spend their frame time in.
+ */
+static void present_row_16(const uint16_t *src, uint16_t *dest, uint32_t count,
+                           const uint32_t *lut) {
+    uint32_t x = 0;
+
+    for (; x + 4u <= count; x += 4u) {
+        uint32_t pair0 = (lut[src[x]] & 0xFFFFu) | (lut[src[x + 1u]] << 16);
+        uint32_t pair1 = (lut[src[x + 2u]] & 0xFFFFu) | (lut[src[x + 3u]] << 16);
+        uint64_t quad = (uint64_t)pair0 | ((uint64_t)pair1 << 32);
+        *(uint64_t *)(void *)(dest + x) = quad;
+    }
+    for (; x + 2u <= count; x += 2u) {
+        uint32_t pair = (lut[src[x]] & 0xFFFFu) | (lut[src[x + 1u]] << 16);
+        *(uint32_t *)(void *)(dest + x) = pair;
+    }
+    if (x < count) {
+        dest[x] = (uint16_t)lut[src[x]];
+    }
+}
+
+/* 24-bit rows: four pixels (12 bytes) leave as three 32-bit stores. */
+static void present_row_24(const uint16_t *src, uint8_t *dest, uint32_t count,
+                           const uint32_t *lut) {
+    uint32_t x = 0;
+
+    for (; x + 4u <= count; x += 4u) {
+        uint32_t p0 = lut[src[x]];
+        uint32_t p1 = lut[src[x + 1u]];
+        uint32_t p2 = lut[src[x + 2u]];
+        uint32_t p3 = lut[src[x + 3u]];
+        *(uint32_t *)(void *)(dest + 0) = (p0 & 0x00FFFFFFu) | (p1 << 24);
+        *(uint32_t *)(void *)(dest + 4) = ((p1 >> 8) & 0x00FFFFu) | (p2 << 16);
+        *(uint32_t *)(void *)(dest + 8) = ((p2 >> 16) & 0x0000FFu) | (p3 << 8);
+        dest += 12;
+    }
+    for (; x < count; ++x) {
+        uint32_t packed = lut[src[x]];
+        dest[0] = (uint8_t)(packed & 0xFFu);
+        dest[1] = (uint8_t)((packed >> 8) & 0xFFu);
+        dest[2] = (uint8_t)((packed >> 16) & 0xFFu);
+        dest += 3;
+    }
+}
+
+/* 32-bit rows: two pixels per 64-bit store. */
+static void present_row_32(const uint16_t *src, uint32_t *dest, uint32_t count,
+                           const uint32_t *lut) {
+    uint32_t x = 0;
+
+    for (; x + 2u <= count; x += 2u) {
+        uint64_t pair = (uint64_t)lut[src[x]] | ((uint64_t)lut[src[x + 1u]] << 32);
+        *(uint64_t *)(void *)(dest + x) = pair;
+    }
+    if (x < count) {
+        dest[x] = lut[src[x]];
+    }
+}
+
+/* Adopt the bootloader-programmed linear framebuffer (the VBE mode
+ * GRUB set before the kernel started). Shared by the direct multiboot
+ * hand-off and the VMware SVGA fallback below. */
+static bool adopt_multiboot_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
+    if (magic != 0x2BADB002 || mbi == NULL) {
+        return false;
+    }
+    /*
+     * Multiboot1 flag 12 explicitly says the framebuffer fields are
+     * present. Always log the raw hand-off before validating it: this
+     * makes a GRUB mode-selection problem distinguishable from a VGA
+     * backend problem on real hardware.
+     */
+    serial_trace_uint_value("INFO", "Multiboot flags", mbi->flags);
+    if ((mbi->flags & (1u << 12)) != 0) {
+        serial_trace_uint_value("INFO", "Multiboot framebuffer width", mbi->framebuffer_width);
+        serial_trace_uint_value("INFO", "Multiboot framebuffer height", mbi->framebuffer_height);
+        serial_trace_uint_value("INFO", "Multiboot framebuffer bpp", mbi->framebuffer_bpp);
+        serial_trace_uint_value("INFO", "Multiboot framebuffer type", mbi->framebuffer_type);
+        serial_trace_uint_value("INFO", "Multiboot framebuffer pitch", mbi->framebuffer_pitch);
+    }
+
+    {
+        uint8_t framebuffer_type = mbi->framebuffer_type;
+        if ((mbi->flags & (1u << 12)) != 0 &&
+            mbi->framebuffer_addr <= 0xFFFFFFFFull &&
+            framebuffer_bpp_supported(framebuffer_type, mbi->framebuffer_bpp)) {
+            fb.address = (uint8_t *)(uintptr_t)mbi->framebuffer_addr;
+            fb.width = mbi->framebuffer_width;
+            fb.height = mbi->framebuffer_height;
+            fb.pitch = mbi->framebuffer_pitch;
+            fb.bpp = mbi->framebuffer_bpp;
+            fb.type = framebuffer_type;
+        }
+        if (fb.address != NULL &&
+            fb.width >= OS_WIDTH &&
+            fb.height >= OS_HEIGHT &&
+            fb.width <= MAX_OUTPUT_WIDTH &&
+            fb.height <= MAX_OUTPUT_HEIGHT &&
+            fb.pitch >= fb.width * ((fb.bpp + 7u) / 8u)) {
+            if (fb.type == MULTIBOOT_FRAMEBUFFER_TYPE_RGB &&
+                mbi->framebuffer_red_mask_size != 0 &&
+                mbi->framebuffer_green_mask_size != 0 &&
+                mbi->framebuffer_blue_mask_size != 0) {
+                fb.red_position = mbi->framebuffer_red_field_position;
+                fb.red_mask_size = mbi->framebuffer_red_mask_size;
+                fb.green_position = mbi->framebuffer_green_field_position;
+                fb.green_mask_size = mbi->framebuffer_green_mask_size;
+                fb.blue_position = mbi->framebuffer_blue_field_position;
+                fb.blue_mask_size = mbi->framebuffer_blue_mask_size;
+            } else {
+                set_default_framebuffer_format(fb.bpp);
+            }
+            video_backend = VIDEO_BACKEND_MULTIBOOT;
+            update_present_maps();
+            return true;
+        }
+    }
+    return false;
+}
+
+/* After a failed SVGA init the device may sit with its engine disabled
+ * (the fifo setup wrote ENABLE=0). The BIOS/GRUB mode itself was never
+ * reprogrammed, so re-enabling restores exactly what the bootloader
+ * left on screen - the fallback framebuffer writes then display. */
+static void vmware_restore_boot_mode(void) {
+    if (vmware_svga.fifo_ready) {
+        vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_ENABLE);
+    }
 }
 
 static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
@@ -285,59 +423,23 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
         }
     }
 
-    if (magic == 0x2BADB002 && mbi != NULL) {
-        /*
-         * Multiboot1 flag 12 explicitly says the framebuffer fields are
-         * present. Always log the raw hand-off before validating it: this
-         * makes a GRUB mode-selection problem distinguishable from a VGA
-         * backend problem on real hardware.
-         */
-        serial_trace_uint_value("INFO", "Multiboot flags", mbi->flags);
-        if ((mbi->flags & (1u << 12)) != 0) {
-            serial_trace_uint_value("INFO", "Multiboot framebuffer width", mbi->framebuffer_width);
-            serial_trace_uint_value("INFO", "Multiboot framebuffer height", mbi->framebuffer_height);
-            serial_trace_uint_value("INFO", "Multiboot framebuffer bpp", mbi->framebuffer_bpp);
-            serial_trace_uint_value("INFO", "Multiboot framebuffer type", mbi->framebuffer_type);
-            serial_trace_uint_value("INFO", "Multiboot framebuffer pitch", mbi->framebuffer_pitch);
-        }
-
-        uint8_t framebuffer_type = mbi->framebuffer_type;
-        if ((mbi->flags & (1u << 12)) != 0 &&
-            mbi->framebuffer_addr <= 0xFFFFFFFFull &&
-            framebuffer_bpp_supported(framebuffer_type, mbi->framebuffer_bpp)) {
-            fb.address = (uint8_t *)(uintptr_t)mbi->framebuffer_addr;
-            fb.width = mbi->framebuffer_width;
-            fb.height = mbi->framebuffer_height;
-            fb.pitch = mbi->framebuffer_pitch;
-            fb.bpp = mbi->framebuffer_bpp;
-            fb.type = framebuffer_type;
-        }
-        if (fb.address != NULL &&
-            fb.width >= OS_WIDTH &&
-            fb.height >= OS_HEIGHT &&
-            fb.width <= MAX_OUTPUT_WIDTH &&
-            fb.height <= MAX_OUTPUT_HEIGHT &&
-            fb.pitch >= fb.width * ((fb.bpp + 7u) / 8u)) {
-            if (fb.type == MULTIBOOT_FRAMEBUFFER_TYPE_RGB &&
-                mbi->framebuffer_red_mask_size != 0 &&
-                mbi->framebuffer_green_mask_size != 0 &&
-                mbi->framebuffer_blue_mask_size != 0) {
-                fb.red_position = mbi->framebuffer_red_field_position;
-                fb.red_mask_size = mbi->framebuffer_red_mask_size;
-                fb.green_position = mbi->framebuffer_green_field_position;
-                fb.green_mask_size = mbi->framebuffer_green_mask_size;
-                fb.blue_position = mbi->framebuffer_blue_field_position;
-                fb.blue_mask_size = mbi->framebuffer_blue_mask_size;
-            } else {
-                set_default_framebuffer_format(fb.bpp);
-            }
-            video_backend = VIDEO_BACKEND_MULTIBOOT;
-            update_present_maps();
-            return true;
-        }
+    if (adopt_multiboot_framebuffer(magic, mbi)) {
+        return true;
     }
 
     if (init_vmware_svga_backend()) {
+        return true;
+    }
+
+    /*
+     * VMware SVGA could not provide a usable mode (host bpp limits,
+     * fifo problems). Fall back to the bootloader framebuffer instead
+     * of leaving the machine without a working backend - the graphical
+     * boot menu / login then renders exactly like on any other card.
+     */
+    serial_trace("WARNING", "VMware SVGA: usable mode not available - using bootloader framebuffer");
+    vmware_restore_boot_mode();
+    if (adopt_multiboot_framebuffer(magic, mbi)) {
         return true;
     }
 
@@ -441,10 +543,17 @@ static void present(void) {
         return;
     }
 
+    /* 8bpp output: the indexed plane IS the image, so the scanout is a
+     * plain copy. Contiguous rows (pitch == width) collapse into ONE
+     * memcpy for the whole screen instead of 480 row copies. */
     if (fb.bpp == 8 && fb.width == OS_WIDTH && fb.height == OS_HEIGHT) {
-        for (int y = 0; y < OS_HEIGHT; ++y) {
-            uint8_t *dest = fb.address + (size_t)y * fb.pitch;
-            memcpy_local(dest, &backbuffer[y * OS_WIDTH], OS_WIDTH);
+        if (fb.pitch == OS_WIDTH) {
+            memcpy_local(fb.address, backbuffer, (size_t)OS_WIDTH * OS_HEIGHT);
+        } else {
+            for (int y = 0; y < OS_HEIGHT; ++y) {
+                uint8_t *dest = fb.address + (size_t)y * fb.pitch;
+                memcpy_local(dest, &backbuffer[y * OS_WIDTH], OS_WIDTH);
+            }
         }
         if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
             vmware_update_screen();
@@ -453,9 +562,12 @@ static void present(void) {
     }
 
     /* Common case: 1:1 mapping, no scaling. Every row is one bulk copy
-     * out of the shadow buffers; no per-pixel sampling maps at all. */
+     * out of the shadow buffers; no per-pixel sampling maps at all. The
+     * output LUT is resolved once here, never inside the pixel loops. */
     if (present_content_width == OS_WIDTH && present_content_height == OS_HEIGHT &&
         fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT) {
+        const uint32_t *lut = (fb.bpp > 8) ? present_lut_ready() : NULL;
+
         for (uint32_t y = 0; y < OS_HEIGHT; ++y) {
             const uint8_t *src = &backbuffer[y * OS_WIDTH];
             const uint16_t *src_rgb = &backbuffer_rgb565[y * OS_WIDTH];
@@ -464,36 +576,22 @@ static void present(void) {
             if (fb.bpp == 8) {
                 memcpy_local(fb.address + row_off, src, OS_WIDTH);
             } else if (fb.bpp == 15 || fb.bpp == 16) {
-                uint16_t *dest = (uint16_t *)(fb.address + row_off);
                 if (fb.bpp == 16 && fb.red_position == 11 && fb.green_position == 5 &&
                     fb.blue_position == 0 && fb.red_mask_size == 5 &&
                     fb.green_mask_size == 6 && fb.blue_mask_size == 5 &&
                     settings_applied.palette_mode == 2) {
                     /* True-color and the framebuffer layout IS RGB565:
                      * straight bulk copy, zero per-pixel math. */
-                    memcpy_local(dest, src_rgb, OS_WIDTH * 2u);
+                    memcpy_local(fb.address + row_off, src_rgb, OS_WIDTH * 2u);
                 } else {
-                    for (uint32_t x = 0; x < OS_WIDTH; ++x) {
-                        Color c = rgb565_to_color(src_rgb[x]);
-                        if (settings_applied.palette_mode == 1) {
-                            c = quantize_color_16(c);
-                        }
-                        dest[x] = (uint16_t)pack_framebuffer_color(c);
-                    }
+                    present_row_16(src_rgb, (uint16_t *)(void *)(fb.address + row_off),
+                                   OS_WIDTH, lut);
                 }
             } else if (fb.bpp == 24) {
-                uint8_t *dest = fb.address + row_off;
-                for (uint32_t x = 0; x < OS_WIDTH; ++x) {
-                    uint32_t packed = present_pixel_fast(src_rgb[x]);
-                    dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
-                    dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
-                    dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
-                }
+                present_row_24(src_rgb, fb.address + row_off, OS_WIDTH, lut);
             } else {
-                uint32_t *dest = (uint32_t *)(fb.address + row_off);
-                for (uint32_t x = 0; x < OS_WIDTH; ++x) {
-                    dest[x] = present_pixel_fast(src_rgb[x]);
-                }
+                present_row_32(src_rgb, (uint32_t *)(void *)(fb.address + row_off),
+                               OS_WIDTH, lut);
             }
         }
         /* Black letterbox margins (fb larger than the desktop). */
@@ -506,54 +604,53 @@ static void present(void) {
         return;
     }
 
-    for (uint32_t y = 0; y < fb.height; ++y) {
-        bool inside_y = y >= present_offset_y && y < present_offset_y + present_content_height;
-        uint16_t sy = inside_y ? present_y_map[y] : 0;
-        const uint8_t *src = &backbuffer[sy * OS_WIDTH];
+    {
+        const uint32_t *lut = (fb.bpp > 8) ? present_lut_ready() : NULL;
 
-        if (fb.bpp == 8) {
-            uint8_t *dest = fb.address + (size_t)y * fb.pitch;
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
-                dest[x] = inside ? src[present_x_map[x]] : color_black;
-            }
-            continue;
-        }
+        for (uint32_t y = 0; y < fb.height; ++y) {
+            bool inside_y = y >= present_offset_y && y < present_offset_y + present_content_height;
+            uint16_t sy = inside_y ? present_y_map[y] : 0;
+            const uint8_t *src = &backbuffer[sy * OS_WIDTH];
 
-        if (fb.bpp == 15 || fb.bpp == 16) {
-            uint16_t *dest = (uint16_t *)(fb.address + (size_t)y * fb.pitch);
-            uint16_t out_black = (uint16_t)pack_framebuffer_color((Color){0, 0, 0});
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
-                if (!inside) {
-                    dest[x] = out_black;
-                    continue;
+            if (fb.bpp == 8) {
+                uint8_t *dest = fb.address + (size_t)y * fb.pitch;
+                for (uint32_t x = 0; x < fb.width; ++x) {
+                    bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
+                    dest[x] = inside ? src[present_x_map[x]] : color_black;
                 }
-                uint16_t rgb = backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]];
-                Color c = rgb565_to_color(rgb);
-                if (settings_applied.palette_mode == 1) {
-                    c = quantize_color_16(c);
+                continue;
+            }
+
+            if (fb.bpp == 15 || fb.bpp == 16) {
+                uint16_t *dest = (uint16_t *)(void *)(fb.address + (size_t)y * fb.pitch);
+                uint16_t out_black = (uint16_t)lut[0];
+                for (uint32_t x = 0; x < fb.width; ++x) {
+                    bool inside = inside_y && x >= present_offset_x && x < present_offset_x + present_content_width;
+                    if (!inside) {
+                        dest[x] = out_black;
+                        continue;
+                    }
+                    dest[x] = (uint16_t)lut[backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]];
                 }
-                dest[x] = (uint16_t)pack_framebuffer_color(c);
+                continue;
             }
-            continue;
-        }
 
-        if (fb.bpp == 24) {
-            uint8_t *dest = fb.address + (size_t)y * fb.pitch;
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                uint32_t packed = present_pixel_fast(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
-                dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
-                dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
-                dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
+            if (fb.bpp == 24) {
+                uint8_t *dest = fb.address + (size_t)y * fb.pitch;
+                for (uint32_t x = 0; x < fb.width; ++x) {
+                    uint32_t packed = lut[backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]];
+                    dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
+                    dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
+                    dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
+                }
+                continue;
             }
-            continue;
-        }
 
-        {
-            uint32_t *dest = (uint32_t *)(fb.address + (size_t)y * fb.pitch);
-            for (uint32_t x = 0; x < fb.width; ++x) {
-                dest[x] = present_pixel_fast(backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]);
+            {
+                uint32_t *dest = (uint32_t *)(void *)(fb.address + (size_t)y * fb.pitch);
+                for (uint32_t x = 0; x < fb.width; ++x) {
+                    dest[x] = lut[backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]];
+                }
             }
         }
     }
@@ -563,11 +660,109 @@ static void present(void) {
     }
 }
 
-static void clear_screen(uint8_t color) {
-    uint16_t rgb = pixel_rgb565_fast(color);
+/*
+ * Partial scanout: present only one rectangle of the desktop.
+ *
+ * This is what makes a moving pointer cheap. A full frame repaints the
+ * wallpaper, the icons, the taskbar and then scans out 640x480 pixels;
+ * a pointer-only frame touches two small rectangles (~600 pixels total)
+ * instead. Whenever the output is scaled, the backend owns the screen
+ * (VGA / VMware SVGA) or the geometry is not 1:1, it silently falls back
+ * to a full present, so callers never have to think about it.
+ */
+static void present_rect(int x, int y, int w, int h) {
+    if (fb.address == NULL) {
+        return;
+    }
 
-    memset_local(backbuffer, color, sizeof(backbuffer));
-    memset16_local(backbuffer_rgb565, rgb, OS_WIDTH * OS_HEIGHT);
+    if (present_content_width != OS_WIDTH || present_content_height != OS_HEIGHT ||
+        fb.width < OS_WIDTH || fb.height < OS_HEIGHT ||
+        video_backend == VIDEO_BACKEND_VGA || video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+        present();
+        return;
+    }
+
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > OS_WIDTH) { w = OS_WIDTH - x; }
+    if (y + h > OS_HEIGHT) { h = OS_HEIGHT - y; }
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    if (fb.bpp == 8) {
+        for (int row = y; row < y + h; ++row) {
+            memcpy_local(fb.address + (size_t)(row + present_offset_y) * fb.pitch +
+                             present_offset_x + (size_t)x,
+                         &backbuffer[(size_t)row * OS_WIDTH + x], (size_t)w);
+        }
+        return;
+    }
+
+    {
+        const uint32_t *lut = present_lut_ready();
+
+        for (int row = y; row < y + h; ++row) {
+            const uint16_t *src = &backbuffer_rgb565[(size_t)row * OS_WIDTH + x];
+            uint8_t *dest = fb.address + (size_t)(row + present_offset_y) * fb.pitch +
+                            present_offset_x + (size_t)x * (fb.bpp / 8u);
+
+            if (fb.bpp == 15 || fb.bpp == 16) {
+                present_row_16(src, (uint16_t *)(void *)dest, (uint32_t)w, lut);
+            } else if (fb.bpp == 24) {
+                present_row_24(src, dest, (uint32_t)w, lut);
+            } else {
+                present_row_32(src, (uint32_t *)(void *)dest, (uint32_t)w, lut);
+            }
+        }
+    }
+
+}
+
+static void clear_screen(uint8_t color) {
+    if (present_need_index_plane()) {
+        memset_local(backbuffer, color, sizeof(backbuffer));
+    }
+    if (present_need_rgb_plane()) {
+        memset16_local(backbuffer_rgb565, pixel_rgb565_fast(color), OS_WIDTH * OS_HEIGHT);
+    }
+}
+
+/*
+ * Plane-aware pixel writers.
+ *
+ * Every primitive goes through these so it only pays for the shadow
+ * plane its output format actually presents (see present_index_plane_live
+ * in vga.c). The flags are read once per call site, not per pixel, so the
+ * inner loops keep a single predictable branch.
+ *
+ * pixel_rgb565_fast() resolves an 8-bit palette index to the cached RGB565
+ * value (a table lookup once the palette is programmed); the inverse
+ * direction only runs on the rare raw-RGB565 restore paths.
+ */
+static void plane_set_pixel(uint32_t index, uint8_t color) {
+    if (present_need_index_plane()) {
+        backbuffer[index] = color;
+    }
+    if (present_need_rgb_plane()) {
+        backbuffer_rgb565[index] = pixel_rgb565_fast(color);
+    }
+}
+
+static void plane_set_pixel_rgb(uint32_t index, uint16_t rgb) {
+    if (present_need_rgb_plane()) {
+        backbuffer_rgb565[index] = rgb;
+    }
+    if (present_need_index_plane()) {
+        backbuffer[index] = plane_index_for_rgb565(rgb);
+    }
+}
+
+static uint16_t plane_get_pixel_rgb(int x, int y) {
+    if (present_need_rgb_plane()) {
+        return backbuffer_rgb565[(uint32_t)y * OS_WIDTH + (uint32_t)x];
+    }
+    return pixel_rgb565_fast(backbuffer[(uint32_t)y * OS_WIDTH + (uint32_t)x]);
 }
 
 /*
@@ -611,8 +806,7 @@ static void draw_pixel(int x, int y, uint8_t color) {
     if (!clip_contains(x, y)) {
         return;
     }
-    backbuffer[y * OS_WIDTH + x] = color;
-    backbuffer_rgb565[y * OS_WIDTH + x] = pixel_rgb565_fast(color);
+    plane_set_pixel((uint32_t)y * OS_WIDTH + (uint32_t)x, color);
 }
 
 static void fill_rect(int x, int y, int w, int h, uint8_t color) {
@@ -620,7 +814,9 @@ static void fill_rect(int x, int y, int w, int h, uint8_t color) {
     int y0 = clampi(y, 0, OS_HEIGHT);
     int x1 = clampi(x + w, 0, OS_WIDTH);
     int y1 = clampi(y + h, 0, OS_HEIGHT);
-    uint16_t rgb = pixel_rgb565_fast(color);
+    bool want_index = present_need_index_plane();
+    bool want_rgb = present_need_rgb_plane();
+    uint16_t rgb = want_rgb ? pixel_rgb565_fast(color) : 0;
     int row_len = x1 - x0;
 
     if (clip_enabled) {
@@ -635,19 +831,27 @@ static void fill_rect(int x, int y, int w, int h, uint8_t color) {
         return;
     }
 
-    /* Full-width rows collapse to two bulk memset passes per row. */
+    /* Bulk fill per row: one memset per plane, and only for the plane the
+     * output format presents (both on the frame after a mode change). */
     if (row_len == OS_WIDTH) {
         for (int py = y0; py < y1; ++py) {
-            memset_local(&backbuffer[py * OS_WIDTH], color, (size_t)row_len);
-            memset16_local(&backbuffer_rgb565[py * OS_WIDTH], rgb, (size_t)row_len);
+            if (want_index) {
+                memset_local(&backbuffer[py * OS_WIDTH], color, (size_t)row_len);
+            }
+            if (want_rgb) {
+                memset16_local(&backbuffer_rgb565[py * OS_WIDTH], rgb, (size_t)row_len);
+            }
         }
         return;
     }
 
-    /* Wider chunks: both shadow buffers get their own bulk fill. */
     for (int py = y0; py < y1; ++py) {
-        memset_local(&backbuffer[py * OS_WIDTH + x0], color, (size_t)row_len);
-        memset16_local(&backbuffer_rgb565[py * OS_WIDTH + x0], rgb, (size_t)row_len);
+        if (want_index) {
+            memset_local(&backbuffer[py * OS_WIDTH + x0], color, (size_t)row_len);
+        }
+        if (want_rgb) {
+            memset16_local(&backbuffer_rgb565[py * OS_WIDTH + x0], rgb, (size_t)row_len);
+        }
     }
 }
 
@@ -669,9 +873,12 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
 
     if (!clip_enabled && x >= 0 && y >= 0 && x + 8 <= OS_WIDTH && y + 8 <= OS_HEIGHT) {
         /* Fully on-screen: write rows directly, no per-pixel clipping.
-         * Colors are resolved once instead of per pixel. */
-        uint16_t fg_rgb = pixel_rgb565_fast(fg);
-        uint16_t bg_rgb = transparent ? 0 : pixel_rgb565_fast(bg);
+         * Colors and plane elections are resolved once per glyph, not per
+         * pixel, and only the presented plane is written. */
+        bool want_index = present_need_index_plane();
+        bool want_rgb = present_need_rgb_plane();
+        uint16_t fg_rgb = want_rgb ? pixel_rgb565_fast(fg) : 0;
+        uint16_t bg_rgb = (want_rgb && !transparent) ? pixel_rgb565_fast(bg) : 0;
 
         for (int row = 0; row < 8; ++row) {
             uint8_t bits = font8x8_basic[glyph_index][row];
@@ -680,32 +887,32 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
 
             if (bits == 0) {
                 if (!transparent) {
-                    memset_local(dest, bg, 8);
-                    memset16_local(dest_rgb, bg_rgb, 8);
+                    if (want_index) memset_local(dest, bg, 8);
+                    if (want_rgb) memset16_local(dest_rgb, bg_rgb, 8);
                 }
                 continue;
             }
             if (bits == 0xFFu) {
-                memset_local(dest, fg, 8);
-                memset16_local(dest_rgb, fg_rgb, 8);
+                if (want_index) memset_local(dest, fg, 8);
+                if (want_rgb) memset16_local(dest_rgb, fg_rgb, 8);
                 continue;
             }
 
             if (transparent) {
                 for (int col = 0; col < 8; ++col) {
                     if ((bits >> col) & 1u) {
-                        dest[col] = fg;
-                        dest_rgb[col] = fg_rgb;
+                        if (want_index) dest[col] = fg;
+                        if (want_rgb) dest_rgb[col] = fg_rgb;
                     }
                 }
             } else {
                 for (int col = 0; col < 8; ++col) {
                     if ((bits >> col) & 1u) {
-                        dest[col] = fg;
-                        dest_rgb[col] = fg_rgb;
+                        if (want_index) dest[col] = fg;
+                        if (want_rgb) dest_rgb[col] = fg_rgb;
                     } else {
-                        dest[col] = bg;
-                        dest_rgb[col] = bg_rgb;
+                        if (want_index) dest[col] = bg;
+                        if (want_rgb) dest_rgb[col] = bg_rgb;
                     }
                 }
             }
@@ -951,6 +1158,8 @@ static bool point_in_rect(int x, int y, int rx, int ry, int rw, int rh) {
     return x >= rx && y >= ry && x < rx + rw && y < ry + rh;
 }
 
+#define MAX_PACKED4_COLOURS 16
+
 static uint16_t image_width(const uint8_t *image) {
     return (uint16_t)(image[0] | ((uint16_t)image[1] << 8));
 }
@@ -971,6 +1180,26 @@ static uint16_t image_height(const uint8_t *image) {
  */
 static bool image_is_v2(const uint8_t *image) {
     return (image[4] == 0xA2 || image[4] == 0xB3) && image[5] == 0x48;
+}
+
+/*
+ * v3 "packed4" assets: the full-screen backgrounds are dithered from a
+ * handful of colours, so they ship as 4 bits per pixel plus their own
+ * 16-entry RGB565 palette (tools/mkpacked4.py repacks them losslessly).
+ * That is a quarter of the bytes of the v2 RGB565 form - about 1.4 MB of
+ * kernel image for the three backgrounds - and the blit expands two
+ * pixels per byte instead of reading one 16-bit pixel at a time.
+ */
+static bool image_is_packed4(const uint8_t *image) {
+    return image[4] == 0xC4 && image[5] == 0x48;
+}
+
+static const uint8_t *image_packed4_palette(const uint8_t *image) {
+    return image + 7;
+}
+
+static const uint8_t *image_packed4_pixels(const uint8_t *image) {
+    return image + 7 + (size_t)image[6] * 2u;
 }
 
 static bool image_has_alpha(const uint8_t *image) {
@@ -1008,6 +1237,15 @@ static const uint16_t *image_rgb565(const uint8_t *image) {
  */
 static uint8_t rgb565_index_lut[65536];
 static bool rgb565_index_lut_ready = false;
+static void rgb565_index_lut_build(void);
+
+/* Inverse lookup used by the raw-RGB565 restore paths (crash badge). */
+static uint8_t plane_index_for_rgb565(uint16_t rgb) {
+    if (!rgb565_index_lut_ready) {
+        rgb565_index_lut_build();
+    }
+    return rgb565_index_lut[rgb];
+}
 
 static void rgb565_index_lut_build(void) {
     static const uint8_t cube[6] = {0, 51, 102, 153, 204, 255};
@@ -1127,6 +1365,72 @@ static int text_pixel_width(const char *text) {
     return (int)strlen_local(text) * 8;
 }
 
+/*
+ * Packed 4bpp blit. Two pixels leave per source byte, and the 16-entry
+ * palette is resolved once per image: RGB565 for the presented plane, and
+ * (only when the indexed plane is live) the kernel palette index for it.
+ * The destination geometry is already clipped by the caller.
+ */
+static void draw_image_packed4(const uint8_t *image, int x0, int y0, int x1, int y1,
+                               int src_x0, int src_y0) {
+    uint16_t width = image_width(image);
+    uint32_t stride = ((uint32_t)width + 1u) / 2u;
+    const uint8_t *palette = image_packed4_palette(image);
+    const uint8_t *packed = image_packed4_pixels(image);
+    int count = (int)image[6];
+    bool want_index = present_need_index_plane();
+    bool want_rgb = present_need_rgb_plane();
+    uint16_t pal_rgb[MAX_PACKED4_COLOURS];
+    uint8_t pal_index[MAX_PACKED4_COLOURS];
+    int row_w = x1 - x0;
+
+    for (int i = 0; i < MAX_PACKED4_COLOURS; ++i) {
+        uint16_t rgb = 0;
+        if (i < count) {
+            rgb = (uint16_t)(palette[i * 2] | ((uint16_t)palette[i * 2 + 1] << 8));
+            if (want_index) {
+                pal_index[i] = plane_index_for_rgb565(rgb);
+            }
+        }
+        pal_rgb[i] = rgb;
+    }
+
+    for (int py = 0; py < y1 - y0; ++py) {
+        const uint8_t *row = packed + (size_t)(src_y0 + py) * stride;
+        uint16_t *dest_rgb = &backbuffer_rgb565[(size_t)(y0 + py) * OS_WIDTH + x0];
+        uint8_t *dest_idx = &backbuffer[(size_t)(y0 + py) * OS_WIDTH + x0];
+        int px = 0;
+
+        /* Two pixels per source byte while both nibbles stay in range. */
+        if ((src_x0 & 1) == 0) {
+            for (; px + 1 < row_w; px += 2) {
+                uint8_t byte = row[(uint32_t)(src_x0 + px) >> 1];
+                int hi = (int)(byte >> 4);
+                int lo = (int)(byte & 0x0Fu);
+                if (hi >= count) hi = 0;
+                if (lo >= count) lo = 0;
+                if (want_rgb) {
+                    uint32_t pair = (uint32_t)pal_rgb[hi] | ((uint32_t)pal_rgb[lo] << 16);
+                    *(uint32_t *)(void *)(dest_rgb + px) = pair;
+                }
+                if (want_index) {
+                    dest_idx[px] = pal_index[hi];
+                    dest_idx[px + 1] = pal_index[lo];
+                }
+            }
+        }
+
+        for (; px < row_w; ++px) {
+            uint32_t sx = (uint32_t)(src_x0 + px);
+            uint8_t byte = row[sx >> 1];
+            int entry = (int)((sx & 1u) ? (byte & 0x0Fu) : (byte >> 4));
+            if (entry >= count) entry = 0;
+            if (want_rgb) dest_rgb[px] = pal_rgb[entry];
+            if (want_index) dest_idx[px] = pal_index[entry];
+        }
+    }
+}
+
 static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) {
     uint16_t width = image_width(image);
     uint16_t height = image_height(image);
@@ -1157,33 +1461,44 @@ static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) 
         return;
     }
 
+    if (image_is_packed4(image)) {
+        draw_image_packed4(image, x0, y0, x1, y1, src_x0, src_y0);
+        return;
+    }
+
     if (!rgb565_index_lut_ready && image_is_v2(image)) {
         rgb565_index_lut_build();
     }
 
-    for (int py = 0; y0 + py < y1; ++py) {
-        int sy = src_y0 + py;
-        int dy = y0 + py;
-        size_t row_base = (size_t)sy * width + src_x0;
-        const uint8_t *src_p = pixels != NULL ? pixels + row_base : NULL;
-        const uint16_t *src_r = rgb565 + row_base;
-        const uint8_t *src_a = alpha != NULL ? alpha + row_base : NULL;
-        uint8_t *dest_p = &backbuffer[(size_t)dy * OS_WIDTH + x0];
-        uint16_t *dest_r = &backbuffer_rgb565[(size_t)dy * OS_WIDTH + x0];
-        int row_w = x1 - x0;
+    /* Plane election resolved once for the whole image. */
+    {
+        bool want_index = present_need_index_plane();
+        bool want_rgb = present_need_rgb_plane();
 
-        if ((!transparent || alpha == NULL) && pixels != NULL) {
-            memcpy_local(dest_p, src_p, (size_t)row_w);
-            memcpy_local(dest_r, src_r, (size_t)row_w * 2u);
-            continue;
-        }
+        for (int py = 0; y0 + py < y1; ++py) {
+            int sy = src_y0 + py;
+            int dy = y0 + py;
+            size_t row_base = (size_t)sy * width + src_x0;
+            const uint8_t *src_p = pixels != NULL ? pixels + row_base : NULL;
+            const uint16_t *src_r = rgb565 + row_base;
+            const uint8_t *src_a = alpha != NULL ? alpha + row_base : NULL;
+            uint8_t *dest_p = &backbuffer[(size_t)dy * OS_WIDTH + x0];
+            uint16_t *dest_r = &backbuffer_rgb565[(size_t)dy * OS_WIDTH + x0];
+            int row_w = x1 - x0;
 
-        for (int px = 0; px < row_w; ++px) {
-            if (transparent && alpha != NULL && src_a[px] < 128) {
+            if ((!transparent || alpha == NULL) && pixels != NULL) {
+                if (want_index) memcpy_local(dest_p, src_p, (size_t)row_w);
+                if (want_rgb) memcpy_local(dest_r, src_r, (size_t)row_w * 2u);
                 continue;
             }
-            dest_r[px] = src_r[px];
-            dest_p[px] = pixels != NULL ? src_p[px] : rgb565_index_lut[src_r[px]];
+
+            for (int px = 0; px < row_w; ++px) {
+                if (transparent && alpha != NULL && src_a[px] < 128) {
+                    continue;
+                }
+                if (want_rgb) dest_r[px] = src_r[px];
+                if (want_index) dest_p[px] = pixels != NULL ? src_p[px] : rgb565_index_lut[src_r[px]];
+            }
         }
     }
 }

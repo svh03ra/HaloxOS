@@ -15,6 +15,7 @@ out/
 # Temporary files
 *.tmp
 *.log
+build_log.txt
 
 # Tool builds
 build/tools/
@@ -25,9 +26,16 @@ build/isodir/
 *.map
 *.ppm
 
+# DOOM game data (legal reasons: never commit ID Software's IWAD)
+DOOM1.WAD
+*.wad
+src/modes/states/graphical/desktop/apps/DOOM/DOOM1.WAD
+
 # Editor files
 .vscode/
 .idea/
+.freebuff/
+.codex/
 
 # OS / filesystem junk
 *~

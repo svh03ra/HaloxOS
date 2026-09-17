@@ -48,6 +48,7 @@ static void render_app_window(AppId app) {
         case APP_3D_BOX: render_3d_box(window); break;
         case APP_FIRECRACKER: render_firecracker(window); break;
         case APP_RUN_GAME: render_run(window); break;
+        case APP_DOOM: render_doom(window); break;
     }
 
     clear_window_clip();

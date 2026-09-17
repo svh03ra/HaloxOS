@@ -16,6 +16,7 @@ static int app_window_width(AppId app) {
         case APP_PAINT: return 368;
         case APP_EXPLORER: return 336;
         case APP_CMD: return 420;
+        case APP_DOOM: return 336;   /* client 320x240: DOOM's 320x200 at the exact DOS 4:3 */
         default: return 300;
     }
 }
@@ -25,7 +26,7 @@ static int app_window_height(AppId app) {
         case APP_SETTINGS: return 260;
         case APP_TASK_MANAGER: return 360;
         case APP_POWER: return 160;
-        case APP_GAME_CENTER: return 268;
+        case APP_GAME_CENTER: return 306;
         case APP_DEMO_CENTER: return 230;
         case APP_3D_BOX: return 280;
         case APP_FIRECRACKER: return 260;
@@ -33,6 +34,7 @@ static int app_window_height(AppId app) {
         case APP_MINES: return 250;
         case APP_PAINT: return 290;
         case APP_EXPLORER: return 220;
+        case APP_DOOM: return 272;   /* 24 + 240 + 8: client = 320x240 */
         default: return 200;
     }
 }
@@ -57,7 +59,8 @@ static void open_window(AppId app) {
                         (app == APP_DEMO_CENTER ? "Demo Center" :
                         (app == APP_3D_BOX ? "3D Box" :
                         (app == APP_FIRECRACKER ? "Firecracker" :
-                        (app == APP_RUN_GAME ? "Run! Run" : app_titles[app])))));
+                        (app == APP_RUN_GAME ? "Run! Run" :
+                        (app == APP_DOOM ? "DOOM" : app_titles[app]))))));
         window->w = app_window_width(app);
         window->h = app_window_height(app);
         window->x = 70 + app * 18;
@@ -96,6 +99,10 @@ static void open_window(AppId app) {
             fire_alive[i] = false;
         }
         fire_last_tick = timer_ticks;
+    } else if (app == APP_DOOM) {
+        /* Boot is driven by the DOOM renderer's first frame (doom_app.c),
+         * NOT here: the engine must never be started twice, and the
+         * render-side path is the single owner of the boot trigger. */
     }
 
     active_window = app;
@@ -126,6 +133,13 @@ static void close_window(AppId app) {
     }
     if (windows[app].open) {
         serial_trace_concat("INFO", "Application Closed - ", app_titles[app]);
+    }
+    if (app == APP_DOOM) {
+        /* Shut the engine down so reopening re-probes the WAD. */
+        extern void doom_shutdown(void);
+        extern void doom_app_reset(void);
+        doom_shutdown();
+        doom_app_reset();
     }
     windows[app].open = false;
     if (app == APP_TASK_MANAGER) {

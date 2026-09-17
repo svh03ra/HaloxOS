@@ -30,6 +30,10 @@ static void update_state(void) {
     }
 
     while (dequeue_key(&event)) {
+        /* Any key press invalidates the pointer-only repaint shortcut: the
+         * key may have changed what is on the desktop (text, focus, menu
+         * state) and only a full repaint can be trusted after it. */
+        last_key_input_tick = timer_ticks;
         if (system_state == STATE_DESKTOP && keyboard_ctrl && keyboard_shift && event.code == KEY_ENTER) {
             debug_enter();
             continue;
@@ -76,6 +80,7 @@ static void update_state(void) {
         update_snake();
         update_demos();
         update_run();
+        update_doom();
 
         if (window_fade_active && timer_ticks - window_fade_tick >= 18) {
             window_fade_active = false;

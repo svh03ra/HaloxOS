@@ -4,8 +4,8 @@
 // This repository is licensed under the GNU General Public License.
 
 static void render_game_center(const Window *window) {
-    static const char *games[] = {"Minesweeper", "Snake", "Guess Number", "Run! Run"};
-    static const AppId game_apps[] = {APP_MINES, APP_SNAKE, APP_GUESS, APP_RUN_GAME};
+    static const char *games[] = {"Minesweeper", "Snake", "Guess Number", "Run! Run", "DOOM"};
+    static const AppId game_apps[] = {APP_MINES, APP_SNAKE, APP_GUESS, APP_RUN_GAME, APP_DOOM};
     int header_icon_w = image_width(_binary_build_game_icon_bin_start);
     int header_text_w = text_pixel_width("Game Center");
     int header_x = window->x + (window->w - (header_icon_w + 8 + header_text_w)) / 2;
@@ -17,7 +17,7 @@ static void render_game_center(const Window *window) {
     /* Hover only when this window is the FRONT one: otherwise the
      * rows keep animating through an app that covers them. */
     if (active_window == APP_GAME_CENTER) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             if (point_in_rect(mouse.x, mouse.y, row_x, list_y + i * 34, row_w, 36)) {
                 hover_row = i;
                 break;
@@ -34,7 +34,7 @@ static void render_game_center(const Window *window) {
     draw_text(header_x + header_icon_w + 8, window->y + 48, "Game Center", color_black, color_white, true);
     draw_text(window->x + 20, window->y + 80, "Welcome games! Choose one to play:", color_black, color_white, true);
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         int row_y = list_y + i * 34;
         bool hover = game_center_hover_row == i;
         bool pressed = hover && mouse.left;
