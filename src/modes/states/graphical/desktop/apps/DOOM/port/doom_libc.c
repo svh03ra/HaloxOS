@@ -380,8 +380,8 @@ static uint8_t doom_wad_sector[512];
 static uint8_t doom_wad_cd_sector[2048];
 
 /* Driver entry points (ata.c, defined earlier in this amalgamation TU).
- * Per-device variants let the WAD live on ANY channel/drive: 86Box and
- * real hardware attach disks and CD-ROMs to different positions, and
+ * Per-device variants let the WAD live on ANY channel/drive: emulated and
+ * real machines attach disks and CD-ROMs to different positions, and
  * the old primary-master-only read missed them all. */
 bool ata_pio_read_sector(uint32_t lba, uint8_t *buffer);
 bool ata_pio_read_sector_dev(uint16_t io_base, uint8_t devsel_head, uint32_t lba, uint8_t *buffer);
@@ -404,8 +404,8 @@ static const DoomAtaPos doom_ata_positions[4] = {
 };
 
 /* WAD shipped as a multiboot module: GRUB loaded /boot/doom.wadmodule
- * via BIOS so the game data travels in RAM on ANY boot media - USB/
- * Ventoy, CD, or disk. The loader relocates it above the kernel image
+ * via BIOS so the game data travels in RAM on ANY boot media - USB
+ * stick, CD, or disk. The loader relocates it above the kernel image
  * (0xB00000) before decompressing, then kernel_main records the module
  * range in kernel.c (init.c fills these; same translation unit). The
  * ATA/ATAPI probes below are only fallbacks for machines where the
@@ -602,7 +602,7 @@ static int doom_wad_pread(uint32_t offset, void *dest, int count) {
             /* Most WAD lumps arrive as contiguous full sectors.  Read them
              * in one PIO command (up to the ATA LBA28 limit of 128 here)
              * instead of selecting and polling the IDE device once per
-             * sector.  This is especially important on slow 86Box PATA. */
+             * sector.  This is especially important on slow PATA links. */
             if (sec >= DOOM_WAD_DIR_SECTORS && in_sec == 0 &&
                 count - done >= 512) {
                 uint32_t full_sectors = (uint32_t)(count - done) / 512u;

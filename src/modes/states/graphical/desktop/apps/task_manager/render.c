@@ -22,9 +22,10 @@ static void render_task_manager(const Window *window) {
     if (task_manager_selected_process >= process_count) {
         task_manager_selected_process = process_count > 0 ? process_count - 1 : 0;
     }
-    if (gpu_palette_scroll > max_gpu_scroll) {
-        gpu_palette_scroll = max_gpu_scroll;
-    }
+    /* Row-align as well as clamp: the video mode and the palette-mode
+     * setting both change gpu_palette_entry_count(), so a higher offset can
+     * arrive after a switch down to a 256- or 16-entry palette. */
+    gpu_palette_scroll = gpu_palette_clamp_scroll(gpu_palette_scroll);
 
     fill_rect(window->x + 8, window->y + 24, window->w - 16, window->h - 32, color_white);
     draw_button(window->x + 14, window->y + 30, 84, 20, "Processes", task_manager_tab == 0 ? color_blue : color_gray_light, color_black, task_manager_tab == 0 ? color_white : color_black);
@@ -163,9 +164,8 @@ static void render_task_manager(const Window *window) {
         page_text[0] = '\0';
         {
             size_t len = 0;
-            uint32_t current_page = (gpu_palette_scroll / GPU_GRID_PAGE_ENTRIES) + 1u;
-            uint32_t page_count = (total_gpu_entries + GPU_GRID_PAGE_ENTRIES - 1u) / GPU_GRID_PAGE_ENTRIES;
-            append_uint(page_text, &len, sizeof(page_text), current_page);
+            uint32_t page_count = gpu_palette_page_count();
+            append_uint(page_text, &len, sizeof(page_text), gpu_palette_visible_page());
             append_char(page_text, &len, sizeof(page_text), '/');
             append_uint(page_text, &len, sizeof(page_text), page_count);
         }

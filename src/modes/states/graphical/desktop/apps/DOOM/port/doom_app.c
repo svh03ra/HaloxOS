@@ -116,12 +116,21 @@ static void doom_toggle_pointer_lock(void) {
     doom_set_pointer_lock(!doom_capture_locked);
 }
 
+/* Does the desktop compositor owe this window a fresh engine frame?
+ * Only capture state gates INPUT; painting must follow the window being
+ * open, focused and the engine running - otherwise an unlocked (but
+ * running) DOOM starves the redraw path and collapses to ~1 fps. */
+static bool doom_app_wants_paint(void) {
+    return active_window == APP_DOOM && windows[APP_DOOM].open &&
+           doom_run_state == DOOM_STATE_RUNNING;
+}
+
 static bool doom_app_needs_redraw(void) {
-    return doom_pointer_locked() && doom_render_dirty;
+    return doom_app_wants_paint() && doom_render_dirty;
 }
 
 static void doom_app_mark_presented(void) {
-    if (doom_pointer_locked()) {
+    if (doom_app_wants_paint()) {
         doom_render_dirty = false;
     }
 }

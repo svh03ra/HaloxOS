@@ -207,8 +207,7 @@ static void render_debug_overlay(void) {
         int width;
         bool blink_red = fps_lagging && ((timer_ticks / 6u) & 1u) != 0u;
 
-        copy_string(text, "FPS ", sizeof(text));
-        len = strlen_local(text);
+        append_string(text, &len, sizeof(text), "FPS ");
         append_uint(text, &len, sizeof(text), whole);
         append_char(text, &len, sizeof(text), '.');
         append_uint(text, &len, sizeof(text), frac);

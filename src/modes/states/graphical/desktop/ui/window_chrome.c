@@ -30,7 +30,10 @@ static void draw_window_chrome(const Window *window) {
 
     int cx = window->x + window->w - 18;
     int cy = window->y + 3;
-    bool close_hover = point_in_rect(mouse.x, mouse.y, cx, cy, 12, 12);
+    /* A close box under another window must not light up or press through
+     * it: ui_window_interactive is set by the renderer of whichever window
+     * owns the pointer (see widgets.c). */
+    bool close_hover = ui_window_interactive && point_in_rect(mouse.x, mouse.y, cx, cy, 12, 12);
     bool close_pressed = close_hover && mouse.left;
     bool close_hover_was = close_hover || close_pressed;
 

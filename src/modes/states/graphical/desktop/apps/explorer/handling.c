@@ -11,6 +11,13 @@ static void explorer_handle_mouse(void) {
     Window *window = &windows[APP_EXPLORER];
     int row_x = window->x + 96;
     int row_w = window->w - 110;
+
+    /* Only react to clicks that landed inside this window (see the window
+     * hit pass): overlapping windows must not press these rows. */
+    if (!point_in_rect(mouse.x, mouse.y, window->x, window->y, window->w, window->h)) {
+        return;
+    }
+
     for (int i = 0; i < 6; ++i) {
         int row_y = window->y + 52 + i * 16;
         if (button_clicked(row_x, row_y - 2, row_w, 14)) {

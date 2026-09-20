@@ -12,7 +12,6 @@ static int app_window_width(AppId app) {
         case APP_DEMO_CENTER: return 360;
         case APP_3D_BOX: return 300;
         case APP_FIRECRACKER: return 340;
-        case APP_RUN_GAME: return 420;
         case APP_PAINT: return 368;
         case APP_EXPLORER: return 336;
         case APP_CMD: return 420;
@@ -26,11 +25,10 @@ static int app_window_height(AppId app) {
         case APP_SETTINGS: return 260;
         case APP_TASK_MANAGER: return 360;
         case APP_POWER: return 160;
-        case APP_GAME_CENTER: return 306;
+        case APP_GAME_CENTER: return 272;   /* 98px header + 4 rows x 34 + 36 margin */
         case APP_DEMO_CENTER: return 230;
         case APP_3D_BOX: return 280;
         case APP_FIRECRACKER: return 260;
-        case APP_RUN_GAME: return 300;
         case APP_MINES: return 250;
         case APP_PAINT: return 290;
         case APP_EXPLORER: return 220;
@@ -106,8 +104,7 @@ static void open_window(AppId app) {
                         (app == APP_DEMO_CENTER ? "Demo Center" :
                         (app == APP_3D_BOX ? "3D Box" :
                         (app == APP_FIRECRACKER ? "Firecracker" :
-                        (app == APP_RUN_GAME ? "Run! Run" :
-                        (app == APP_DOOM ? "DOOM" : app_titles[app]))))));
+                        (app == APP_DOOM ? "DOOM" : app_titles[app])))));
         window->w = app_window_width(app);
         window->h = app_window_height(app);
         window->x = 70 + app * 18;
@@ -127,6 +124,14 @@ static void open_window(AppId app) {
     } else if (app == APP_MINES) {
         mines_place();
     } else if (app == APP_SETTINGS) {
+        /*
+         * Opening Settings is where the video BIOS may be asked what display
+         * modes this machine really has (see video_mode_switch_prepare).  That
+         * call is a real-mode INT 10h, and it is made here - from a running
+         * desktop with its interrupt table in place - rather than during the
+         * boot, where there is nothing for a fault inside it to land on.
+         */
+        video_mode_switch_prepare();
         settings_pending = settings_applied;
         settings_tab = 0;
     } else if (app == APP_TASK_MANAGER) {
@@ -134,8 +139,6 @@ static void open_window(AppId app) {
         task_manager_selected_process = 0;
         task_manager_confirm_kill = false;
         task_manager_kill_target = -1;
-    } else if (app == APP_RUN_GAME) {
-        reset_run();
     } else if (app == APP_3D_BOX) {
         box3d_mode = 0;
         box3d_angle = 0;
@@ -220,7 +223,11 @@ static void open_desktop(void) {
     shutdown_pending = false;
     active_window = -1;
     task_manager_gpu_scroll_drag = false;
-    last_desktop_redraw_input_tick = 0xFFFFFFFFu;
+    /* A fresh desktop session starts with the snap-grid overlay hidden:
+     * the debugger's show/hide grid command is the only thing that paints
+     * it, so the desktop no longer opens looking like graph paper. */
+    desktop_grid_overlay_on = false;
+    ui_input_dirty = true;   /* nothing painted for this session yet */
     last_desktop_redraw_second = 0xFFFFFFFFu;
     last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
     last_desktop_redraw_terminal_blink = 0xFFFFFFFFu;

@@ -19,7 +19,7 @@
  * not implement wedges the bus: an ATA disk that receives an ATAPI
  * PACKET command (or a CD-ROM that receives READ SECTORS) never raises
  * DRQ, and the caller spins to the full timeout - or worse, the
- * emulated drive hangs outright (VMware, 86Box). IDENTIFY DEVICE /
+ * emulated drive hangs outright (VMware, most emulated PATA). IDENTIFY DEVICE /
  * IDENTIFY PACKET DEVICE classify every present drive up front and
  * every command path refuses the wrong type. */
 typedef enum {
@@ -42,8 +42,8 @@ static bool ata_pio_read_sectors_dev(uint16_t io_base, uint8_t devsel_head, uint
                                      uint8_t *buffer, uint8_t sectors);
 
 /* 400ns settle delay: four alternate-status reads. Required after a
- * device select before the status register is meaningful - 86Box and
- * real hardware reject commands issued too early after the select. */
+ * device select before the status register is meaningful - both emulated
+ * and real controllers reject commands issued too early after the select. */
 static void ata_io_delay(uint16_t io_base) {
     const uint16_t ctl_port = io_base + ATA_CTL_OFFSET;
     inb(ctl_port);
@@ -155,7 +155,7 @@ static bool ata_wait_drq(uint16_t status_port) {
 /* LBA28 READ SECTORS.  A single command can transfer several adjacent
  * sectors, which removes repeated device-select and command-poll overhead
  * from WAD and asset streaming.  It remains strictly PIO (no DMA setup or
- * IRQ dependency), keeping it reliable on old chipsets and 86Box. */
+ * IRQ dependency), keeping it reliable on old chipsets and emulated PATA. */
 static bool ata_pio_read_sectors_dev(uint16_t io_base, uint8_t devsel_head, uint32_t lba,
                                      uint8_t *buffer, uint8_t sectors) {
     const uint16_t status_port = io_base + 7;
@@ -171,7 +171,7 @@ static bool ata_pio_read_sectors_dev(uint16_t io_base, uint8_t devsel_head, uint
      * reader fragile on real ATA media as soon as the image grows. */
     const uint8_t devsel = (uint8_t)(base_devsel | ((lba >> 24) & 0x0Fu));
 
-    /* Older PATA controllers and 86Box can occasionally report a transient
+    /* Older PATA controllers can occasionally report a transient
      * status race immediately after switching devices. Retry the complete
      * command before reporting a real media failure. */
     for (int attempt = 0; attempt < 3; ++attempt) {
@@ -258,7 +258,7 @@ static bool ata_packet_io(uint16_t io_base, uint8_t devsel_head,
 
     ata_detect_devices();
     if (ata_kind(io_base, devsel_head) != ATA_DEV_ATAPI) {
-        return false; /* PACKET to an ATA disk hangs the bus (VMware/86Box) */
+        return false; /* PACKET to an ATA disk hangs the bus (VMware, emulated PATA) */
     }
     ata_select_dev(io_base, devsel_head);
     if (!ata_wait_ready(status_port)) {

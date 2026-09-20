@@ -142,7 +142,11 @@ static void handle_desktop_mouse(void) {
         if (!on_button) {
             taskbar_menu_open = true;
             taskbar_menu_x = clampi(mouse.x, 0, OS_WIDTH - 150);
-            taskbar_menu_y = clampi(mouse.y - 16, OS_HEIGHT - TASKBAR_H - 16, OS_HEIGHT - 16);
+            /* Always float the menu fully above the taskbar: clamping to
+             * the click Y used to let it overlap the bar's START/window
+             * buttons, so hovering or closing it touched the very button
+             * it was opened from. */
+            taskbar_menu_y = OS_HEIGHT - TASKBAR_H - 16;
             menu_open = false;
             context_menu_open = false;
             desktop_icon_menu_open = false;
@@ -177,6 +181,18 @@ static void handle_desktop_mouse(void) {
     }
 
     if (desktop_select_dragging) {
+        if (mouse.right && !mouse.prev_right) {
+            /* Right-click while band-selecting: cancel the selection
+             * outright instead of letting the click fall through to the
+             * context-menu path. Rapid right-clicks during a drag used
+             * to freeze the rubber band because the menu state machine
+             * and the drag release fought over the same frames. */
+            desktop_select_dragging = false;
+            for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+                desktop_icon_multi_selected[i] = false;
+            }
+            return;
+        }
         if (mouse.left) {
             desktop_select_x2 = mouse.x;
             desktop_select_y2 = mouse.y;
@@ -205,14 +221,11 @@ static void handle_desktop_mouse(void) {
     if (mouse.left && drag_desktop_icon >= 0 && drag_desktop_icon < DESKTOP_ICON_COUNT) {
         int dx = mouse.x - desktop_icon_press_x;
         int dy = mouse.y - desktop_icon_press_y;
-        for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
-            if (i == drag_desktop_icon || desktop_icon_multi_selected[i]) {
-                int bx, by, bw, bh;
-                desktop_icon_bounds(0, 0, desktop_icon_image(i), desktop_icon_label(i), &bx, &by, &bw, &bh);
-                desktop_icons[i].x = clampi(desktop_icon_drag_start_x[i] + dx, 0, OS_WIDTH - bw);
-                desktop_icons[i].y = clampi(desktop_icon_drag_start_y[i] + dy, 0, OS_HEIGHT - TASKBAR_H - bh);
-            }
-        }
+        /* Snap to the 4x4 grid and keep the icon off every open window
+         * (see desktop_icon_drag_to): the icon slides along a window's
+         * edge rather than across its face. */
+        desktop_icon_drag_to(desktop_icon_drag_start_x[drag_desktop_icon] + dx,
+                             desktop_icon_drag_start_y[drag_desktop_icon] + dy);
         return;
     }
 
@@ -260,76 +273,71 @@ static void handle_desktop_mouse(void) {
     }
 
     {
-        int first = active_window;
-        for (int pass = 0; pass <= APP_COUNT; ++pass) {
-            int app = pass == 0 ? first : (APP_COUNT - pass);
-            Window *window;
+        /* Whoever paints last owns those pixels, so it also owns the click.
+         * desktop_top_window_at() scans in exactly render_desktop's order
+         * (test windows paint above app windows; the active window of each
+         * group paints on top of its group), so a click can only ever reach
+         * the window the user actually sees under the pointer. The two
+         * hand-rolled passes this replaces scanned app windows first and
+         * gated the test windows on "no app window here", which handed the
+         * click to a covered app window whenever a test window sat on it. */
+        Window *hit = (Window *)desktop_top_window_at(mouse.x, mouse.y);
 
-            if (app < 0 || app >= APP_COUNT) {
-                continue;
-            }
-            if (pass > 0 && app == first) {
-                continue;
-            }
-
-            window = &windows[app];
-            if (!window->open) {
-                continue;
-            }
-            if (!point_in_rect(mouse.x, mouse.y, window->x, window->y, window->w, window->h)) {
-                continue;
-            }
+        if (hit != 0) {
+            /* Which array does the hit belong to? This MUST be a range
+             * membership test, never a bare "hit >= test_windows": the
+             * linker is free to place .bss objects in any order, and in
+             * the current build windows[] sits ABOVE test_windows[], so
+             * every app window satisfied "hit >= test_windows" and was
+             * misclassified as a test window - title-bar drags set a
+             * garbage index the drag guard rejected (windows stopped
+             * moving) and client clicks were swallowed by the test-window
+             * branch before any app handler could run (all buttons dead)
+             * while hover, which compares pointer identity, kept working. */
+            bool is_test = hit >= test_windows && hit < test_windows + MAX_TEST_WINDOWS;
+            int index = is_test ? (int)(hit - test_windows) : (int)(hit - windows);
 
             pointer_over_window = true;
             if (clicked) {
-                if (point_in_rect(mouse.x, mouse.y, window->x + window->w - 18, window->y + 3, 12, 12)) {
-                    close_window((AppId)app);
+                if (point_in_rect(mouse.x, mouse.y, hit->x + hit->w - 18, hit->y + 3, 12, 12)) {
+                    if (is_test) {
+                        hit->open = false;
+                        if (active_test_window == index) active_test_window = -1;
+                    } else {
+                        close_window((AppId)index);
+                    }
                     return;
                 }
-                if (point_in_rect(mouse.x, mouse.y, window->x, window->y, window->w, 18)) {
-                    set_active_window((AppId)app);
-                    drag_window = app;
+                if (point_in_rect(mouse.x, mouse.y, hit->x, hit->y, hit->w, 18)) {
                     drag_anim_tick = timer_ticks;
-                    drag_offset_x = mouse.x - window->x;
-                    drag_offset_y = mouse.y - window->y;
+                    if (is_test) {
+                        active_test_window = index;
+                        drag_test_window = index;
+                        drag_test_offset_x = mouse.x - hit->x;
+                        drag_test_offset_y = mouse.y - hit->y;
+                    } else {
+                        set_active_window((AppId)index);
+                        drag_window = index;
+                        drag_offset_x = mouse.x - hit->x;
+                        drag_offset_y = mouse.y - hit->y;
+                    }
                     return;
                 }
-                if (active_window != app) {
-                    set_active_window((AppId)app);
+                if (is_test) {
+                    /* A test window always consumes a client click, so it
+                     * can never leak to the icons or the selection below. */
+                    active_test_window = index;
                     return;
                 }
+                if (active_window != index) {
+                    set_active_window((AppId)index);
+                    return;
+                }
+                /* Already-active window: fall through so the app's own
+                 * mouse handler (below) receives this in-window click.
+                 * Desktop icons and the rubber-band selector stay safe:
+                 * they only run when !pointer_over_window. */
             }
-            break;
-        }
-    }
-
-    if (!pointer_over_window) {
-        int first_test = active_test_window;
-        for (int pass = 0; pass <= test_window_count; ++pass) {
-            int i = pass == 0 ? first_test : (test_window_count - pass);
-            if (i < 0 || i >= test_window_count) continue;
-            if (pass > 0 && i == first_test) continue;
-            if (!test_windows[i].open) continue;
-            if (!point_in_rect(mouse.x, mouse.y, test_windows[i].x, test_windows[i].y, test_windows[i].w, test_windows[i].h)) continue;
-            pointer_over_window = true;
-            if (clicked) {
-                if (point_in_rect(mouse.x, mouse.y, test_windows[i].x + test_windows[i].w - 18, test_windows[i].y + 3, 12, 12)) {
-                    test_windows[i].open = false;
-                    if (active_test_window == i) active_test_window = -1;
-                    return;
-                }
-                if (point_in_rect(mouse.x, mouse.y, test_windows[i].x, test_windows[i].y, test_windows[i].w, 18)) {
-                    active_test_window = i;
-                    drag_test_window = i;
-                    drag_anim_tick = timer_ticks;
-                    drag_test_offset_x = mouse.x - test_windows[i].x;
-                    drag_test_offset_y = mouse.y - test_windows[i].y;
-                    return;
-                }
-                active_test_window = i;
-                return;
-            }
-            break;
         }
     }
 
@@ -393,19 +401,30 @@ static void handle_desktop_mouse(void) {
                 desktop_icon_drag_moved = true;
             }
             if (drag_desktop_icon >= 0) {
-                int dx = mouse.x - desktop_icon_press_x;
-                int dy = mouse.y - desktop_icon_press_y;
-                for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
-                    if (i == drag_desktop_icon || desktop_icon_multi_selected[i]) {
-                        int bx, by, bw, bh;
-                        desktop_icon_bounds(0, 0, desktop_icon_image(i), desktop_icon_label(i), &bx, &by, &bw, &bh);
-                        desktop_icons[i].x = clampi(desktop_icon_drag_start_x[i] + dx, 0, OS_WIDTH - bw);
-                        desktop_icons[i].y = clampi(desktop_icon_drag_start_y[i] + dy, 0, OS_HEIGHT - TASKBAR_H - bh);
-                    }
-                }
+                /* Same snapped, window-aware move as the settled drag path
+                 * above. The deltas above were made absolute for the
+                 * threshold test, so the signed ones are derived again. */
+                desktop_icon_drag_to(desktop_icon_drag_start_x[drag_desktop_icon] + (mouse.x - desktop_icon_press_x),
+                                     desktop_icon_drag_start_y[drag_desktop_icon] + (mouse.y - desktop_icon_press_y));
                 return;
             }
         } else if (clicked && hit < 0) {
+            /* A click on bare desktop drops activation from the front
+             * window, exactly like clicking away in a window manager:
+             * the click is OUTSIDE every window here (the topmost-window
+             * pass above consumed any window hit), so no app can lose a
+             * click it should have owned. set_active_window also closes
+             * any straggler menus, and -1 is a legal resting state: the
+             * keyboard router and taskbar treat it as "no active app"
+             * (Ctrl+Z / Ctrl+A select-all still work on the icons). */
+            if (active_window == APP_DOOM) {
+                /* Never leave DOOM's pointer lock behind: the unlock
+                 * gesture (middle-click) needs DOOM active, so a lock
+                 * surviving deactivation would hide the cursor with no
+                 * way to bring it back. */
+                doom_set_pointer_lock(false);
+            }
+            set_active_window(-1);
             selected_desktop_icon = -1;
             for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
                 desktop_icon_multi_selected[i] = false;
@@ -419,13 +438,28 @@ static void handle_desktop_mouse(void) {
         }
     }
 
-    paint_handle_mouse();
-    explorer_handle_mouse();
-    mines_handle_mouse();
-    game_center_handle_mouse();
-    demo_center_handle_mouse();
-    firecracker_handle_mouse();
-    power_handle_mouse();
-    settings_handle_mouse();
-    task_manager_handle_mouse();
+    /*
+     * Hand this frame's mouse state to exactly one app: the owner of the
+     * pointer.
+     *
+     * Calling every handler used to be the norm, each one guarding itself
+     * with its own rectangle - but those rectangles overlap freely between
+     * windows, so a click inside the window in front satisfied the guards
+     * of whatever window was behind it as well. Routing on the topmost
+     * window removes the whole class: with no window under the pointer, no
+     * app handler runs at all, and a test window on top swallows the click
+     * instead of an app window underneath reacting to it.
+     */
+    switch (desktop_pointer_owner_app()) {
+        case APP_PAINT: paint_handle_mouse(); break;
+        case APP_EXPLORER: explorer_handle_mouse(); break;
+        case APP_MINES: mines_handle_mouse(); break;
+        case APP_GAME_CENTER: game_center_handle_mouse(); break;
+        case APP_DEMO_CENTER: demo_center_handle_mouse(); break;
+        case APP_FIRECRACKER: firecracker_handle_mouse(); break;
+        case APP_POWER: power_handle_mouse(); break;
+        case APP_SETTINGS: settings_handle_mouse(); break;
+        case APP_TASK_MANAGER: task_manager_handle_mouse(); break;
+        default: break;
+    }
 }

@@ -9,6 +9,11 @@ static void settings_handle_mouse(void) {
     }
 
     Window *window = &windows[APP_SETTINGS];
+    /* Ignore clicks that did not land inside this window (see the window
+     * hit pass): overlapping windows must not press these controls. */
+    if (!point_in_rect(mouse.x, mouse.y, window->x, window->y, window->w, window->h)) {
+        return;
+    }
     if (button_clicked(window->x + 14, window->y + 56, 70, 20)) {
         settings_tab = 0;
     } else if (button_clicked(window->x + 90, window->y + 56, 80, 20)) {
@@ -20,18 +25,25 @@ static void settings_handle_mouse(void) {
             settings_pending.palette_mode = (settings_pending.palette_mode + 2) % 3;
         } else if (button_clicked(window->x + 346, window->y + 86, 20, 18) && live_palette_supported((uint8_t)((settings_pending.palette_mode + 1) % 3))) {
             settings_pending.palette_mode = (settings_pending.palette_mode + 1) % 3;
-        } else if (button_clicked(window->x + 178, window->y + 116, 20, 18) && live_resolution_supported((uint8_t)((settings_pending.resolution_mode + 4) % 5))) {
-            settings_pending.resolution_mode = (settings_pending.resolution_mode + 4) % 5;
-        } else if (button_clicked(window->x + 346, window->y + 116, 20, 18) && live_resolution_supported((uint8_t)((settings_pending.resolution_mode + 1) % 5))) {
-            settings_pending.resolution_mode = (settings_pending.resolution_mode + 1) % 5;
-        } else if (button_clicked(window->x + 20, window->y + 148, 12, 12)) {
+        } else if (button_clicked(window->x + 178, window->y + 116, 20, 18)) {
+            resolution_step(-1);
+        } else if (button_clicked(window->x + 346, window->y + 116, 20, 18)) {
+            resolution_step(1);
+        } else if (resolution_widescreen_applicable() &&
+                   button_clicked(window->x + 20, window->y + 148, 12, 12)) {
             settings_pending.widescreen = !settings_pending.widescreen;
+            resolution_snap_to_supported();
         }
     } else if (settings_tab == 1) {
         if (button_clicked(window->x + 170, window->y + 86, 20, 18)) {
             settings_pending.background_mode = (settings_pending.background_mode + 9) % 10;
         } else if (button_clicked(window->x + 358, window->y + 86, 20, 18)) {
             settings_pending.background_mode = (settings_pending.background_mode + 1) % 10;
+        /* Two values, so both arrows toggle: whatever the arm asked for, the
+         * other fit is the only thing it can select. */
+        } else if (button_clicked(window->x + 178, window->y + 116, 20, 18) ||
+                   button_clicked(window->x + 346, window->y + 116, 20, 18)) {
+            settings_pending.wallpaper_fit = !settings_pending.wallpaper_fit;
         }
     } else if (settings_tab == 2) {
         if (button_clicked(window->x + 20, window->y + 102, 12, 12)) {

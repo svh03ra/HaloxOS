@@ -137,15 +137,25 @@ static void update_present_maps(void) {
     }
 
     /*
-     * The desktop is a 640x480 logical canvas.  Keep it 1:1 when the active
-     * framebuffer is larger; this avoids advertising a larger VBE mode while
-     * merely magnifying the old desktop.  Only native low-resolution modes
-     * sample the canvas down to their real hardware dimensions.
+     * Re-pick the desktop canvas for this mode first (see the canvas note
+     * in kernel.c): on anything that can hold the base canvas natively the
+     * canvas BECOMES the mode, so the desktop fills the screen at 1:1 with
+     * the same taskbar, text and icon sizes instead of being magnified or
+     * letterboxed into a 640x480 picture. Only a mode smaller than the base
+     * canvas - a real low-resolution mode - samples the canvas down.
      */
-    present_content_width = fb.width < OS_WIDTH ? fb.width : OS_WIDTH;
-    present_content_height = fb.height < OS_HEIGHT ? fb.height : OS_HEIGHT;
+    update_canvas_for_framebuffer();
+
+    present_content_width = fb.width < (uint32_t)OS_WIDTH ? fb.width : (uint32_t)OS_WIDTH;
+    present_content_height = fb.height < (uint32_t)OS_HEIGHT ? fb.height : (uint32_t)OS_HEIGHT;
     present_offset_x = (fb.width - present_content_width) / 2u;
     present_offset_y = (fb.height - present_content_height) / 2u;
+
+    /* New content box (or new output) means the bands around it are no
+     * longer known to be black: any geometry presented since the last
+     * blanking may have painted into what is now margin. The next scanout
+     * repaints them - see the note on present_margins_dirty in kernel.c. */
+    present_margins_dirty = true;
 
     /* Elect the shadow plane this output format presents (see the comment
      * on present_index_plane_live in vga.c) and, when the election
@@ -182,15 +192,134 @@ static void update_present_maps(void) {
     }
 }
 
+/*
+ * The list the resolution row offers.
+ *
+ * On a machine that can really change its mode the answer is the firmware's
+ * own size list (see the vbe_size_list_* accessors), because that is what can
+ * actually be programmed: a card with 832x624 or 1152x864 in its list could
+ * never be asked for them while the row only knew the seven built-in entries,
+ * and a card offering few sizes had arrows that skipped over most of the
+ * table. Every other backend keeps the built-in 4:3 / widescreen columns.
+ */
+
+/* Which column a request really reads.  The built-in table has two, and the
+ * widescreen checkbox picks between them; a machine whose row is the
+ * firmware's own list has one run of sizes, where the flag is ignored (see
+ * vbe_size_list_length). */
+static bool resolution_column(bool widescreen) {
+    return widescreen;
+}
+
+/*
+ * Does the widescreen checkbox have anything to switch here?
+ *
+ * On the firmware's list it does not - that list is one ascending run of the
+ * sizes the card can really program, not two matching columns - so Settings
+ * draws the row as unavailable rather than offering a control that would
+ * change nothing.
+ */
+static bool resolution_widescreen_applicable(void) {
+    return !(video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available());
+}
+
+static int resolution_entry_count(bool widescreen) {
+    bool column = resolution_column(widescreen);
+
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available()) {
+        return vbe_size_list_length(column);
+    }
+    return VIDEO_MODE_COUNT;
+}
+
+static bool resolution_entry_at(bool widescreen, int index, VideoModeOption *out) {
+    bool column = resolution_column(widescreen);
+
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available()) {
+        return vbe_size_list_at(column, index, out);
+    }
+    if (index < 0 || index >= VIDEO_MODE_COUNT) {
+        return false;
+    }
+    *out = (column ? video_modes_wide : video_modes_4_3)[index];
+    return true;
+}
+
+/* The entry the resolution arrows are pointing at, in whichever column the
+ * widescreen checkbox selects. */
+static const VideoModeOption *resolution_option_for_settings(const SettingsState *state) {
+    static VideoModeOption entry;
+    int count = resolution_entry_count(state->widescreen);
+
+    if (count > 0 &&
+        resolution_entry_at(state->widescreen, state->resolution_mode % count, &entry)) {
+        return &entry;
+    }
+
+    /* Nothing to point at on this backend: the configured size, so the row
+     * still names the desktop that is on screen. */
+    entry.width = HALOXOS_CONFIG_SCREEN_WIDTH;
+    entry.height = HALOXOS_CONFIG_SCREEN_HEIGHT;
+    return &entry;
+}
+
+/*
+ * Point the resolution selection at the display the boot actually produced.
+ *
+ * The desktop fills the output natively, and GRUB falls down its gfxpayload
+ * list when a machine cannot do the first choice - so the mode on screen can
+ * differ from the configured one. Leaving the selection on the configured
+ * entry then opens Settings naming a size this machine is not showing, and on
+ * a fixed display nothing else is selectable either, so the row would be dead
+ * in both directions. Naming the size that is really there keeps the row
+ * honest and the arrows meaningful on the backends that can move.
+ *
+ * No entry matches a size the card rounded to its own granularity (BGA turns
+ * 1366x768 into 1360x768), in which case the configured selection is left
+ * alone: it is still an entry this machine can present.
+ */
+static void snap_settings_resolution_to_desktop(void) {
+    bool wide;
+    int index;
+
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available()) {
+        /* The row offers this machine's own list, so the selection has to be
+         * an entry of THAT list; a built-in index would name an unrelated
+         * size here. */
+        index = vbe_size_list_index_of((uint16_t)fb.width, (uint16_t)fb.height, &wide);
+        if (index < 0) {
+            return;
+        }
+    } else {
+        for (index = 0; index < VIDEO_MODE_COUNT; ++index) {
+            if (video_modes_4_3[index].width == fb.width &&
+                video_modes_4_3[index].height == fb.height) {
+                wide = false;
+                break;
+            }
+            if (video_modes_wide[index].width == fb.width &&
+                video_modes_wide[index].height == fb.height) {
+                wide = true;
+                break;
+            }
+        }
+        if (index == VIDEO_MODE_COUNT) {
+            return;
+        }
+    }
+
+    settings_applied.widescreen = wide;
+    settings_pending.widescreen = wide;
+    settings_applied.resolution_mode = (uint8_t)index;
+    settings_pending.resolution_mode = (uint8_t)index;
+}
+
 static uint16_t output_width_for_settings(const SettingsState *state) {
-    static const uint16_t four_three[] = {960, 640, 480, 320, 192};
-    static const uint16_t wide[] = {1280, 854, 640, 426, 256};
-    return (state->widescreen ? wide : four_three)[state->resolution_mode % 5];
+    return resolution_option_for_settings(state)->width;
 }
 
 static uint16_t output_height_for_settings(const SettingsState *state) {
-    static const uint16_t heights[] = {720, 480, 360, 240, 144};
-    return heights[state->resolution_mode % 5];
+    return resolution_option_for_settings(state)->height;
 }
 
 static uint8_t output_bpp_for_settings(const SettingsState *state) {
@@ -381,6 +510,12 @@ static bool init_vmware_svga_backend(void) {
         return false;
     }
 
+    /* The adapter answered, so a later failure means the DEVICE could not
+     * give a usable mode - which is what the fallback warning says. Without
+     * this the message also fired on machines that simply have no VMware
+     * adapter at all (every non-BGA boot reaches this path first now). */
+    vmware_svga.device_present = true;
+
     pci_enable_device(bus, slot, function);
 
     if (device_id == PCI_DEVICE_ID_VMWARE_SVGA) {
@@ -442,9 +577,9 @@ static bool init_vmware_svga_backend(void) {
     vmware_svga.fifo_ready = true;
 
     fb.address = (uint8_t *)(uintptr_t)vmware_svga.fb_start;
-    fb.width = OS_WIDTH;
-    fb.height = OS_HEIGHT;
-    fb.pitch = OS_WIDTH;
+    fb.width = OS_BASE_WIDTH;
+    fb.height = OS_BASE_HEIGHT;
+    fb.pitch = OS_BASE_WIDTH;
     fb.bpp = 8;
     set_default_framebuffer_format(fb.bpp);
     update_present_maps();
@@ -458,9 +593,72 @@ static bool detect_bga_backend(void) {
 }
 
 static bool detect_video_mode_switch(void) {
+    /*
+     * All of these can move the display: the register backends through their
+     * own devices, the classic VGA through its mode tables, and the
+     * bootloader framebuffer through the video BIOS - or, on a machine whose
+     * firmware cannot program modes at all, by re-sizing the desktop inside
+     * the mode GRUB set.
+     *
+     * The last one is deliberately answered WITHOUT asking the firmware: this
+     * runs in the boot, before the kernel has an interrupt table, and that is
+     * exactly where a real-mode BIOS call has nowhere to fault to - a machine
+     * that reset and beeped instead of booting.  The question waits for the
+     * resolution list (video_mode_switch_prepare below).
+     */
     return video_backend == VIDEO_BACKEND_BGA ||
            video_backend == VIDEO_BACKEND_VMWARE_SVGA ||
-           video_backend == VIDEO_BACKEND_VGA;
+           video_backend == VIDEO_BACKEND_VGA ||
+           video_backend == VIDEO_BACKEND_MULTIBOOT;
+}
+
+/*
+ * The one place the firmware is asked what it can program.  Called when
+ * Settings is opened, so the boot is over and the desktop is running by the
+ * time any of this happens.
+ *
+ * On a machine with a video BIOS the resolution row then becomes that
+ * firmware's own mode list and Apply programs real display modes; on a machine
+ * without one nothing changes and the row keeps the built-in sizes, which
+ * re-size the desktop inside the mode the bootloader set.  A firmware that
+ * will not answer costs the row, never the boot.
+ */
+static void video_mode_switch_prepare(void) {
+    if (video_backend != VIDEO_BACKEND_MULTIBOOT) {
+        return;
+    }
+
+    vbe_prepare();
+    video_mode_switch_available = detect_video_mode_switch();
+
+    if (vbe_mode_available()) {
+        /*
+         * The row now offers the firmware's list, so the selection has to name
+         * an entry of THAT list: an index from the built-in table would point
+         * at an unrelated size.
+         */
+        snap_settings_resolution_to_desktop();
+    } else {
+        serial_trace("INFO", "VBE: no firmware mode list; the resolution row keeps its built-in sizes");
+    }
+}
+
+/*
+ * The resolution row's source, as a value for Settings to print next to a
+ * plain label: the number of sizes when the firmware's list is what the row
+ * offers, and the reason it is not otherwise.  Terse on purpose - it is one
+ * field of a row, not a paragraph.
+ */
+static void video_mode_list_string(char *buffer, size_t max_len) {
+    size_t len = 0;
+
+    buffer[0] = '\0';
+    if (vbe_mode_available()) {
+        append_uint(buffer, &len, max_len, (uint32_t)vbe_size_count);
+        append_string(buffer, &len, max_len, " sizes");
+    } else {
+        append_string(buffer, &len, max_len, vbe_status_text());
+    }
 }
 
 static const char *video_backend_name(void) {
@@ -492,6 +690,129 @@ static void serial_trace_video_mode(const char *label) {
     serial_write_string(" backend=");
     serial_write_string(video_backend_name());
     serial_write_string("\n");
+}
+
+/*
+ * Geometry of the last mode this driver accepted, and the two device
+ * program/readback pairs the mode setter and the rollback share.
+ *
+ * The DISPI and SVGA registers are programmed BEFORE the readback is judged,
+ * so a mode the card cannot actually hold used to leave the card showing it
+ * while set_framebuffer_mode_raw reported failure: the caller only reverted
+ * the settings, and the desktop stayed stranded at whatever the card had
+ * been told. A 640x480 canvas presented into a 192x144 framebuffer was the
+ * visible result, and every later switch started from the broken geometry,
+ * so the screen could never be brought back to a usable resolution again.
+ *
+ * Keeping the last accepted mode lets a failed request put it back: the
+ * caller's revert then lands on a working screen instead of a dead one.
+ */
+static bool last_good_mode_valid = false;
+static uint16_t last_good_width = 0;
+static uint16_t last_good_height = 0;
+static uint16_t last_good_bpp = 0;
+
+static void remember_usable_mode(void) {
+    /*
+     * "Usable" means the present step can describe it, not "at least as big
+     * as the canvas": a mode below the 640x480 base is a real low-resolution
+     * output, and the desktop handles it by keeping its base canvas and
+     * sampling it down (see update_canvas_for_framebuffer). Refusing to
+     * remember those modes would leave a failed sub-base switch with nothing
+     * to roll back to.
+     */
+    if (fb.width == 0 || fb.height == 0 ||
+        fb.width > MAX_OUTPUT_WIDTH || fb.height > MAX_OUTPUT_HEIGHT || fb.bpp == 0) {
+        return;
+    }
+    last_good_mode_valid = true;
+    last_good_width = (uint16_t)fb.width;
+    last_good_height = (uint16_t)fb.height;
+    last_good_bpp = fb.bpp;
+}
+
+static void bga_program(uint16_t width, uint16_t height, uint16_t bpp) {
+    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    bga_write(VBE_DISPI_INDEX_XRES, width);
+    bga_write(VBE_DISPI_INDEX_YRES, height);
+    bga_write(VBE_DISPI_INDEX_BPP, bpp);
+    bga_write(VBE_DISPI_INDEX_BANK, 0);
+    bga_write(VBE_DISPI_INDEX_VIRT_WIDTH, width);
+    bga_write(VBE_DISPI_INDEX_VIRT_HEIGHT, height);
+    bga_write(VBE_DISPI_INDEX_X_OFFSET, 0);
+    bga_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_NOCLEARMEM);
+}
+
+static void bga_read_geometry(void) {
+    fb.width = bga_read(VBE_DISPI_INDEX_XRES);
+    fb.height = bga_read(VBE_DISPI_INDEX_YRES);
+    fb.bpp = (uint8_t)bga_read(VBE_DISPI_INDEX_BPP);
+    fb.pitch = fb.width * ((fb.bpp + 7u) / 8u);
+}
+
+static void vmware_program(uint16_t width, uint16_t height, uint16_t bpp) {
+    vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_DISABLE);
+    vmware_write_reg(SVGA_REG_WIDTH, width);
+    vmware_write_reg(SVGA_REG_HEIGHT, height);
+    vmware_write_reg(SVGA_REG_BITS_PER_PIXEL, bpp);
+}
+
+static void vmware_read_geometry(void) {
+    vmware_svga.fb_offset = vmware_read_reg(SVGA_REG_FB_OFFSET);
+    fb.pitch = vmware_read_reg(SVGA_REG_BYTES_PER_LINE);
+    fb.width = vmware_read_reg(SVGA_REG_WIDTH);
+    fb.height = vmware_read_reg(SVGA_REG_HEIGHT);
+    fb.bpp = (uint8_t)vmware_read_reg(SVGA_REG_BITS_PER_PIXEL);
+    fb.address = (uint8_t *)(uintptr_t)(vmware_svga.fb_start + vmware_svga.fb_offset);
+    vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_ENABLE);
+}
+
+/*
+ * Put the last accepted mode back on the card and re-derive the present maps
+ * for it. False means there was nothing to restore (or the device would not
+ * take it back), in which case the caller is no worse off than before.
+ */
+static bool restore_last_good_mode(void) {
+    if (!last_good_mode_valid) {
+        return false;
+    }
+
+    if (video_backend == VIDEO_BACKEND_BGA) {
+        bga_program(last_good_width, last_good_height, last_good_bpp);
+        bga_read_geometry();
+    } else if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+        vmware_program(last_good_width, last_good_height, last_good_bpp);
+        vmware_read_geometry();
+    } else if (video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available()) {
+        /*
+         * A card with no programmable registers is undone through the same
+         * video BIOS call that moved it: put the mode that was working back.
+         * Its own rollback covers the case where a set fails mid-flight; this
+         * is the recovery for a caller that refused the result afterwards.
+         */
+        if (!vbe_set_mode(last_good_width, last_good_height, (uint8_t)last_good_bpp)) {
+            return false;
+        }
+        boot_text_mode = false;
+        update_present_maps();
+        serial_trace_video_mode("Restored the last usable mode");
+        return true;
+    } else {
+        return false;
+    }
+
+    if (fb.width != last_good_width || fb.height != last_good_height) {
+        return false;
+    }
+
+    if (fb.bpp != (uint8_t)last_good_bpp) {
+        set_default_framebuffer_format(fb.bpp);
+    }
+    boot_text_mode = false;
+    update_present_maps();
+    serial_trace_video_mode("Restored the last usable mode");
+    return true;
 }
 
 static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t bpp) {
@@ -534,35 +855,42 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
             return false;
         }
 
-        vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_DISABLE);
-        vmware_write_reg(SVGA_REG_WIDTH, width);
-        vmware_write_reg(SVGA_REG_HEIGHT, height);
-        vmware_write_reg(SVGA_REG_BITS_PER_PIXEL, actual_bpp);
-        vmware_svga.fb_offset = vmware_read_reg(SVGA_REG_FB_OFFSET);
-        fb.pitch = vmware_read_reg(SVGA_REG_BYTES_PER_LINE);
-        fb.width = vmware_read_reg(SVGA_REG_WIDTH);
-        fb.height = vmware_read_reg(SVGA_REG_HEIGHT);
-        fb.bpp = (uint8_t)vmware_read_reg(SVGA_REG_BITS_PER_PIXEL);
-        fb.address = (uint8_t *)(uintptr_t)(vmware_svga.fb_start + vmware_svga.fb_offset);
-        vmware_write_reg(SVGA_REG_ENABLE, SVGA_REG_ENABLE_ENABLE);
+        vmware_program(width, height, actual_bpp);
+        vmware_read_geometry();
 
-        if (fb.width != width || fb.height != height || fb.bpp != actual_bpp) {
+        /* Same rule as the BGA path below: the device has already been
+         * reprogrammed by now, so a strict comparison here could only leave
+         * the guest presenting a geometry its own maps no longer describe.
+         * Adopt the readback whenever it is a usable mode - the only unusable
+         * answers are an empty geometry and one past the output cap, because
+         * a mode BELOW the base canvas is a legitimate low-resolution output
+         * the present step samples the desktop down into. */
+        if (fb.width == 0 || fb.height == 0 ||
+            fb.width > MAX_OUTPUT_WIDTH || fb.height > MAX_OUTPUT_HEIGHT) {
+            restore_last_good_mode();
             return false;
+        }
+
+        if (fb.bpp != actual_bpp) {
+            set_default_framebuffer_format(fb.bpp);
         }
 
         boot_text_mode = false;
         vga_clear_native_text_flag();
         update_present_maps();
+        remember_usable_mode();
         return true;
     }
 
     if (video_backend == VIDEO_BACKEND_VGA) {
         if (vga_graphics_active && fb.width == width && fb.height == height && fb.bpp == bpp) {
             boot_text_mode = false;
+            remember_usable_mode();
             return true;
         }
         if (vga_set_graphics_mode(width, height, bpp)) {
             boot_text_mode = false;
+            remember_usable_mode();
             return true;
         }
         /*
@@ -573,21 +901,52 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
         if (vga_set_graphics_mode(640, 480, 4)) {
             serial_trace("WARNING", "classic VGA: using 640x480x16 native fallback");
             boot_text_mode = false;
+            remember_usable_mode();
             return true;
         }
         if (vga_set_graphics_mode(320, 200, 8)) {
             serial_trace("WARNING", "classic VGA: using 320x200x256 fallback");
             boot_text_mode = false;
+            remember_usable_mode();
             return true;
         }
         return false;
     }
 
     if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
+        /*
+         * Program the mode through the video BIOS when there is one to talk
+         * to.  This is the difference between "the desktop got smaller inside
+         * the mode GRUB set" and the display really changing, which is what
+         * the resolution list promises on every other backend.
+         */
+        if (vbe_set_mode(width, height, bpp)) {
+            boot_text_mode = false;
+            vga_clear_native_text_flag();
+            update_present_maps();
+            remember_usable_mode();
+            return true;
+        }
+
+        if (vbe_mode_available()) {
+            /*
+             * The card has a mode list and this size is not on it.  Refusing
+             * is the honest answer: falling through to the adopt path would
+             * re-size the desktop inside the current mode, which leaves the
+             * screen with a border around a smaller desktop instead of
+             * showing the resolution that was asked for.
+             */
+            return false;
+        }
+
         (void)width;
         (void)height;
         (void)bpp;
-        return fb.address != NULL && fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT;
+        if (fb.address != NULL && fb.width >= OS_BASE_WIDTH && fb.height >= OS_BASE_HEIGHT) {
+            remember_usable_mode();
+            return true;
+        }
+        return false;
     }
 
     if (video_backend == VIDEO_BACKEND_NONE) {
@@ -598,16 +957,7 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
         return false;
     }
 
-    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
-    bga_write(VBE_DISPI_INDEX_XRES, width);
-    bga_write(VBE_DISPI_INDEX_YRES, height);
-    bga_write(VBE_DISPI_INDEX_BPP, bpp);
-    bga_write(VBE_DISPI_INDEX_BANK, 0);
-    bga_write(VBE_DISPI_INDEX_VIRT_WIDTH, width);
-    bga_write(VBE_DISPI_INDEX_VIRT_HEIGHT, height);
-    bga_write(VBE_DISPI_INDEX_X_OFFSET, 0);
-    bga_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
-    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_NOCLEARMEM);
+    bga_program(width, height, bpp);
 
     /* Leaving the boot text menu through a real DISPI graphics mode:
      * the classic VGA text flag is stale now (enter_boot_text_mode set
@@ -616,16 +966,48 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
     boot_text_mode = false;
     vga_clear_native_text_flag();
 
-    fb.width = bga_read(VBE_DISPI_INDEX_XRES);
-    fb.height = bga_read(VBE_DISPI_INDEX_YRES);
-    fb.bpp = (uint8_t)bga_read(VBE_DISPI_INDEX_BPP);
-    fb.pitch = fb.width * ((fb.bpp + 7u) / 8u);
+    bga_read_geometry();
 
-    if (fb.width != width || fb.height != height || fb.bpp != bpp) {
+    /*
+     * Adopt what the card actually programmed instead of insisting on the
+     * request byte for byte. BGA rounds to its own granularity - 1366 comes
+     * back as 1360 - and the old strict comparison returned "failed" AFTER
+     * the registers had already been written, with the present maps still
+     * describing the previous geometry: the desktop was left as a black
+     * screen because nothing matched the new mode any more.
+     *
+     * The readback is therefore the truth: fb is what the card reports, the
+     * canvas follows it (update_present_maps -> update_canvas_for_framebuffer)
+     * and the desktop fills the geometry that is really there. Only an
+     * unusable readback - an empty geometry, something past the output cap,
+     * or a pitch too small for a row - still fails.
+     *
+     * The base-canvas floor specifically must NOT be part of that judgement:
+     * 192x144 / 320x240 / 480x360 are the low-resolution half of the mode
+     * table, the canvas stays at 640x480 for them and the present maps sample
+     * it down, which is exactly how the pre-canvas build presented them.
+     * Judging them unusable made the resolution arrows skip the bottom of
+     * every column.
+     */
+    if (fb.width == 0 || fb.height == 0 ||
+        fb.width > MAX_OUTPUT_WIDTH || fb.height > MAX_OUTPUT_HEIGHT ||
+        fb.pitch < fb.width * ((fb.bpp + 7u) / 8u)) {
+        /* The card would not take the requested geometry. Put back the mode
+         * it was showing: the DISPI registers are already pointing at the
+         * refused size, and leaving them there stranded the desktop on a
+         * screen nothing could undo. */
+        restore_last_good_mode();
         return false;
     }
 
+    if (fb.bpp != bpp) {
+        /* The depth is not the one that was asked for: re-derive the pixel
+         * format the present step decodes with before showing anything. */
+        set_default_framebuffer_format(fb.bpp);
+    }
+
     update_present_maps();
+    remember_usable_mode();
     return true;
 }
 
@@ -657,14 +1039,47 @@ static void enter_boot_text_mode(void) {
 }
 
 static void enter_main_graphics_mode(void) {
-    if (!set_framebuffer_mode_raw(HALOXOS_CONFIG_SCREEN_WIDTH,
-                                  HALOXOS_CONFIG_SCREEN_HEIGHT,
-                                  output_bpp_for_settings(&settings_applied))) {
+    bool switched = set_framebuffer_mode_raw(HALOXOS_CONFIG_SCREEN_WIDTH,
+                                             HALOXOS_CONFIG_SCREEN_HEIGHT,
+                                             output_bpp_for_settings(&settings_applied));
+
+    if (switched) {
+        boot_text_mode = false;
+        program_vga_palette();
+    } else {
         serial_trace("ERROR", "graphics mode unavailable");
         serial_trace_video_mode("Graphics mode unavailable state");
-        return;
     }
-    boot_text_mode = false;
-    program_vga_palette();
-    serial_trace_video_mode("Graphics mode entered");
+
+    /*
+     * The desktop is the mode that is really being presented: the whole screen
+     * is desktop, natively at 1:1, with nothing left over.
+     *
+     * That is also what keeps the two kinds of machine in step. Where a mode
+     * can be programmed the desktop follows the configured mode, and on a
+     * bootloader framebuffer - real hardware, or a VM without the BGA/SVGA
+     * register interfaces - the mode GRUB set is the display, so following it
+     * means the screen is exactly the resolution that was asked for: no
+     * letterbox border, no scaling, no second size to keep in sync.
+     *
+     * `switched` cannot be used to tell those apart (adopting a handed-over
+     * framebuffer reports success without programming anything), but it does
+     * not have to be: the readback in fb is the truth in both cases.
+     *
+     * The maps are refreshed explicitly as well, because set_desktop_size()
+     * returns early when the request has not changed and at boot the request
+     * already is the base canvas - the bootloader-framebuffer path would
+     * otherwise keep the maps derived for the geometry of the boot menu.
+     */
+    set_desktop_size((int)fb.width, (int)fb.height);
+    update_present_maps();
+
+    /* The settings app speaks about the desktop that is on screen, so its
+     * resolution list starts from the size this boot really produced (see
+     * snap_settings_resolution_to_desktop). */
+    snap_settings_resolution_to_desktop();
+
+    if (switched) {
+        serial_trace_video_mode("Graphics mode entered");
+    }
 }

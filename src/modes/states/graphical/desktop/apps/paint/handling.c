@@ -67,6 +67,14 @@ static void paint_handle_mouse(void) {
     int palette_y = window->y + 37;
     uint8_t colors[8] = {color_black, color_white, color_red, color_orange, color_yellow, color_green, color_blue, color_pink};
 
+    /* This click already activated Paint inside the window hit pass (or
+     * Paint was already active). React only when it landed inside this
+     * window so a click on another window/desktop can never also press
+     * these controls through the overlap. */
+    if (!point_in_rect(mouse.x, mouse.y, window->x, window->y, window->w, window->h)) {
+        return;
+    }
+
     int tool_x = window->x + 6;
     for (int i = 0; i < 4; ++i) {
         if (button_clicked(tool_x, window->y + 20, 44, 14)) {

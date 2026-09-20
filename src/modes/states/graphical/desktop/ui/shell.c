@@ -272,17 +272,37 @@ static void render_desktop_icon_menu(void) {
     draw_rect(x, y, 120, 75, color_black);
 }
 
+/*
+ * The start menu's app submenu: one row, sized from the label it shows.
+ *
+ * The size used to be the literal 154x28, repeated in four places - this
+ * renderer, the placement clamp in start_menu.c, the pointer test in
+ * cursor.c and the click test in icon_actions.c.  The label is 19 characters
+ * and the font is 8 pixels wide, so it needs 152 pixels: the text fitted with
+ * exactly one pixel to spare and its last letter sat against the border,
+ * which is what made the row look off.  Deriving the size from the text keeps
+ * the label, the box and every hit test in agreement, and leaves the label
+ * room to be reworded.
+ */
+#define START_APP_MENU_LABEL "Pin to Desktop Icon"
+#define START_APP_MENU_PAD   16   /* eight pixels either side of the text */
+#define START_APP_MENU_H     28
+
+static int start_app_menu_width(void) {
+    return text_pixel_width(START_APP_MENU_LABEL) + START_APP_MENU_PAD;
+}
+
 static void render_start_app_menu(void) {
     if (!start_app_menu_open) {
         return;
     }
     int x = start_app_menu_x;
     int y = start_app_menu_y;
-    int w = 154;
-    int h = 28;
+    int w = start_app_menu_width();
+    int h = START_APP_MENU_H;
     bool hover = point_in_rect(mouse.x, mouse.y, x, y, w, h);
     bool pressed = hover && mouse.left;
 
-    draw_interactive_row(x, y, w, h, "Pin to Desktop Icon", color_black, hover, pressed, 0);
+    draw_interactive_row(x, y, w, h, START_APP_MENU_LABEL, color_black, hover, pressed, 0);
     draw_rect(x, y, w, h, color_black);
 }

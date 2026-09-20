@@ -276,6 +276,20 @@ static int crash_symbol_lookup(uint32_t addr, const char **name,
 }
 
 /*
+ * The call trace: which functions led to the fault.
+ *
+ * Everything below is debug-build only and exists as one block - the walk,
+ * its rendering, its serial dump and its on-screen viewer.  It is guarded as
+ * a block because a release build must still COMPILE: these functions need
+ * CRASH_TRACE_MAX and the two forward declarations above, both of which live
+ * inside the same guard, and the only caller (the crash screen's trace view)
+ * is behind it as well.  Without the guard a release build failed here with
+ * "CRASH_TRACE_MAX undeclared" and implicit declarations of the crash-screen
+ * helpers.  A release build simply shows no call trace.
+ */
+#if CRASH_TRACE_ENABLED
+
+/*
  * EBP chain walk. Requires -fno-omit-frame-pointer (debug builds add it
  * in the Makefile). Every frame is: [ebp] = saved ebp, [ebp+4] = return
  * eip. Stops on obviously invalid frame pointers instead of faulting
@@ -330,30 +344,22 @@ static void crash_render_trace_lines(int x, int y, const uint32_t *frames,
         size_t len = 0;
 
         line[0] = '\0';
-        copy_string(line, "[0x", sizeof(line));
-        len = strlen_local(line);
+        append_string(line, &len, sizeof(line), "[0x");
         bsod_append_hex32(line, &len, sizeof(line), frames[i]);
-        copy_string(line + len, "] ", sizeof(line) - len);
-        len = strlen_local(line);
+        append_string(line, &len, sizeof(line), "] ");
 
         if (crash_symbol_lookup(frames[i], &name, &file, &line_no, &offset)) {
             if (calltrace_mode) {
-                copy_string(line + len, name, sizeof(line) - len);
-                len = strlen_local(line);
-                copy_string(line + len, "+0x", sizeof(line) - len);
-                len = strlen_local(line);
+                append_string(line, &len, sizeof(line), name);
+                append_string(line, &len, sizeof(line), "+0x");
                 bsod_append_hex32(line, &len, sizeof(line), offset);
             } else {
                 /* full extended source path: what does not fit the
                  * 640px screen is reached with Ctrl+Left/Right */
-                copy_string(line + len, name, sizeof(line) - len);
-                len = strlen_local(line);
-                copy_string(line + len, " at ", sizeof(line) - len);
-                len = strlen_local(line);
-                copy_string(line + len, file, sizeof(line) - len);
-                len = strlen_local(line);
-                copy_string(line + len, "; line ", sizeof(line) - len);
-                len = strlen_local(line);
+                append_string(line, &len, sizeof(line), name);
+                append_string(line, &len, sizeof(line), " at ");
+                append_string(line, &len, sizeof(line), file);
+                append_string(line, &len, sizeof(line), "; line ");
                 /* decimal line number */
                 {
                     char digits[12];
@@ -374,7 +380,7 @@ static void crash_render_trace_lines(int x, int y, const uint32_t *frames,
                 }
             }
         } else {
-            copy_string(line + len, "unknown", sizeof(line) - len);
+            append_string(line, &len, sizeof(line), "unknown");
         }
 
         /* horizontal window into the row text (Ctrl+Left/Right) */
@@ -501,15 +507,12 @@ static void crash_render_trace_view(int x, int y_start, const CpuExceptionFrame 
             char hint[64];
             size_t hlen = 0;
 
-            hint[0] = '\0';
-            copy_string(hint, "< > page  ^ v rows  Ctrl+< > scroll", sizeof(hint));
-            hlen = strlen_local(hint);
+            append_string(hint, &hlen, sizeof(hint), "< > page  ^ v rows  Ctrl+< > scroll");
             if (hscroll > 0) {
-                copy_string(hint + hlen, " <<", sizeof(hint) - hlen);
-                hlen = strlen_local(hint);
+                append_string(hint, &hlen, sizeof(hint), " <<");
             }
             if (hscroll < max_line_len - visible_chars) {
-                copy_string(hint + hlen, " >>", sizeof(hint) - hlen);
+                append_string(hint, &hlen, sizeof(hint), " >>");
             }
             draw_text(x, OS_HEIGHT - 26, hint, color_gray_light, color_crash_blue, false);
         }
@@ -519,9 +522,7 @@ static void crash_render_trace_view(int x, int y_start, const CpuExceptionFrame 
             char info[48];
             size_t len = 0;
 
-            info[0] = '\0';
-            copy_string(info, "rows ", sizeof(info));
-            len = strlen_local(info);
+            append_string(info, &len, sizeof(info), "rows ");
             {
                 char digits[8];
                 int dn = 0;
@@ -536,8 +537,7 @@ static void crash_render_trace_view(int x, int y_start, const CpuExceptionFrame 
                 }
                 info[len] = '\0';
             }
-            copy_string(info + len, " of ", sizeof(info) - len);
-            len = strlen_local(info);
+            append_string(info, &len, sizeof(info), " of ");
             {
                 char digits[8];
                 int dn = 0;
@@ -632,6 +632,8 @@ static void crash_render_trace_view(int x, int y_start, const CpuExceptionFrame 
         }
     }
 }
+
+#endif /* CRASH_TRACE_ENABLED */
 
 static const char *system_state_name(void) {
     switch (system_state) {
@@ -771,6 +773,20 @@ static void bsod_append_hex32(char *buffer, size_t *len, size_t max_len, uint32_
 }
 
 /*
+ * One "LABEL=XXXXXXXX" field on a diagnostic line.
+ *
+ * The register dump is a dozen of these in a row, so writing the pair of
+ * calls out at every site is what made that block long enough to hide a
+ * mistake in it. The label carries its own leading separator where the
+ * field is not first, which is also what the calls did by hand.
+ */
+static void bsod_append_field(char *buffer, size_t *len, size_t max_len,
+                              const char *label, uint32_t value) {
+    append_string(buffer, len, max_len, label);
+    bsod_append_hex32(buffer, len, max_len, value);
+}
+
+/*
  * Classic BSOD screen: solid blue background, white text. Only drawn when
  * the system crashed while a graphical framebuffer is active; the full
  * register dump always goes to the serial debugger trace regardless.
@@ -814,9 +830,8 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
 
     line[0] = '\0';
     len = 0;
-    copy_string(line, "CODE: ", sizeof(line));
-    len = strlen_local(line);
-    copy_string(line + len, name, sizeof(line) - len);
+    append_string(line, &len, sizeof(line), "CODE: ");
+    append_string(line, &len, sizeof(line), name);
     draw_text(text_x, y, line, color_white, color_crash_blue, false);
     y += 30;
 
@@ -834,12 +849,10 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
 
     line[0] = '\0';
     len = 0;
-    copy_string(line, "*** STATUS: Error=", sizeof(line));
-    len = strlen_local(line);
-    bsod_append_hex32(line, &len, sizeof(line), frame != NULL ? frame->error_code : 0);
-    copy_string(line + len, " Vector=", sizeof(line) - len);
-    len = strlen_local(line);
-    bsod_append_hex32(line, &len, sizeof(line), frame != NULL ? frame->vector : 0);
+    bsod_append_field(line, &len, sizeof(line), "*** STATUS: Error=",
+                      frame != NULL ? frame->error_code : 0);
+    bsod_append_field(line, &len, sizeof(line), " Vector=",
+                      frame != NULL ? frame->vector : 0);
     draw_text(text_x, y, line, color_white, color_crash_blue, false);
     y += 20;
 
@@ -849,63 +862,37 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
 
         if (frame != NULL) {
             line[0] = '\0';
-            copy_string(line, "EAX=", sizeof(line));
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->eax);
-            copy_string(line + len, " EBX=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->ebx);
-            copy_string(line + len, " ECX=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->ecx);
-            copy_string(line + len, " EDX=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->edx);
+            len = 0;
+            bsod_append_field(line, &len, sizeof(line), "EAX=", frame->eax);
+            bsod_append_field(line, &len, sizeof(line), " EBX=", frame->ebx);
+            bsod_append_field(line, &len, sizeof(line), " ECX=", frame->ecx);
+            bsod_append_field(line, &len, sizeof(line), " EDX=", frame->edx);
             draw_text(text_x, y, line, color_white, color_crash_blue, false);
             y += 10;
 
             line[0] = '\0';
-            copy_string(line, "ESI=", sizeof(line));
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->esi);
-            copy_string(line + len, " EDI=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->edi);
-            copy_string(line + len, " EBP=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->ebp);
-            copy_string(line + len, " ESP=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->esp);
+            len = 0;
+            bsod_append_field(line, &len, sizeof(line), "ESI=", frame->esi);
+            bsod_append_field(line, &len, sizeof(line), " EDI=", frame->edi);
+            bsod_append_field(line, &len, sizeof(line), " EBP=", frame->ebp);
+            bsod_append_field(line, &len, sizeof(line), " ESP=", frame->esp);
             draw_text(text_x, y, line, color_white, color_crash_blue, false);
             y += 10;
 
             line[0] = '\0';
-            copy_string(line, "EIP=", sizeof(line));
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->eip);
-            copy_string(line + len, " CS=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->cs);
-            copy_string(line + len, " DS=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->ds);
-            copy_string(line + len, " ES=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->es);
+            len = 0;
+            bsod_append_field(line, &len, sizeof(line), "EIP=", frame->eip);
+            bsod_append_field(line, &len, sizeof(line), " CS=", frame->cs);
+            bsod_append_field(line, &len, sizeof(line), " DS=", frame->ds);
+            bsod_append_field(line, &len, sizeof(line), " ES=", frame->es);
             draw_text(text_x, y, line, color_white, color_crash_blue, false);
             y += 10;
 
             line[0] = '\0';
-            copy_string(line, "FS=", sizeof(line));
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->fs);
-            copy_string(line + len, " GS=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->gs);
-            copy_string(line + len, " EFLAGS=", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), frame->eflags);
+            len = 0;
+            bsod_append_field(line, &len, sizeof(line), "FS=", frame->fs);
+            bsod_append_field(line, &len, sizeof(line), " GS=", frame->gs);
+            bsod_append_field(line, &len, sizeof(line), " EFLAGS=", frame->eflags);
             draw_text(text_x, y, line, color_white, color_crash_blue, false);
             y += 20;
         }
@@ -946,12 +933,9 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
             }
 
             if (column > 0) {
-                copy_string(line + len, " ", sizeof(line) - len);
-                ++len;
+                append_string(line, &len, sizeof(line), " ");
             }
-            copy_string(line + len, "0x", sizeof(line) - len);
-            len = strlen_local(line);
-            bsod_append_hex32(line, &len, sizeof(line), (uint32_t)entry->base_addr);
+            bsod_append_field(line, &len, sizeof(line), "0x", (uint32_t)entry->base_addr);
             ++column;
             ++entry_count;
 

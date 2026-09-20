@@ -39,7 +39,7 @@ static void init_state(void) {
     memset_local(gpu_usage_history, 0, sizeof(gpu_usage_history));
     memset_local(ram_usage_history, 0, sizeof(ram_usage_history));
     memset_local(disk_usage_history, 0, sizeof(disk_usage_history));
-    last_desktop_redraw_input_tick = 0xFFFFFFFFu;
+    ui_input_dirty = true;   /* nothing painted yet: force the first frame */
     last_desktop_redraw_second = 0xFFFFFFFFu;
     last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
     last_desktop_redraw_terminal_blink = 0xFFFFFFFFu;
@@ -164,7 +164,7 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     serial_trace_disk_details();
     /* WAD multiboot module scan: GRUB loaded /boot/doom.wadmodule into
      * RAM via BIOS, so the game data travels with the kernel on any
-     * boot media - USB/Ventoy, CD, or disk. */
+     * boot media - USB stick, CD, or disk. */
     if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & (1u << 3)) != 0 && mbi->mods_count > 0) {
         const uint32_t *mods = (const uint32_t *)(uintptr_t)mbi->mods_addr;
         for (uint32_t i = 0; i < mbi->mods_count; ++i) {
@@ -226,6 +226,7 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
 
     for (;;) {
         uint32_t frame_tick = timer_ticks;
+
         uint32_t perf_phase = timer_ticks / PERF_UPDATE_TICKS;
         if (cpu_has_tsc) {
             frame_cycle_start = rdtsc_read();
@@ -241,6 +242,13 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
                  * pointer that glides and one that steps. */
                 desktop_cursor_only_frame();
             } else {
+                /* draw_hover_fade_rect sets ui_hover_fade_active while a
+                 * button fade is mid-animation; clear it here so the flag
+                 * always describes the frame that is about to be painted
+                 * (see desktop_dirty_without_input in redraw.c). The next
+                 * gate check then sees true only if that frame painted a
+                 * partial dither - i.e. the fade needs more frames. */
+                ui_hover_fade_active = false;
                 draw_everything();
                 present();
             }

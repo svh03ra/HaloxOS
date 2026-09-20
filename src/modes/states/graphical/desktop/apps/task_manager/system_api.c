@@ -103,13 +103,85 @@ static uint8_t gpu_palette_entry_color(uint32_t index) {
                          (uint8_t)((index << 3) & 0xF8u));
 }
 
+/*
+ * Palette scrolling is row-aligned.
+ *
+ * A row of the swatch grid is GPU_GRID_COLS consecutive palettes, so every
+ * scroll offset is a multiple of it - otherwise the strip reflows and the
+ * on-screen rows no longer line up with palette rows (a step of one row
+ * shifts every swatch sideways instead of downward).
+ *
+ * The furthest offset is the top row that still keeps the final palette row
+ * on screen, which is NOT total - GPU_GRID_PAGE_ENTRIES: 65536 - 288 = 65248
+ * and 65248 % 24 == 16. That one-off-by-a-partial-row caused both reported
+ * symptoms:
+ *
+ *   - dragging the thumb to the bottom snapped to 65232, so the last 16
+ *     palettes (65520..65535) were unreachable - the view "does not come in
+ *     the very last palette" - and the page counter stuck at 227/228;
+ *   - the down arrow clamped to 65248, i.e. 16 entries past a row boundary,
+ *     so instead of scrolling one row the whole strip slid two thirds of a
+ *     row sideways. 65256 (= 2719 rows) is the smallest row-aligned offset
+ *     that shows entry 65535, so the tail row ends with a few no-entry cells
+ *     - which is the honest picture: the palette ends mid-row.
+ */
 static uint32_t gpu_palette_max_scroll(void) {
     uint32_t total = gpu_palette_entry_count();
 
     if (total <= GPU_GRID_PAGE_ENTRIES) {
         return 0;
     }
-    return total - GPU_GRID_PAGE_ENTRIES;
+    return ((total - 1u) / GPU_GRID_COLS + 1u - GPU_GRID_ROWS) * GPU_GRID_COLS;
+}
+
+/* Snap any offset to a whole row and keep it inside the palette. */
+static uint32_t gpu_palette_clamp_scroll(uint32_t scroll) {
+    uint32_t max_scroll = gpu_palette_max_scroll();
+
+    scroll -= scroll % GPU_GRID_COLS;
+    return scroll > max_scroll ? max_scroll : scroll;
+}
+
+/* Move the view by whole rows; negative scrolls up, and the ends clamp. */
+static void gpu_palette_scroll_rows(int rows) {
+    uint32_t step = (uint32_t)(rows < 0 ? -rows : rows) * GPU_GRID_COLS;
+
+    if (rows < 0) {
+        gpu_palette_scroll = step > gpu_palette_scroll ? 0u : gpu_palette_scroll - step;
+    } else {
+        gpu_palette_scroll = gpu_palette_clamp_scroll(gpu_palette_scroll + step);
+    }
+}
+
+static uint32_t gpu_palette_page_count(void) {
+    uint32_t total = gpu_palette_entry_count();
+
+    return (total + GPU_GRID_PAGE_ENTRIES - 1u) / GPU_GRID_PAGE_ENTRIES;
+}
+
+/*
+ * The page holding the last entry on screen.
+ *
+ * 65536 is not a multiple of the 288-entry page (227 pages plus 160
+ * entries), so the final page is short. A counter derived from the TOP row
+ * therefore stops one page early - it read 227/228 even scrolled all the way
+ * down; counting from the bottom row reaches page_count/page_count at the
+ * end.
+ */
+static uint32_t gpu_palette_visible_page(void) {
+    uint32_t total = gpu_palette_entry_count();
+    uint32_t last_visible = gpu_palette_scroll + GPU_GRID_PAGE_ENTRIES - 1u;
+    uint32_t page_count = gpu_palette_page_count();
+    uint32_t page;
+
+    if (page_count == 0) {
+        return 0;
+    }
+    if (last_visible >= total) {
+        last_visible = total - 1u;
+    }
+    page = (last_visible / GPU_GRID_PAGE_ENTRIES) + 1u;
+    return page > page_count ? page_count : page;
 }
 
 static void gpu_palette_scroll_geometry(int track_y,

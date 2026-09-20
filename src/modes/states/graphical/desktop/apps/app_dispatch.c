@@ -26,10 +26,14 @@ static void render_app_window(AppId app) {
         debug_bp_catch(app, fps_frames_total - debug_bp_frame_base);
     }
 
+    /* Only the topmost window under the pointer reacts to it: this window's
+     * buttons, rows and close box must not light the hand cursor or show a
+     * pressed fill "through" the window that is painted above them. */
+    ui_window_interactive = desktop_window_owns_pointer(window);
     draw_window_chrome(window);
 
     /* Clip every app's drawing to this window's client area so scenes
-     * (Title Run!, firecracker, 3D box) can never bleed outside. */
+     * (firecracker, 3D box) can never bleed outside. */
     set_window_clip(window->x + 1, window->y + 19, window->w - 2, window->h - 20);
 
     switch (app) {
@@ -47,9 +51,9 @@ static void render_app_window(AppId app) {
         case APP_DEMO_CENTER: render_demo_center(window); break;
         case APP_3D_BOX: render_3d_box(window); break;
         case APP_FIRECRACKER: render_firecracker(window); break;
-        case APP_RUN_GAME: render_run(window); break;
         case APP_DOOM: render_doom(window); break;
     }
 
     clear_window_clip();
+    ui_window_interactive = true;
 }

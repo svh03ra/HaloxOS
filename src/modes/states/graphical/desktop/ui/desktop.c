@@ -5,7 +5,17 @@
 
 static void render_desktop(void) {
     cursor_hand_hint = false;
+    /* Fresh assumption for this frame's widgets; render_app_window narrows
+     * it to the window that actually owns the pointer (see widgets.c). */
+    ui_window_interactive = true;
+    /* Rebuild the pointer-reactive rectangle list for this frame (see
+     * HOVER_RECT_MAX in kernel.c). */
+    hover_widget_reset();
     draw_desktop_background();
+    /* The overlay belongs to the wallpaper layer, not to the icons: drawn
+     * after them, its dots speckled icon art and labels. Windows still
+     * paint over it, so the lattice only shows on bare desktop. */
+    draw_desktop_grid_overlay();
     render_desktop_icons();
     if (desktop_select_dragging) {
         int rx = desktop_select_x1 < desktop_select_x2 ? desktop_select_x1 : desktop_select_x2;
@@ -13,16 +23,24 @@ static void render_desktop(void) {
         int rw = (desktop_select_x1 > desktop_select_x2 ? desktop_select_x1 : desktop_select_x2) - rx;
         int rh = (desktop_select_y1 > desktop_select_y2 ? desktop_select_y1 : desktop_select_y2) - ry;
         if (rw > 0 && rh > 0) {
+            /* Two interlaced outlines, 1px apart: the black stays visible
+             * on white backgrounds and the white on black/blue ones, so
+             * the band can never blend into the wallpaper (it was plain
+             * white before, invisible on the Solid White theme). */
+            draw_rect(rx - 1, ry - 1, rw + 2, rh + 2, color_black);
             draw_rect(rx, ry, rw, rh, color_white);
         }
     }
     render_taskbar();
+    /* Anchored to the canvas corner, not to 640x480 (see the canvas note
+     * in kernel.c): at the base canvas these are the original 438/430,
+     * 438/440, 480/430 and 480/440 positions. */
 #if HALOXOS_CONFIG_DEV_MODE
-    draw_text(438, 430, "HaloxOS Version 1.1D", color_black, color_gray_light, true);
-    draw_text(438, 440, "For Testing purposes only", color_black, color_gray_light, true);
+    draw_text(OS_WIDTH - 202, OS_HEIGHT - 50, "HaloxOS Version 1.1F", color_black, color_gray_light, true);
+    draw_text(OS_WIDTH - 202, OS_HEIGHT - 40, "For Testing purposes only", color_black, color_gray_light, true);
 #else
-    draw_text(480, 430, "HaloxOS Version 1.1", color_black, color_gray_light, true);
-    draw_text(480, 440, "Stable Copy.", color_black, color_gray_light, true);
+    draw_text(OS_WIDTH - 160, OS_HEIGHT - 50, "HaloxOS Version 1.1", color_black, color_gray_light, true);
+    draw_text(OS_WIDTH - 160, OS_HEIGHT - 40, "Stable Copy.", color_black, color_gray_light, true);
 #endif
     if (settings_applied.window_trails) {
         for (int i = 0; i < TRAIL_COUNT; ++i) {
@@ -56,13 +74,18 @@ static void render_desktop(void) {
     }
     for (int i = 0; i < test_window_count; ++i) {
         if (i == active_test_window || !test_windows[i].open) continue;
+        /* Same pointer-ownership rule as the app windows: only the topmost
+         * test window under the pointer shows hover/press state. */
+        ui_window_interactive = desktop_window_owns_pointer(&test_windows[i]);
         draw_window_chrome(&test_windows[i]);
         draw_text_center(test_windows[i].x + test_windows[i].w / 2, test_windows[i].y + test_windows[i].h / 2 - 4, "This is a test!", color_black, color_gray_light, true);
     }
     if (active_test_window >= 0 && active_test_window < test_window_count && test_windows[active_test_window].open) {
+        ui_window_interactive = desktop_window_owns_pointer(&test_windows[active_test_window]);
         draw_window_chrome(&test_windows[active_test_window]);
         draw_text_center(test_windows[active_test_window].x + test_windows[active_test_window].w / 2, test_windows[active_test_window].y + test_windows[active_test_window].h / 2 - 4, "This is a test!", color_black, color_gray_light, true);
     }
+    ui_window_interactive = true;
     render_power_overlay();
     render_start_menu();
     render_context_menu();
@@ -71,9 +94,9 @@ static void render_desktop(void) {
     render_taskbar_menu();
 
     if (cpu_halted_overlay) {
-        fill_rect(160, 180, 320, 80, color_gray_light);
-        draw_rect(160, 180, 320, 80, color_black);
-        draw_text_center(OS_WIDTH / 2, 215, "Halting CPU... *boom* DONE!", color_black, color_gray_light, true);
+        fill_rect(OS_WIDTH / 2 - 160, OS_HEIGHT / 2 - 60, 320, 80, color_gray_light);
+        draw_rect(OS_WIDTH / 2 - 160, OS_HEIGHT / 2 - 60, 320, 80, color_black);
+        draw_text_center(OS_WIDTH / 2, OS_HEIGHT / 2 - 25, "Halting CPU... *boom* DONE!", color_black, color_gray_light, true);
     }
 
     if (window_fade_active) {
@@ -93,5 +116,11 @@ static void render_desktop(void) {
     render_debug_overlay();
     if (!debug_overlay_open) {
         render_cursor();
+    } else {
+        /* No cursor is stamped while the overlay owns the screen, but the
+         * redraw gate still compares the live pointer with the painted
+         * one - book the live position so an idle overlay does not force
+         * full repaints every frame. */
+        cursor_book_not_painted();
     }
 }

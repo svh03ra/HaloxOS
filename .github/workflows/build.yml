@@ -1,7 +1,7 @@
 # Copyright Svh03ra (C) 2026, All rights reserved
 # This repository is licensed under the GNU General Public License.
 
-name: Build 1.1 Development
+name: Build 1.1 Release
 
 on:
   push:

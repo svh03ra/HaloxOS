@@ -178,7 +178,8 @@ static void handle_start_app_menu_click(void) {
     if (!start_app_menu_open || !mouse.left || mouse.prev_left) {
         return;
     }
-    if (point_in_rect(mouse.x, mouse.y, start_app_menu_x, start_app_menu_y, 154, 28)) {
+    if (point_in_rect(mouse.x, mouse.y, start_app_menu_x, start_app_menu_y,
+                      start_app_menu_width(), START_APP_MENU_H)) {
         desktop_pin_app(start_app_menu_app, 18, 24);
         desktop_auto_grid_icons();
     }

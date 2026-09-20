@@ -28,8 +28,6 @@ static void game_center_handle_mouse(void) {
     } else if (point_in_rect(mouse.x, mouse.y, row_x, row_y + 68, row_w, 36)) {
         open_window(APP_GUESS);
     } else if (point_in_rect(mouse.x, mouse.y, row_x, row_y + 102, row_w, 36)) {
-        open_window(APP_RUN_GAME);
-    } else if (point_in_rect(mouse.x, mouse.y, row_x, row_y + 136, row_w, 36)) {
         open_window(APP_DOOM);
     }
 }

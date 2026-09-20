@@ -432,8 +432,7 @@ static void debug_bp_append_trace_line(char *line, size_t *len, size_t max_len, 
         name = "unknown";
     }
 
-    copy_string(line + *len, "[0x", max_len - *len);
-    *len = strlen_local(line);
+    append_string(line, len, max_len, "[0x");
     /* NOTE: symbol address, the source line belongs to the symbol start */
     {
         static const char digits[] = "0123456789ABCDEF";
@@ -446,16 +445,11 @@ static void debug_bp_append_trace_line(char *line, size_t *len, size_t max_len, 
         }
         line[*len] = '\0';
     }
-    copy_string(line + *len, "] ", max_len - *len);
-    *len = strlen_local(line);
-    copy_string(line + *len, name, max_len - *len);
-    *len = strlen_local(line);
-    copy_string(line + *len, " at ", max_len - *len);
-    *len = strlen_local(line);
-    copy_string(line + *len, base, max_len - *len);
-    *len = strlen_local(line);
-    copy_string(line + *len, "; line ", max_len - *len);
-    *len = strlen_local(line);
+    append_string(line, len, max_len, "] ");
+    append_string(line, len, max_len, name);
+    append_string(line, len, max_len, " at ");
+    append_string(line, len, max_len, base);
+    append_string(line, len, max_len, "; line ");
     {
         char digits[12];
         int dn = 0;
@@ -476,8 +470,7 @@ static void debug_bp_append_trace_line(char *line, size_t *len, size_t max_len, 
 
     /* decoded instruction at the symbol entry instead of raw hex:
      * decodes up to 3 consecutive instructions (MOV EBP,ESP style) */
-    copy_string(line + *len, " (", max_len - *len);
-    *len = strlen_local(line);
+    append_string(line, len, max_len, " (");
     {
         uint32_t ip = symbol_addr;
         int decoded = 0;
@@ -492,8 +485,7 @@ static void debug_bp_append_trace_line(char *line, size_t *len, size_t max_len, 
                 }
             }
             inst_len = debug_bp_decode_instruction(ip, ins, sizeof(ins));
-            copy_string(line + *len, ins, max_len - *len);
-            *len = strlen_local(line);
+            append_string(line, len, max_len, ins);
             if (inst_len <= 0) {
                 break;
             }
@@ -792,20 +784,18 @@ static void debug_bp_catch(AppId app, uint32_t frame_no) {
         char head[TERM_LINE_LEN];
         size_t len = 0;
 
-        copy_string(head, "** BP frame #", sizeof(head));
-        len = strlen_local(head);
+        append_string(head, &len, sizeof(head), "** BP frame #");
         append_uint(head, &len, sizeof(head), frame_no);
-        copy_string(head + len, " (#", sizeof(head) - len);
-        len = strlen_local(head);
+        append_string(head, &len, sizeof(head), " (#");
         append_uint(head, &len, sizeof(head), debug_bp_catch_count);
-        copy_string(head + len, " hit):", sizeof(head) - len);
+        append_string(head, &len, sizeof(head), " hit):");
         terminal_add_line(&debug_term, head);
     }
     {
         char line[TERM_LINE_LEN];
         size_t len = 0;
 
-        copy_string(line, "", sizeof(line));
+        line[0] = '\0';
         debug_bp_append_trace_line(line, &len, sizeof(line), (uint32_t)(uintptr_t)&debug_bp_catch);
         terminal_add_line(&debug_term, line);
     }
@@ -813,11 +803,8 @@ static void debug_bp_catch(AppId app, uint32_t frame_no) {
         char label[TERM_LINE_LEN];
         size_t len = 0;
 
-        copy_string(label, "app: ", sizeof(label));
-        len = strlen_local(label);
-        for (const char *p = app_titles[app]; *p != '\0'; ++p) {
-            append_char(label, &len, sizeof(label), *p);
-        }
+        append_string(label, &len, sizeof(label), "app: ");
+        append_string(label, &len, sizeof(label), app_titles[app]);
         terminal_add_line(&debug_term, label);
     }
 
@@ -885,24 +872,19 @@ static void debug_bp_catch_power(const char *action) {
         char head[TERM_LINE_LEN];
         size_t len = 0;
 
-        copy_string(head, "** BP frame #", sizeof(head));
-        len = strlen_local(head);
+        append_string(head, &len, sizeof(head), "** BP frame #");
         append_uint(head, &len, sizeof(head), fps_frames_total - debug_bp_frame_base);
-        copy_string(head + len, " (#", sizeof(head) - len);
-        len = strlen_local(head);
+        append_string(head, &len, sizeof(head), " (#");
         append_uint(head, &len, sizeof(head), debug_bp_catch_count);
-        copy_string(head + len, " hit):", sizeof(head) - len);
+        append_string(head, &len, sizeof(head), " hit):");
         terminal_add_line(&debug_term, head);
     }
     {
         char label[TERM_LINE_LEN];
         size_t len = 0;
 
-        copy_string(label, "power trigger: ", sizeof(label));
-        len = strlen_local(label);
-        for (const char *p = action; *p != '\0'; ++p) {
-            append_char(label, &len, sizeof(label), *p);
-        }
+        append_string(label, &len, sizeof(label), "power trigger: ");
+        append_string(label, &len, sizeof(label), action);
         terminal_add_line(&debug_term, label);
     }
     {
@@ -1071,12 +1053,31 @@ static void debug_apply_video(bool has_resolution,
         }
     }
 
+    /* Ask for the desktop size FIRST, exactly as the Settings app does, so
+     * the mode switch's own map update already knows it. On a backend that
+     * cannot program a mode the switch below only adopts the geometry it is
+     * already presenting, and the desktop is the thing that actually moves:
+     * without this request `change vid 800x600` reported "Screen changed" and
+     * left the desktop at its old size. */
+    if (has_resolution) {
+        set_desktop_size((int)target_width, (int)target_height);
+    }
+
     if (!set_framebuffer_mode_raw(target_width, target_height, target_bpp)) {
         terminal_add_line(&debug_term, "ERROR: video mode switch unavailable.");
         serial_trace("ERROR", "debugger video mode switch failed");
         serial_trace_video_mode("Screen change failed");
+        if (has_resolution) {
+            /* Put the desktop back to the geometry still on screen: the
+             * request above moved it before the switch refused it. */
+            set_desktop_size((int)fb.width, (int)fb.height);
+            update_present_maps();
+        }
         return;
     }
+
+    update_present_maps();
+    ui_input_dirty = true;
 
     settings_applied.palette_mode = target_palette;
     settings_pending.palette_mode = target_palette;
@@ -1153,11 +1154,9 @@ static void debug_print_video_details(void) {
     size_t len = 0;
 
     terminal_add_line(&debug_term, "Video:");
-    copy_string(line, "Backend: ", sizeof(line));
-    len = strlen_local(line);
-    for (const char *name = video_backend_name(); *name != '\0'; ++name) {
-        append_char(line, &len, sizeof(line), *name);
-    }
+    len = 0;
+    append_string(line, &len, sizeof(line), "Backend: ");
+    append_string(line, &len, sizeof(line), video_backend_name());
     terminal_add_line(&debug_term, line);
 
     line[0] = '\0';
@@ -1197,8 +1196,8 @@ static void debug_print_disk_details(void) {
     size_t len = 0;
 
     terminal_add_line(&debug_term, "Disk:");
-    copy_string(line, "Drive: ", sizeof(line));
-    len = strlen_local(line);
+    len = 0;
+    append_string(line, &len, sizeof(line), "Drive: ");
     append_hex32(line, &len, sizeof(line), boot_drive_number);
     append_char(line, &len, sizeof(line), ' ');
     for (const char *name = disk_physical_type_label(); *name != '\0'; ++name) {
@@ -1209,11 +1208,9 @@ static void debug_print_disk_details(void) {
     if (boot_drive_info_available && boot_drive_storage_bytes != 0) {
         char storage[32] = {0};
         format_single_memory_amount(storage, sizeof(storage), boot_drive_storage_bytes);
-        copy_string(line, "Storage: ", sizeof(line));
-        len = strlen_local(line);
-        for (int i = 0; storage[i] != '\0'; ++i) {
-            append_char(line, &len, sizeof(line), storage[i]);
-        }
+        len = 0;
+        append_string(line, &len, sizeof(line), "Storage: ");
+        append_string(line, &len, sizeof(line), storage);
         terminal_add_line(&debug_term, line);
     } else {
         terminal_add_line(&debug_term, "Storage: BIOS did not report geometry");
@@ -1340,7 +1337,7 @@ static void debug_help_command(const char *command) {
         terminal_add_line(&debug_term, "");
         terminal_add_line(&debug_term, "== ALL COMMANDS: ==");
         terminal_add_line(&debug_term, "edit view change continue test");
-        terminal_add_line(&debug_term, "show hide breakpoint");
+        terminal_add_line(&debug_term, "show hide grid breakpoint");
     } else if (token_is(token, "e", "edit", NULL, NULL)) {
         terminal_add_line(&debug_term, "edit mem 0xADDR ff 0x100");
         terminal_add_line(&debug_term, "view mem [0xADDR] | view vid | view disk");
@@ -1387,6 +1384,9 @@ static void debug_help_command(const char *command) {
     } else if (token_is(token, "fps", "show", "hide", NULL)) {
         terminal_add_line(&debug_term, "show fps | s fps: toggle FPS overlay top-right.");
         terminal_add_line(&debug_term, "hide fps | h fps: hide it. Red = frame lag blink.");
+        terminal_add_line(&debug_term, "show grid | s grid (ag/dg/app grid/desktop grid):");
+        terminal_add_line(&debug_term, "4x4 icon snap grid overlay while dragging icons.");
+        terminal_add_line(&debug_term, "hide grid | h grid: hide it. Snap follows Auto-Grid.");
     } else if (token_is(token, "continue", "con", "c", NULL)) {
         terminal_add_line(&debug_term, "continue: close debugger and resume desktop.");
     } else if (token_is(token, "t", "test", NULL, NULL)) {
@@ -1512,8 +1512,7 @@ static void debug_execute_command(void) {
                 char msg[TERM_LINE_LEN];
                 size_t len = 0;
 
-                copy_string(msg, "Crash vector ", sizeof(msg));
-                len = strlen_local(msg);
+                append_string(msg, &len, sizeof(msg), "Crash vector ");
                 msg[len++] = '0';
                 msg[len++] = 'x';
                 msg[len] = '\0';
@@ -1525,7 +1524,7 @@ static void debug_execute_command(void) {
                     msg[len++] = digits[vector & 0x0Fu];
                 }
                 msg[len] = '\0';
-                copy_string(msg + len, " set. Type continue.", sizeof(msg) - len);
+                append_string(msg, &len, sizeof(msg), " set. Type continue.");
                 terminal_add_line(&debug_term, msg);
             }
         }
@@ -1562,17 +1561,33 @@ static void debug_execute_command(void) {
         if (token_is(arg, "fps", "frames", "frame", NULL)) {
             fps_overlay_on = true;
             terminal_add_line(&debug_term, "FPS overlay shown (top-right).");
+        } else if (token_is(arg, "grid", "ag", "dg", "appgrid") ||
+                   token_is(arg, "desktopgrid", "deskgrid", "app grid", "desktop grid") ||
+                   token_is(arg, "desk grid", "app g", "desk g", NULL)) {
+            desktop_grid_overlay_on = true;
+            terminal_add_line(&debug_term, "4x4 pixel snap grid overlay shown.");
+            terminal_add_line(&debug_term, "Auto-Grid snaps icon drags with it off too.");
         } else {
-            terminal_add_line(&debug_term, "Usage: show fps");
+            terminal_add_line(&debug_term, "Usage: show fps | show grid");
         }
     } else if (starts_with(command, "hide ") || starts_with(command, "h ")) {
         const char *arg = command[0] == 'h' ? skip_spaces(command + 2) : skip_spaces(command + 5);
         if (token_is(arg, "fps", "frames", "frame", NULL)) {
             fps_overlay_on = false;
             terminal_add_line(&debug_term, "FPS overlay hidden.");
+        } else if (token_is(arg, "grid", "ag", "dg", "appgrid") ||
+                   token_is(arg, "desktopgrid", "deskgrid", "app grid", "desktop grid") ||
+                   token_is(arg, "desk grid", "app g", "desk g", NULL)) {
+            desktop_grid_overlay_on = false;
+            terminal_add_line(&debug_term, "Grid overlay hidden.");
         } else {
-            terminal_add_line(&debug_term, "Usage: hide fps");
+            terminal_add_line(&debug_term, "Usage: hide fps | hide grid");
         }
+    } else if (streq(command, "grid") || streq(command, "ag") || streq(command, "dg")) {
+        desktop_grid_overlay_on = !desktop_grid_overlay_on;
+        terminal_add_line(&debug_term, desktop_grid_overlay_on
+            ? "4x4 icon snap grid overlay shown."
+            : "Grid overlay hidden.");
     } else if (streq(command, "bp") || streq(command, "br") || streq(command, "breakpoint") ||
                starts_with(command, "bp ") || starts_with(command, "br ") || starts_with(command, "breakpoint ")) {
         char token[24];
@@ -1612,12 +1627,9 @@ static void debug_execute_command(void) {
                 char msg[TERM_LINE_LEN];
                 size_t len = 0;
 
-                copy_string(msg, "Breakpoint set on ", sizeof(msg));
-                len = strlen_local(msg);
-                for (const char *p = app_titles[app_index_from_bit(bit)]; *p != '\0'; ++p) {
-                    append_char(msg, &len, sizeof(msg), *p);
-                }
-                copy_string(msg + len, ". Type continue.", sizeof(msg) - len);
+                append_string(msg, &len, sizeof(msg), "Breakpoint set on ");
+                append_string(msg, &len, sizeof(msg), app_titles[app_index_from_bit(bit)]);
+                append_string(msg, &len, sizeof(msg), ". Type continue.");
                 terminal_add_line(&debug_term, msg);
             }
             serial_trace_concat("INFO", "breakpoint armed for ", command);

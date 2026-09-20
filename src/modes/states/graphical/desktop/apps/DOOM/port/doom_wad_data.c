@@ -5,7 +5,7 @@
 // This repository is licensed under the GNU General Public License.
 //
 // The DOOM1.WAD ships INSIDE the kernel image as a plain data array, so
-// the game data is always present on ANY boot media - USB/Ventoy, CD,
+// the game data is always present on ANY boot media - USB stick, CD,
 // hard disk - with zero bus I/O at boot. The Makefile generates the
 // byte-array source from the real WAD file (doom_wad_data.c.generated)
 // during the build; the placeholder below only keeps the symbol defined

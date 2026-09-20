@@ -6,7 +6,10 @@
 static void render_demo_center(const Window *window) {
     static const char *demos[] = {"3D Box", "Firecracker"};
     static const AppId demo_apps[] = {APP_3D_BOX, APP_FIRECRACKER};
-    int header_icon_w = image_width(_binary_build_program_icon_bin_start);
+    /* The header is the app's own icon next to its name, centred at the top
+     * exactly like Game Center's (see game_center.c): same 32x32 art size,
+     * same y, so the two browsers read as a pair. */
+    int header_icon_w = image_width(_binary_build_demo_icon_bin_start);
     int header_text_w = text_pixel_width("Demo Center");
     int header_x = window->x + (window->w - (header_icon_w + 8 + header_text_w)) / 2;
     int list_y = window->y + 108;
@@ -30,7 +33,7 @@ static void render_demo_center(const Window *window) {
     }
 
     fill_rect(window->x + 8, window->y + 24, window->w - 16, window->h - 32, color_white);
-    draw_image_at(_binary_build_program_icon_bin_start, header_x, window->y + 36, true);
+    draw_image_at(_binary_build_demo_icon_bin_start, header_x, window->y + 36, true);
     draw_text(header_x + header_icon_w + 8, window->y + 48, "Demo Center", color_black, color_white, true);
     draw_text(window->x + 20, window->y + 80, "Welcome demos! Choose one to try:", color_black, color_white, true);
 

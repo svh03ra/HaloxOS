@@ -128,8 +128,6 @@ static void handle_text_target(KeyEvent event) {
         if (event.code == KEY_ENTER && (mines_lost || mines_won)) {
             mines_place();
         }
-    } else if (active_window == APP_RUN_GAME) {
-        run_handle_key(event);
     } else if (active_window == APP_DOOM) {
         doom_app_handle_key(event);
     } else if (active_window == APP_3D_BOX) {

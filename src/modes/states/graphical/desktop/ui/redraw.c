@@ -21,6 +21,16 @@ static bool desktop_dirty_without_input(void) {
     uint32_t perf_phase = timer_ticks / PERF_UPDATE_TICKS;
     uint32_t blink_phase = timer_ticks / TERMINAL_CURSOR_BLINK_TICKS;
 
+    /* A button hover fade is an animation that runs while the pointer is
+     * perfectly still - the exact case this gate was written to skip.
+     * draw_hover_fade_rect raises the flag on every frame it paints a
+     * partial dither, and init.c clears it just before each full repaint,
+     * so the flag means "the frame just painted was mid-fade": keep
+     * scheduling full repaints until the fade completes. Without this the
+     * dither froze at whatever density the pointer-entry frame painted. */
+    if (ui_hover_fade_active) {
+        return true;
+    }
     if (window_fade_active || desktop_select_dragging) {
         return true;
     }
@@ -42,7 +52,6 @@ static bool desktop_dirty_without_input(void) {
     /* Live animated apps redraw every tick so they stay smooth with
      * the cursor idle - not only while the mouse moves. */
     if ((windows[APP_3D_BOX].open || windows[APP_FIRECRACKER].open ||
-         (windows[APP_RUN_GAME].open && run_state < 3) ||
          doom_app_needs_redraw()) &&
         last_desktop_redraw_demos_tick != timer_ticks) {
         return true;
@@ -54,9 +63,32 @@ static bool desktop_dirty_without_input(void) {
     return false;
 }
 
-/* Does the desktop need a repaint this frame at all? */
+/*
+ * Does the desktop need a repaint this frame at all?
+ *
+ * "Input changed" is a flag set by the input driver for every real change
+ * and cleared only by mark_desktop_redrawn(), not a comparison of tick
+ * stamps. Comparing timer_ticks could not tell two edges inside the same
+ * 16.6ms tick apart, so the second one - typically a button release - was
+ * silently dropped and its pressed look stayed on screen.
+ */
 static bool desktop_should_redraw(void) {
-    if (last_desktop_redraw_input_tick != last_input_tick) {
+    if (ui_input_dirty) {
+        return true;
+    }
+    /* Second net for motion: the pointer position is compared with the one
+     * the last painted frame ended at, so a packet whose flag write raced
+     * with the end of that frame still gets its repaint. */
+    if (mouse.x != last_redraw_mouse_x || mouse.y != last_redraw_mouse_y) {
+        return true;
+    }
+    /* Third net: the bookkeeping above records the LIVE pointer, but the
+     * pixels on screen come from render_cursor()'s own snapshot. IRQ12 can
+     * move the pointer between that snapshot and the end of the frame, and
+     * the write-back below then agrees with a cursor that was never painted
+     * at the new spot - the on-screen pointer freezes until the next input.
+     * Comparing the PAINTED position refuses to book such a frame as done. */
+    if (mouse.x != cursor_painted_x || mouse.y != cursor_painted_y) {
         return true;
     }
     return desktop_dirty_without_input();
@@ -77,10 +109,19 @@ static bool desktop_should_redraw(void) {
  *   - the saved background is missing or belongs to another shape.
  */
 static bool desktop_cursor_only_redraw(void) {
-    if (last_desktop_redraw_input_tick == last_input_tick) {
+    if (!ui_input_dirty &&
+        mouse.x == last_redraw_mouse_x && mouse.y == last_redraw_mouse_y) {
         return false;
     }
     if (last_key_input_tick == timer_ticks) {
+        return false;
+    }
+    /* A press or a release changes what the widgets look like: whatever is
+     * on screen was painted for the other button state. Refusing only
+     * while a button is *down* let the release frame take this path, which
+     * is how a released button (and a Start menu closed by that click)
+     * stayed painted until some unrelated input forced a full repaint. */
+    if (ui_pointer_state_changed) {
         return false;
     }
     if (mouse.left || mouse.right || mouse.middle) {
@@ -89,7 +130,21 @@ static bool desktop_cursor_only_redraw(void) {
     if (mouse.x == last_redraw_mouse_x && mouse.y == last_redraw_mouse_y) {
         return false;
     }
+    /* The cursor on screen may not sit where the live pointer is (IRQ12
+     * raced the previous paint). A pointer-only frame would then restore
+     * and present the wrong boxes and never repaint the visible cursor. */
+    if (mouse.x != cursor_painted_x || mouse.y != cursor_painted_y) {
+        return false;
+    }
     if (desktop_dirty_without_input()) {
+        return false;
+    }
+    /* The saved background is only the truth if the pointer stayed off
+     * every pointer-reactive widget: entering or leaving one changes what
+     * it draws (hover fill, dithered fade, hand cursor), which only a full
+     * repaint can show. */
+    if (hover_widget_hit(last_redraw_mouse_x, last_redraw_mouse_y) ||
+        hover_widget_hit(mouse.x, mouse.y)) {
         return false;
     }
     return cursor_capture_valid();
@@ -144,7 +199,8 @@ static void desktop_clock_only_frame(void) {
  * would stand still for as long as it kept moving.
  */
 static void mark_desktop_redrawn(bool clock_painted) {
-    last_desktop_redraw_input_tick = last_input_tick;
+    ui_input_dirty = false;
+    ui_pointer_state_changed = false;
     last_redraw_mouse_x = mouse.x;
     last_redraw_mouse_y = mouse.y;
     if (clock_painted) {

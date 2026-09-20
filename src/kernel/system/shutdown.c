@@ -25,10 +25,12 @@ static void render_shutdown(void) {
             /* Big orange two-line message, vertically centred. A 2x glyph
              * is 16px tall; a 24px step (16 + 8) reads as a normal text
              * line spacing instead of a split paragraph. */
-            draw_text_center_scaled(OS_WIDTH / 2, 194, "It's now safe to turn off", color_orange, color_black, true, 2);
-            draw_text_center_scaled(OS_WIDTH / 2, 218, "your computer", color_orange, color_black, true, 2);
+            /* Centred on the canvas, which follows the output mode; at the
+             * 640x480 base these are the original 194/218/282 rows. */
+            draw_text_center_scaled(OS_WIDTH / 2, OS_HEIGHT / 2 - 46, "It's now safe to turn off", color_orange, color_black, true, 2);
+            draw_text_center_scaled(OS_WIDTH / 2, OS_HEIGHT / 2 - 22, "your computer", color_orange, color_black, true, 2);
             /* +2 gap lines below the big text */
-            draw_text_center(OS_WIDTH / 2, 282, "Please hold the power button to shutdown when you're done.", color_gray_light, color_black, true);
+            draw_text_center(OS_WIDTH / 2, OS_HEIGHT / 2 + 42, "Please hold the power button to shutdown when you're done.", color_gray_light, color_black, true);
         }
         return;
     }
@@ -39,6 +41,6 @@ static void render_shutdown(void) {
         draw_text_mode_center(12, "Shutting down...", VGA_TEXT_ATTR_GRAY);
     } else {
         clear_screen(color_black);
-        draw_text_center_scaled(OS_WIDTH / 2, 212, "Shutting down...", color_white, color_black, true, 2);
+        draw_text_center_scaled(OS_WIDTH / 2, OS_HEIGHT / 2 - 28, "Shutting down...", color_white, color_black, true, 2);
     }
 }

@@ -7,7 +7,7 @@
 // Declares the byte array that doom_wad_data.c (Makefile-generated) adds
 // to the kernel image. The WAD reader (doom_libc.c) prefers this always-
 // present RAM copy over ATA/ATAPI bus reads, so the game data is
-// available on ANY boot media - USB/Ventoy, CD, hard disk.
+// available on ANY boot media - USB stick, CD, hard disk.
 
 #ifndef DOOM_WAD_EMBED_H
 #define DOOM_WAD_EMBED_H

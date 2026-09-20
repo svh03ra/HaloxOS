@@ -6,6 +6,12 @@
 static void task_manager_handle_mouse(void) {
     if (windows[APP_TASK_MANAGER].open && active_window == APP_TASK_MANAGER && mouse.left && !mouse.prev_left) {
         Window *window = &windows[APP_TASK_MANAGER];
+        /* Clicks outside this window were consumed by the window hit
+         * pass; ignore them here so an overlapping window cannot press
+         * Task Manager controls through the overlap. */
+        if (!point_in_rect(mouse.x, mouse.y, window->x, window->y, window->w, window->h)) {
+            return;
+        }
         if (task_manager_confirm_kill) {
             int box_x = window->x + 90;
             int box_y = window->y + 92;
@@ -57,24 +63,23 @@ static void task_manager_handle_mouse(void) {
 
             gpu_palette_scroll_geometry(track_y, &thumb_y, &thumb_h, &thumb_track);
 
-            if (button_clicked(scroll_x, window->y + 62, 16, 16) && gpu_palette_scroll >= GPU_GRID_COLS) {
-                gpu_palette_scroll -= GPU_GRID_COLS;
-            } else if (button_clicked(scroll_x, window->y + 64 + GPU_GRID_H - 16, 16, 16) && gpu_palette_scroll < gpu_palette_max_scroll()) {
-                gpu_palette_scroll += GPU_GRID_COLS;
-                if (gpu_palette_scroll > gpu_palette_max_scroll()) {
-                    gpu_palette_scroll = gpu_palette_max_scroll();
-                }
+            /* Every step moves whole rows (see the note on
+             * gpu_palette_max_scroll in system_api.c): the arrows move one
+             * row, a click on the empty track moves a page, and both ends
+             * clamp instead of leaving the strip half a row out of line. */
+            if (button_clicked(scroll_x, window->y + 62, 16, 16) && gpu_palette_scroll > 0) {
+                gpu_palette_scroll_rows(-1);
+            } else if (button_clicked(scroll_x, window->y + 64 + GPU_GRID_H - 16, 16, 16) &&
+                       gpu_palette_scroll < gpu_palette_max_scroll()) {
+                gpu_palette_scroll_rows(1);
             } else if (button_clicked(scroll_x + 2, thumb_y, 12, thumb_h)) {
                 task_manager_gpu_scroll_drag = true;
                 task_manager_gpu_scroll_drag_offset = mouse.y - thumb_y;
             } else if (button_clicked(scroll_x, track_y + 16, 16, GPU_GRID_H - 32)) {
-                if (mouse.y < thumb_y && gpu_palette_scroll >= GPU_GRID_PAGE_ENTRIES) {
-                    gpu_palette_scroll -= GPU_GRID_PAGE_ENTRIES;
+                if (mouse.y < thumb_y && gpu_palette_scroll > 0) {
+                    gpu_palette_scroll_rows(-GPU_GRID_ROWS);
                 } else if (mouse.y > thumb_y + thumb_h && gpu_palette_scroll < gpu_palette_max_scroll()) {
-                    gpu_palette_scroll += GPU_GRID_PAGE_ENTRIES;
-                    if (gpu_palette_scroll > gpu_palette_max_scroll()) {
-                        gpu_palette_scroll = gpu_palette_max_scroll();
-                    }
+                    gpu_palette_scroll_rows(GPU_GRID_ROWS);
                 }
             }
         }
@@ -96,10 +101,10 @@ static void task_manager_handle_mouse(void) {
         desired_y = clampi(mouse.y - task_manager_gpu_scroll_drag_offset, thumb_min, thumb_min + thumb_track);
         if (max_scroll != 0) {
             uint32_t raw_scroll = (uint32_t)((desired_y - thumb_min) * (int)max_scroll / thumb_track);
-            gpu_palette_scroll = (raw_scroll / GPU_GRID_COLS) * GPU_GRID_COLS;
-            if (gpu_palette_scroll > max_scroll) {
-                gpu_palette_scroll = max_scroll;
-            }
+            /* Row-snapped like every other step, so dragging the thumb to the
+             * bottom reaches the true last row (65256) rather than stopping
+             * 16 entries short of the end of the palette. */
+            gpu_palette_scroll = gpu_palette_clamp_scroll(raw_scroll);
         }
     }
 }

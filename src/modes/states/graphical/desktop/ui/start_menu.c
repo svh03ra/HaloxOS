@@ -36,8 +36,12 @@ static void handle_start_menu_click(void) {
     if (mouse.right && !mouse.prev_right && start_menu_row_app(row, &app)) {
         start_app_menu_open = true;
         start_app_menu_app = app;
-        start_app_menu_x = clampi(mouse.x, 0, OS_WIDTH - 154);
-        start_app_menu_y = clampi(mouse.y, 0, OS_HEIGHT - TASKBAR_H - 28);
+        /* Spawn beside the start menu, not on top of the hovered row:
+         * at the cursor the submenu covered the very item that opened it
+         * (and its hover highlight), so it was easy to lose the row you
+         * were on. */
+        start_app_menu_x = clampi(180 + 2, 0, OS_WIDTH - start_app_menu_width());
+        start_app_menu_y = clampi(mouse.y - 6, 0, OS_HEIGHT - TASKBAR_H - START_APP_MENU_H);
         return;
     }
     if (mouse.left && !mouse.prev_left) {

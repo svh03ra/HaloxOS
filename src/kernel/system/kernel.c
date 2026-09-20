@@ -27,6 +27,7 @@ extern const uint8_t _binary_build_user_frame_bin_start[];
 extern const uint8_t _binary_build_notepad_icon_bin_start[];
 extern const uint8_t _binary_build_terminal_icon_bin_start[];
 extern const uint8_t _binary_build_game_icon_bin_start[];
+extern const uint8_t _binary_build_demo_icon_bin_start[];
 extern const uint8_t _binary_build_program_icon_bin_start[];
 extern const uint8_t _binary_build_settings_icon_bin_start[];
 extern const uint8_t _binary_build_explorer_icon_bin_start[];
@@ -36,41 +37,67 @@ extern const uint8_t _binary_build_snake_icon_bin_start[];
 extern const uint8_t _binary_build_guessnum_icon_bin_start[];
 extern const uint8_t _binary_build_paint_icon_bin_start[];
 extern const uint8_t _binary_build_power_icon_bin_start[];
-extern const uint8_t _binary_build_run_icon_bin_start[];
 extern const uint8_t _binary_build_box3d_icon_bin_start[];
 extern const uint8_t _binary_build_firecracker_icon_bin_start[];
 extern const uint8_t _binary_build_doom_icon_bin_start[];
 
-/* Title Run! game sprites */
-extern const uint8_t _binary_build_run_player_bin_start[];
-extern const uint8_t _binary_build_run_player_died_bin_start[];
-extern const uint8_t _binary_build_run_player16_bin_start[];
-extern const uint8_t _binary_build_run_coin1_bin_start[];
-extern const uint8_t _binary_build_run_coin2_bin_start[];
-extern const uint8_t _binary_build_run_coin3_bin_start[];
-extern const uint8_t _binary_build_run_coin4_bin_start[];
-extern const uint8_t _binary_build_run_brick_bin_start[];
-extern const uint8_t _binary_build_run_skull_bin_start[];
-
-#define OS_WIDTH 640
-#define OS_HEIGHT 480
+/*
+ * The logical desktop canvas.
+ *
+ * Every desktop coordinate is a canvas pixel: the taskbar sits on
+ * canvas_height - TASKBAR_H, windows and icons are clamped to the canvas, the
+ * cursor lives inside it. The present step then maps the canvas onto whatever
+ * output mode is active.
+ *
+ * The canvas follows the output mode, so a bigger mode buys desktop ROOM
+ * instead of magnified pixels: at 1024x768 the desktop really is 1024x768
+ * with the same 28px taskbar, the same 8px text and the same icon sizes, and
+ * the wallpaper is tiled at its native 640x480 pitch. Only modes smaller than
+ * the 640x480 base keep the base canvas and get sampled down, which is the
+ * historical low-resolution behaviour.
+ *
+ * The canvas is capped because the two shadow planes are one statically
+ * sized buffer: the cap is what holds the kernel's RAM span - and therefore
+ * the boot floor - where it is. A mode larger than the cap still works; its
+ * canvas is centred 1:1 inside it.
+ */
+#define OS_BASE_WIDTH 640
+#define OS_BASE_HEIGHT 480
+#define OS_MAX_CANVAS_WIDTH 1440
+#define OS_MAX_CANVAS_HEIGHT 900
 #define MAX_OUTPUT_WIDTH 1920
 #define MAX_OUTPUT_HEIGHT 1200
+
+static int canvas_width = OS_BASE_WIDTH;
+static int canvas_height = OS_BASE_HEIGHT;
+
+/* Desktop size the resolution menu asked for (see set_desktop_size and
+ * update_canvas_for_framebuffer). It starts at the base canvas and is set to
+ * the mode the boot ended up in, so a boot at a bigger mode fills it. */
+static int canvas_request_width = OS_BASE_WIDTH;
+static int canvas_request_height = OS_BASE_HEIGHT;
+
+#define OS_WIDTH (canvas_width)
+#define OS_HEIGHT (canvas_height)
 
 #if HALOXOS_CONFIG_DEBUG != 0 && HALOXOS_CONFIG_DEBUG != 1
 #error "HALOXOS_CONFIG_DEBUG must be 0 or 1"
 #endif
 
-#if !((HALOXOS_CONFIG_SCREEN_WIDTH == 960 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 480 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
+#if !((HALOXOS_CONFIG_SCREEN_WIDTH == 192 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 256 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144) || \
       (HALOXOS_CONFIG_SCREEN_WIDTH == 320 && HALOXOS_CONFIG_SCREEN_HEIGHT == 240) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 192 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 854 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
       (HALOXOS_CONFIG_SCREEN_WIDTH == 426 && HALOXOS_CONFIG_SCREEN_HEIGHT == 240) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 256 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144))
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 480 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 854 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 800 && HALOXOS_CONFIG_SCREEN_HEIGHT == 600) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 960 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1024 && HALOXOS_CONFIG_SCREEN_HEIGHT == 768) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1366 && HALOXOS_CONFIG_SCREEN_HEIGHT == 768) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 800))
 #error "Unsupported HALOXOS_CONFIG_SCREEN_WIDTH/HALOXOS_CONFIG_SCREEN_HEIGHT pair"
 #endif
 
@@ -78,19 +105,67 @@ extern const uint8_t _binary_build_run_skull_bin_start[];
 #error "HALOXOS_CONFIG_SCREEN_BPP must be 4, 8, or 16"
 #endif
 
-#if HALOXOS_CONFIG_SCREEN_HEIGHT == 720
+/*
+ * The mode table: one entry per click of the resolution arrows, ordered by
+ * size inside each column. The widescreen checkbox picks the column, so an
+ * index means "that size class" in either one - index 5 is the 960x720
+ * desktop in 4:3 and the 1280x800 one in widescreen.
+ *
+ * The entries above the 640x480 base are the "gap" modes real hardware and
+ * VMs actually offer (800x600, 1024x768, 1280x800, 1366x768) - none of them
+ * is a scaled copy of another, each one is rendered natively at 1:1.
+ */
+typedef struct {
+    uint16_t width;
+    uint16_t height;
+} VideoModeOption;
+
+#define VIDEO_MODE_COUNT 7
+
+static const VideoModeOption video_modes_4_3[VIDEO_MODE_COUNT] = {
+    {192, 144},
+    {320, 240},
+    {480, 360},
+    {640, 480},
+    {800, 600},
+    {960, 720},
+    {1024, 768}
+};
+
+static const VideoModeOption video_modes_wide[VIDEO_MODE_COUNT] = {
+    {256, 144},
+    {426, 240},
+    {640, 360},
+    {854, 480},
+    {1280, 720},
+    {1280, 800},
+    {1366, 768}
+};
+
+#if (HALOXOS_CONFIG_SCREEN_WIDTH == 192 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 256 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 0
-#elif HALOXOS_CONFIG_SCREEN_HEIGHT == 480
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 320 && HALOXOS_CONFIG_SCREEN_HEIGHT == 240) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 426 && HALOXOS_CONFIG_SCREEN_HEIGHT == 240)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 1
-#elif HALOXOS_CONFIG_SCREEN_HEIGHT == 360
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 480 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 2
-#elif HALOXOS_CONFIG_SCREEN_HEIGHT == 240
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 854 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 3
-#else
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 800 && HALOXOS_CONFIG_SCREEN_HEIGHT == 600) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 4
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 960 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 800)
+#define HALOXOS_CONFIG_RESOLUTION_MODE 5
+#else
+#define HALOXOS_CONFIG_RESOLUTION_MODE 6
 #endif
 
 #if HALOXOS_CONFIG_SCREEN_WIDTH == 1280 || \
+    HALOXOS_CONFIG_SCREEN_WIDTH == 1366 || \
     HALOXOS_CONFIG_SCREEN_WIDTH == 854 || \
     (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
     HALOXOS_CONFIG_SCREEN_WIDTH == 426 || \
@@ -127,7 +202,7 @@ extern const uint8_t _binary_build_run_skull_bin_start[];
 #define DEBUG_MEMORY_VISUAL_W 430
 #define DEBUG_MEMORY_VISUAL_H 240
 #define DEBUG_MEMORY_MAX_EDIT_LENGTH 0x10000u
-#define APP_COUNT 16
+#define APP_COUNT 15
 #define SNAKE_MAX_SEGMENTS 128
 #define MINES_SIZE 8
 #define MINES_COUNT 10
@@ -326,7 +401,6 @@ typedef enum {
     APP_DEMO_CENTER,
     APP_3D_BOX,
     APP_FIRECRACKER,
-    APP_RUN_GAME,
     APP_DOOM
 } AppId;
 
@@ -385,6 +459,9 @@ typedef struct {
     uint8_t background_mode;
     bool window_fade;
     bool window_trails;
+    /* Wallpaper fit: false scales the art to the canvas (Stretch, the
+     * default), true centres it at its own pixel size (Fit). */
+    bool wallpaper_fit;
 } SettingsState;
 
 typedef enum {
@@ -404,6 +481,7 @@ enum {
 typedef struct {
     uint16_t io_base;
     uint8_t port_stride;
+    bool device_present;
     uint32_t fb_start;
     uint32_t fb_offset;
     uint32_t fb_size;
@@ -433,7 +511,6 @@ static const char *app_titles[APP_COUNT] = {
     "Demos",
     "3D Box",
     "Firecr..",
-    "Run!",
     "DOOM"
 };
 
@@ -479,12 +556,17 @@ static Window windows[APP_COUNT];
  * present_need_index_plane in vga.c).
  *
  * They therefore overlay one buffer instead of occupying two: the kernel
- * reserves the larger (RGB565, 600 KB) rather than both (900 KB). The
- * names below keep every existing reference working unchanged.
+ * reserves the larger plane rather than both. The names below keep every
+ * existing reference working unchanged.
+ *
+ * The storage is sized for the largest canvas the OS can grow to
+ * (OS_MAX_CANVAS_*), not for the current mode: the canvas is re-picked on
+ * every video mode change (see update_canvas_for_framebuffer below), and
+ * that cap is what keeps this buffer - and the boot RAM floor - bounded.
  */
 typedef union {
-    uint8_t index[OS_WIDTH * OS_HEIGHT];
-    uint16_t rgb565[OS_WIDTH * OS_HEIGHT];
+    uint8_t index[OS_MAX_CANVAS_WIDTH * OS_MAX_CANVAS_HEIGHT];
+    uint16_t rgb565[OS_MAX_CANVAS_WIDTH * OS_MAX_CANVAS_HEIGHT];
 } ShadowPlaneStorage;
 
 static ShadowPlaneStorage shadow_planes;
@@ -540,62 +622,44 @@ static uint8_t fire_color[FIRE_PARTICLES];
 static bool fire_alive[FIRE_PARTICLES];
 static uint32_t fire_last_tick = 0;
 
-/* Title Run! game state. */
-#define RUN_PLATFORMS 24
-#define RUN_COINS 24
-#define RUN_BRICKS 12
-#define RUN_WATER_Y 168
-typedef struct {
-    int x;
-    int w;
-    int y;
-    int kind;   /* 0 grass top, 1 dirt filler */
-} RunPlatform;
-typedef struct {
-    int x;
-    int y;
-    int frame;  /* 0..9 animation frame */
-    bool taken;
-} RunCoin;
-typedef struct {
-    int x;
-    int y;
-} RunBrick;
-static RunPlatform run_platforms[RUN_PLATFORMS];
-static RunCoin run_coins[RUN_COINS];
-static RunBrick run_bricks[RUN_BRICKS];
-static int run_level_len = 1024;      /* world px length of one level lap */
-/* All motion is stored in 1/16 px subpixels so the run stays smooth
- * instead of stop-motion; px values below are updated for the render. */
-static int run_player_wx = 0;         /* player world x, 1/16 px */
-static int run_scroll16 = 0;          /* camera world x, 1/16 px */
-static int run_py16 = 0;              /* player y, 1/16 px */
-static int run_vy16 = 0;              /* player fall speed, 1/16 px/tick */
-static int run_player_x = 0;          /* player screen x, px (render) */
-static int run_player_y = 0;          /* player y, px (render) */
-static int run_scroll = 0;            /* camera scroll, px (render) */
-static bool run_player_grounded = false;
-static int run_lives = 3;
-static int run_coins_collected = 0;
-static uint32_t run_time_left = 60 * TIMER_HZ;   /* 1 minute */
-static uint32_t run_countdown = 5 * TIMER_HZ;    /* 5s start countdown */
-static uint32_t run_last_tick = 0;
-static uint32_t run_last_coin_frame = 0;
-static int run_state = 0;   /* 0 countdown, 1 playing, 2 dying, 3 dead, 4 win */
-static int run_death_anim_t = 0;
-static int run_death_start_y = 0;
-/* skull chaser: spawns after a 3-5s cooldown, hunts at the player's
- * altitude, slower than a running player so it is escapable */
-static int run_skull_wx = 0;          /* skull world x, 1/16 px */
-static bool run_skull_active = false;
-static uint32_t run_skull_cooldown = 0;
-/* eased spacebar jump: y follows a sine arc over RUN_JUMP_FRAMES
- * (subpixel: start y in 1/16 px) */
-#define RUN_JUMP_FRAMES 26
-static int run_jump_anim_t = RUN_JUMP_FRAMES;   /* finished by default */
-static int run_jump_start_y16 = 0;
 static uint32_t button_hover_id = 0;
 static uint32_t button_hover_tick = 0;
+/* Set by draw_hover_fade_rect on any frame it paints a partial dither
+ * (the fade is mid-animation); redraw.c keeps full-desktop repaints
+ * running until it clears, so a hover fade can animate even when the
+ * pointer and every other input have gone still - exactly the case the
+ * dirty-redraw gate was written to skip. */
+static bool ui_hover_fade_active = false;
+/* Any input change since the last presented frame.
+ *
+ * A flag, not a tick stamp. The redraw gate used to compare timer_ticks,
+ * so two input edges inside one 60Hz tick (16.6ms - a fast click, or a
+ * release sharing a tick with the frame that already recorded it) were
+ * indistinguishable from a single one. The second edge then caused no
+ * repaint at all, which is how a released button kept its pressed look
+ * and a closed Start menu stayed painted until unrelated input arrived. */
+static bool ui_input_dirty = false;
+/* A pointer button changed state (press, release, or the end of a replayed
+ * one-frame click) during this frame's poll_input. Everything on screen
+ * was painted for the other state, so this frame must be a full repaint -
+ * the pointer-only path must not swallow it. */
+static bool ui_pointer_state_changed = false;
+/* Rectangles of the widgets that react to the pointer (buttons and
+ * interactive rows), recorded by the last full desktop render as it drew
+ * them. The pointer-only repaint path consults this list: the desktop
+ * image is only a valid stand-in for the background under the pointer if
+ * the pointer stayed off every one of these. Entering or leaving a widget
+ * therefore always forces a full repaint, which is what makes its hover
+ * highlight and dithered fade appear. Without it, a move onto a button
+ * whose cursor shape did not change was taken as "only the pointer
+ * moved", so the button never learned the pointer had arrived and its
+ * hover stayed dark until some unrelated repaint. */
+#define HOVER_RECT_MAX 128
+static int hover_rect_x[HOVER_RECT_MAX];
+static int hover_rect_y[HOVER_RECT_MAX];
+static int hover_rect_w[HOVER_RECT_MAX];
+static int hover_rect_h[HOVER_RECT_MAX];
+static int hover_rect_count = 0;
 static bool cursor_hand_hint = false;
 static int active_window = -1;
 static int drag_window = -1;
@@ -712,7 +776,8 @@ static SettingsState settings_applied = {
     HALOXOS_CONFIG_WIDESCREEN != 0,
     0,
     false,
-    false
+    false,
+    false   /* Stretch: the wallpaper fills the desktop */
 };
 static SettingsState settings_pending = {
     HALOXOS_CONFIG_PALETTE_MODE,
@@ -720,7 +785,8 @@ static SettingsState settings_pending = {
     HALOXOS_CONFIG_WIDESCREEN != 0,
     0,
     false,
-    false
+    false,
+    false   /* Stretch: the wallpaper fills the desktop */
 };
 static uint8_t settings_tab = 0;
 static uint8_t task_manager_tab = 0;
@@ -749,9 +815,9 @@ static bool boot_drive_valid = false;
 static uint8_t boot_drive_number = 0;
 
 /* WAD multiboot module: GRUB loads the game data into RAM via BIOS, so
- * the kernel reads it straight from memory on ANY boot media (USB/
- * Ventoy, CD, disk) - the ATA/ATAPI bus is not involved at all. Filled
- * in kernel_main from the multiboot module list. */
+ * the kernel reads it straight from memory on ANY boot media (USB stick,
+ * CD, disk) - the ATA/ATAPI bus is not involved at all. Filled in
+ * kernel_main from the multiboot module list. */
 static uint32_t doom_wad_module_addr = 0;
 static uint32_t doom_wad_module_bytes = 0;
 static uintptr_t crash_mmap_addr = 0;
@@ -790,17 +856,42 @@ static bool boot_text_mode = true;
 static volatile uint16_t *const vga_text_buffer = (volatile uint16_t *)(uintptr_t)0xB8000;
 static uint16_t present_x_map[MAX_OUTPUT_WIDTH];
 static uint16_t present_y_map[MAX_OUTPUT_HEIGHT];
-static uint32_t present_content_width = OS_WIDTH;
-static uint32_t present_content_height = OS_HEIGHT;
+static uint32_t present_content_width = OS_BASE_WIDTH;
+static uint32_t present_content_height = OS_BASE_HEIGHT;
 static uint32_t present_offset_x = 0;
 static uint32_t present_offset_y = 0;
-static uint32_t last_desktop_redraw_input_tick = 0xFFFFFFFFu;
+/*
+ * "The bands outside the content box still need painting black."
+ *
+ * Raised by update_present_maps() - i.e. on every mode or canvas change -
+ * and lowered by present_fill_margins() once the bands for the geometry now
+ * in effect have been blanked.
+ *
+ * This has to be a dirty flag rather than a cache keyed on the geometry. A
+ * keyed cache answers "have I ever cleared bands this shape", but the answer
+ * a scanout needs is "are the bands black right now": presenting a LARGER
+ * content box paints over the bands - and a full-screen box has no bands to
+ * clear, so nothing updated the cache - which left the next shrink served
+ * from the stale entry and the previous frame's desktop (taskbar, clock and
+ * version text included) still visible outside the new one.
+ */
+static bool present_margins_dirty = true;
 /* Pointer position at the last desktop repaint, and the tick of the last
  * handled key press. Together with the redraw flags below they let the
  * desktop tell "only the pointer moved" apart from a real repaint, which
  * is what keeps the cursor responsive on slow machines. */
 static int last_redraw_mouse_x = -1;
 static int last_redraw_mouse_y = -1;
+
+/* Where render_cursor() actually stamped the pointer pixels for the frame
+ * currently on screen (or -1 when the pointer is not composited). IRQ12
+ * moves the real pointer asynchronously mid-frame, so by the time the
+ * frame is booked the live mouse.x/y can disagree with the painted pixels;
+ * the redraw gate must compare against the PAINTED position, otherwise a
+ * raced packet makes it believe the cursor was already drawn at the new
+ * spot and the on-screen cursor freezes until the next input. */
+static int cursor_painted_x = -1;
+static int cursor_painted_y = -1;
 static uint32_t last_key_input_tick = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_second = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
@@ -839,6 +930,21 @@ static bool desktop_icon_multi_selected[DESKTOP_ICON_COUNT] = {false};
 static int desktop_icon_drag_start_x[DESKTOP_ICON_COUNT];
 static int desktop_icon_drag_start_y[DESKTOP_ICON_COUNT];
 static bool desktop_auto_grid = true;
+/* Visual snap grid. The overlay is OFF until the debugger's
+ * "show grid" / "app grid" / "desktop grid" command turns it on (it used
+ * to paint itself automatically while an icon was dragged, so a fresh
+ * desktop already looked like a graph-paper sheet). Auto-Grid keeps
+ * snapping icon drags whether or not the overlay is up, because
+ * DESKTOP_GRID_CELL - the snap step in pixels - is what locks an icon to
+ * the 4x4 grid. */
+static bool desktop_grid_overlay_on = false;
+#define DESKTOP_GRID_CELL 4
+/* True while a window's own controls are being drawn AND that window is
+ * the topmost one under the pointer. draw_button / draw_interactive_row
+ * read it so the buttons of a window that is covered by another window
+ * neither light the hand cursor nor show a press highlight "through" the
+ * window on top of them (see desktop_top_window_at in widgets.c). */
+static bool ui_window_interactive = true;
 static bool desktop_undo_valid = false;
 static bool desktop_undo_visible[DESKTOP_ICON_COUNT];
 static int desktop_undo_x[DESKTOP_ICON_COUNT];
@@ -923,6 +1029,10 @@ static void desktop_finish_rename(bool commit);
 static void append_char(char *dest, size_t *len, size_t max_len, char ch);
 static bool cursor_over_clickable(void);
 static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8_t dark, uint32_t hover_tick);
+static void hover_widget_reset(void);
+static void hover_widget_add(int x, int y, int w, int h);
+static bool hover_widget_hit(int x, int y);
+static void desktop_fit_to_canvas(void);
 static bool vga_probe_present(void);
 static bool vga_set_graphics_mode(uint16_t width, uint16_t height, uint16_t bpp);
 static void vga_save_and_enter_text_mode(void);
@@ -935,8 +1045,6 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
 
 /* New demo/game apps: defined in files included after their first use
  * (window_manager.c / keyboard_routing.c run before the game logic). */
-static void reset_run(void);
-static void run_handle_key(KeyEvent event);
 static void box3d_handle_key(KeyEvent event);
 
 /* DOOM app (apps/DOOM/port/doom_engine.c amalgamation): renderer and
@@ -956,6 +1064,109 @@ void doom_wad_selftest(void);
  * power handlers); called before every shutdown/restart/halt trigger. */
 static void debug_bp_catch_power(const char *action);
 
+/*
+ * Pick the desktop canvas for the framebuffer that is (about to be) active.
+ *
+ * Callers are the paths that establish framebuffer geometry (video_modes.c
+ * backend init and set_framebuffer_mode_raw) and update_present_maps(), so
+ * the canvas can never disagree with the mode being presented.
+ *
+ * The canvas is the desktop size that was REQUESTED - the resolution menu's
+ * selection (canvas_request_*) - as far as the active mode allows:
+ *
+ *   - a mode that can hold the request at 1:1 becomes the desktop (native),
+ *   - a request smaller than the mode is drawn centred in it at 1:1, which is
+ *     what makes the resolution menu work on a backend that cannot set modes:
+ *     the desktop is re-sized in software inside the mode we booted with,
+ *   - a mode smaller than the 640x480 base keeps the base canvas and is
+ *     sampled down by the present maps (the historical low-resolution path).
+ *
+ * The cap only exists to bound the shadow buffer; a request bigger than it
+ * centres a capped canvas at 1:1.
+ *
+ * Returns true when the size actually changed. That matters to the caller:
+ * the shadow planes are indexed with the canvas width, so a resize
+ * reinterprets every stored pixel and the screen must be recomposited from
+ * scratch rather than patched by the pointer-only path.
+ */
+static bool update_canvas_for_framebuffer(void) {
+    int width = (int)fb.width;
+    int height = (int)fb.height;
+    int new_width;
+    int new_height;
+    bool changed;
+
+    if (width < OS_BASE_WIDTH || height < OS_BASE_HEIGHT) {
+        new_width = OS_BASE_WIDTH;
+        new_height = OS_BASE_HEIGHT;
+    } else if (canvas_request_width >= OS_BASE_WIDTH && canvas_request_height >= OS_BASE_HEIGHT) {
+        new_width = canvas_request_width < width ? canvas_request_width : width;
+        new_height = canvas_request_height < height ? canvas_request_height : height;
+        if (new_width > OS_MAX_CANVAS_WIDTH) new_width = OS_MAX_CANVAS_WIDTH;
+        if (new_height > OS_MAX_CANVAS_HEIGHT) new_height = OS_MAX_CANVAS_HEIGHT;
+    } else {
+        /* No usable request (a sub-base desktop size that the hardware then
+         * refused to switch to): the mode itself is the desktop. */
+        new_width = width > OS_MAX_CANVAS_WIDTH ? OS_MAX_CANVAS_WIDTH : width;
+        new_height = height > OS_MAX_CANVAS_HEIGHT ? OS_MAX_CANVAS_HEIGHT : height;
+    }
+
+    changed = new_width != canvas_width || new_height != canvas_height;
+    canvas_width = new_width;
+    canvas_height = new_height;
+
+    if (changed) {
+        /* Blank both planes (they overlay one buffer, so one pass covers
+         * the union - only the canvas the new mode actually shows, since
+         * every writer strides rows by the new canvas width) and ask the
+         * frame loop for a full repaint: a pointer-only frame would
+         * restore background saved for the old geometry, and the saved
+         * cursor box belongs to the old canvas size as well.
+         *
+         * Written as a loop rather than memset_local(): this runs before
+         * runtime.c (where the freestanding string helpers live) is
+         * included, and it keeps the mode switch from touching storage the
+         * new mode never presents. */
+        for (int y = 0; y < new_height; ++y) {
+            uint8_t *row = &shadow_planes.index[(size_t)y * (size_t)new_width];
+            for (int x = 0; x < new_width; ++x) {
+                row[x] = 0;
+            }
+        }
+        /* A smaller canvas can cut windows (and icons) off the desktop: the
+         * title bar of a window parked past the new right edge would be
+         * unreachable, so nothing could drag it back. Pull everything into
+         * the new bounds before the repaint that shows it. */
+        desktop_fit_to_canvas();
+        ui_input_dirty = true;
+    }
+
+    return changed;
+}
+
+/*
+ * Ask for a desktop size, then re-derive the canvas from it.
+ *
+ * Called with the mode the settings app is applying (before the hardware
+ * switch, so the switch's own update_present_maps() already knows the size
+ * the user picked) and with the mode the boot ended up in. On a backend
+ * without mode setting this is the whole mechanism: the canvas moves and the
+ * present maps centre it inside the fixed framebuffer.
+ */
+static void set_desktop_size(int width, int height) {
+    if (width < OS_BASE_WIDTH || height < OS_BASE_HEIGHT) {
+        width = OS_BASE_WIDTH;
+        height = OS_BASE_HEIGHT;
+    }
+
+    if (width == canvas_request_width && height == canvas_request_height) {
+        return;
+    }
+
+    canvas_request_width = width;
+    canvas_request_height = height;
+    update_present_maps();
+}
 
 /*
  * These are all locations which kept from source code path:
@@ -969,6 +1180,7 @@ static void debug_bp_catch_power(const char *action);
 #include "timer.c"
 #include "runtime.c"
 #include "../../driver/video/vga.c"
+#include "../../driver/video/vbe.c"
 #include "../../driver/video/video_modes.c"
 #include "interrupts.c"
 #include "exceptions.c"
@@ -1008,8 +1220,6 @@ static void debug_bp_catch_power(const char *action);
 #include "../../modes/states/graphical/desktop/apps/demo_center/demo_center.c"
 #include "../../modes/states/graphical/desktop/apps/3DBox/box3d.c"
 #include "../../modes/states/graphical/desktop/apps/firecracker/firecracker.c"
-#include "../../modes/states/graphical/desktop/apps/runGame/logic.c"
-#include "../../modes/states/graphical/desktop/apps/runGame/render.c"
 #include "../../modes/states/graphical/desktop/apps/power/power.c"
 #include "../../modes/states/graphical/desktop/apps/settings/render.c"
 #include "../../modes/states/graphical/desktop/apps/task_manager/render.c"
@@ -1033,7 +1243,6 @@ static void debug_bp_catch_power(const char *action);
 #include "../../modes/states/graphical/desktop/apps/game_center/handling.c"
 #include "../../modes/states/graphical/desktop/apps/demo_center/handling.c"
 #include "../../modes/states/graphical/desktop/apps/firecracker/handling.c"
-#include "../../modes/states/graphical/desktop/apps/runGame/handling.c"
 #include "../../modes/states/graphical/desktop/apps/power/handling.c"
 #include "../../modes/states/graphical/desktop/apps/settings/handling.c"
 #include "../../modes/states/graphical/desktop/apps/task_manager/handling.c"

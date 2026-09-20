@@ -3,27 +3,46 @@
 
 // This repository is licensed under the GNU General Public License.
 
-/* rep stosl/movsl bulk paths: 1 emulated instruction per 4 bytes instead
- * of a ~5-instruction byte loop (big win under cycle-accurate emulators
- * where every guest instruction costs fixed host time). DF is cleared on
- * CPU reset and nothing here ever executes `std`. */
+/*
+ * Bulk move/fill: 32 bytes of straight-line 32-bit accesses per iteration.
+ *
+ * The string ops (`rep movsl`/`rep stosl`) used to be the bulk path here on
+ * the theory that one emulated instruction per 4 bytes beats a loop body.
+ * Measured against the 614,400-byte scan-out, that is not what happens: the
+ * rep forms cost 1.80M cycles and eight unrolled 32-bit moves of the same
+ * bytes cost 1.07M, because one rep iteration costs about as much as a loop
+ * body that has already moved four times as much. Frame time here is
+ * dominated by exactly these copies (the wallpaper expansion and the
+ * scan-out are ~87% of a full desktop repaint), so the wide straight-line
+ * form is the one every bulk path uses now. DF is never set - nothing in
+ * the kernel executes `std` - so the direction cleanup the rep prefix
+ * implies is not needed either.
+ */
+#define BULK_MOVE_BYTES 32u
+
 static void *memset_local(void *dest, int value, size_t len) {
     uint8_t *ptr = (uint8_t *)dest;
     uint32_t fill = (uint32_t)(uint8_t)value * 0x01010101u;
-    size_t i = 0;
 
-    if (len >= 16) {
-        uint8_t *bulk = ptr;
-        uint32_t count = (uint32_t)(len >> 2);
-        __asm__ volatile ("cld; rep stosl"
-                          : "+D"(bulk), "+c"(count)
-                          : "a"(fill)
-                          : "memory");
-        ptr = bulk;
-        i = len & ~(size_t)3u;
+    while (len >= BULK_MOVE_BYTES) {
+        *(uint32_t *)(void *)(ptr + 0) = fill;
+        *(uint32_t *)(void *)(ptr + 4) = fill;
+        *(uint32_t *)(void *)(ptr + 8) = fill;
+        *(uint32_t *)(void *)(ptr + 12) = fill;
+        *(uint32_t *)(void *)(ptr + 16) = fill;
+        *(uint32_t *)(void *)(ptr + 20) = fill;
+        *(uint32_t *)(void *)(ptr + 24) = fill;
+        *(uint32_t *)(void *)(ptr + 28) = fill;
+        ptr += BULK_MOVE_BYTES;
+        len -= BULK_MOVE_BYTES;
     }
-    for (; i < len; ++i) {
-        ptr[i] = (uint8_t)value;
+    while (len >= 4u) {
+        *(uint32_t *)(void *)ptr = fill;
+        ptr += 4;
+        len -= 4u;
+    }
+    while (len-- > 0u) {
+        *ptr++ = (uint8_t)value;
     }
     return dest;
 }
@@ -31,38 +50,54 @@ static void *memset_local(void *dest, int value, size_t len) {
 static void *memcpy_local(void *dest, const void *src, size_t len) {
     uint8_t *d = (uint8_t *)dest;
     const uint8_t *s = (const uint8_t *)src;
-    size_t i = 0;
 
-    if (len >= 16) {
-        uint8_t *bd = d;
-        const uint8_t *bs = s;
-        uint32_t count = (uint32_t)(len >> 2);
-        __asm__ volatile ("cld; rep movsl"
-                          : "+D"(bd), "+S"(bs), "+c"(count)
-                          :
-                          : "memory");
-        d = bd;
-        s = bs;
-        i = len & ~(size_t)3u;
+    while (len >= BULK_MOVE_BYTES) {
+        *(uint32_t *)(void *)(d + 0) = *(const uint32_t *)(const void *)(s + 0);
+        *(uint32_t *)(void *)(d + 4) = *(const uint32_t *)(const void *)(s + 4);
+        *(uint32_t *)(void *)(d + 8) = *(const uint32_t *)(const void *)(s + 8);
+        *(uint32_t *)(void *)(d + 12) = *(const uint32_t *)(const void *)(s + 12);
+        *(uint32_t *)(void *)(d + 16) = *(const uint32_t *)(const void *)(s + 16);
+        *(uint32_t *)(void *)(d + 20) = *(const uint32_t *)(const void *)(s + 20);
+        *(uint32_t *)(void *)(d + 24) = *(const uint32_t *)(const void *)(s + 24);
+        *(uint32_t *)(void *)(d + 28) = *(const uint32_t *)(const void *)(s + 28);
+        d += BULK_MOVE_BYTES;
+        s += BULK_MOVE_BYTES;
+        len -= BULK_MOVE_BYTES;
     }
-    for (; i < len; ++i) {
-        d[i] = s[i];
+    while (len >= 4u) {
+        *(uint32_t *)(void *)d = *(const uint32_t *)(const void *)s;
+        d += 4;
+        s += 4;
+        len -= 4u;
+    }
+    while (len-- > 0u) {
+        *d++ = *s++;
     }
     return dest;
 }
 
-/* Bulk RGB565 fill for the rgb565 shadow buffer: one rep stosl per two
- * pixels instead of a per-element loop (fill_rect/clear_screen rows). */
+/* Bulk RGB565 fill for the rgb565 shadow buffer: two pixels per 32-bit
+ * store, straight-line (see BULK_MOVE_BYTES), instead of a per-element
+ * loop (fill_rect/clear_screen rows). */
 static void memset16_local(void *dest, uint16_t value, size_t count) {
     uint32_t pattern = ((uint32_t)value << 16) | value;
     uint32_t *d = (uint32_t *)dest;
-    uint32_t pairs = (uint32_t)(count >> 1);
+    size_t pairs = count >> 1;
 
-    if (pairs != 0) {
-        __asm__ volatile ("cld; rep stosl"
-                          : "+D"(d), "+c"(pairs)
-                          : "a"(pattern)
-                          : "memory");
+    while (pairs >= 8u) {
+        d[0] = pattern;
+        d[1] = pattern;
+        d[2] = pattern;
+        d[3] = pattern;
+        d[4] = pattern;
+        d[5] = pattern;
+        d[6] = pattern;
+        d[7] = pattern;
+        d += 8;
+        pairs -= 8u;
+    }
+    while (pairs-- > 0u) {
+        *d++ = pattern;
     }
     if ((count & 1u) != 0) {
         ((uint16_t *)dest)[count - 1u] = value;
@@ -195,6 +230,30 @@ static void copy_string(char *dest, const char *src, size_t max_len) {
         ++i;
     }
     dest[i] = '\0';
+}
+
+/*
+ * Append a string to a length-tracked buffer.
+ *
+ * Callers used to write `copy_string(buf + len, text, cap - len)` and then
+ * recover the new length with `len = strlen_local(buf)` - a full rescan of
+ * the line for every field appended to it, and a fresh chance to get the
+ * capacity arithmetic wrong at each of the thirty-odd sites that did it.
+ * Keeping the length authoritative here mirrors append_char below, so the
+ * buffer is never re-measured and callers pass the total size rather than
+ * a remaining-bytes expression.
+ */
+static void append_string(char *dest, size_t *len, size_t max_len, const char *src) {
+    size_t i = *len;
+
+    if (max_len == 0 || i >= max_len) {
+        return;
+    }
+    while (*src != '\0' && i + 1 < max_len) {
+        dest[i++] = *src++;
+    }
+    dest[i] = '\0';
+    *len = i;
 }
 
 static void append_char(char *dest, size_t *len, size_t max_len, char ch) {

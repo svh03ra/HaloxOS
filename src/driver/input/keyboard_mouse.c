@@ -9,6 +9,7 @@ static void enqueue_key(KeyCode code, char ch) {
         return;
     }
     last_input_tick = timer_ticks;
+    ui_input_dirty = true;
     key_queue[key_tail].code = code;
     key_queue[key_tail].ch = ch;
     key_tail = next;
@@ -319,6 +320,11 @@ static void mouse_apply_byte(uint8_t data) {
         if (nx != mouse.x || ny != mouse.y || new_left != mouse_hw_left ||
             new_right != mouse_hw_right || new_middle != mouse.middle) {
             last_input_tick = timer_ticks;
+            /* This runs in the IRQ12 handler, at any point in the frame -
+             * including while one is being painted. Setting a flag (rather
+             * than comparing tick stamps later) cannot lose the event: the
+             * gate only clears it once a frame has actually been drawn. */
+            ui_input_dirty = true;
         }
 
         if (new_left && !mouse_hw_left && mouse_press_latch_left < 255) {
@@ -360,7 +366,26 @@ void mouse_packet_from_isr(void) {
 }
 
 static void poll_input(void) {
-    /* End a replayed one-frame click hold: restore physical state. */
+    /* Snapshot the state the previous frame was shaped from, so the end of
+     * this function can tell whether anything actually changed. Comparing
+     * against the previous frame - rather than stamping timer_ticks - is
+     * what makes a second edge inside one timer tick visible. */
+    bool was_left = mouse.left;
+    bool was_right = mouse.right;
+    bool was_middle = mouse.middle;
+    int was_x = mouse.x;
+    int was_y = mouse.y;
+
+    /* End a replayed one-frame click hold: restore physical state.
+     * This is a visible button-state change (pressed -> released fill,
+     * cursor press offset), so it must dirty the desktop exactly like a
+     * real button edge does - otherwise a fast click that lands entirely
+     * inside one frame leaves the pressed look on screen until the next
+     * unrelated input. */
+    if (mouse_click_replay_left || mouse_click_replay_right || mouse_click_replay_middle) {
+        last_input_tick = timer_ticks;
+        ui_input_dirty = true;
+    }
     if (mouse_click_replay_left) {
         mouse.left = mouse_hw_left;
         mouse_click_replay_left = false;
@@ -428,4 +453,18 @@ static void poll_input(void) {
         }
     }
     __asm__ volatile ("sti");
+
+    /* One notification per real change, covering motion (the ISR and the
+     * drain both write mouse.x/mouse.y), button edges, and the replayed
+     * click hold above. The frame loop's gate reads ui_input_dirty, which
+     * is only cleared once a frame has actually been presented, so no edge
+     * can be lost between two ticks. */
+    if (mouse.left != was_left || mouse.right != was_right || mouse.middle != was_middle) {
+        ui_pointer_state_changed = true;
+    }
+    if (mouse.left != was_left || mouse.right != was_right || mouse.middle != was_middle ||
+        mouse.x != was_x || mouse.y != was_y) {
+        last_input_tick = timer_ticks;
+        ui_input_dirty = true;
+    }
 }

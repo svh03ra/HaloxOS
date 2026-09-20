@@ -74,7 +74,39 @@ CONFIG_SCREEN_HEIGHT := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_HEIGHT[
 CONFIG_DEBUG := $(shell sed -n 's/^#define HALOXOS_CONFIG_DEBUG[[:space:]]*//p' src/config/config.h)
 CONFIG_DEV_MODE := $(shell sed -n 's/^#define HALOXOS_CONFIG_DEV_MODE[[:space:]]*//p' src/config/config.h)
 CONFIG_SCREEN_DEPTH := $(shell sed -n 's/^#define HALOXOS_CONFIG_SCREEN_BPP[[:space:]]*//p' src/config/config.h)
-ASFLAGS := -DHALOXOS_BOOT_SCREEN_WIDTH=$(CONFIG_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(CONFIG_SCREEN_HEIGHT) -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH)
+
+# The geometry the BOOTLOADER is asked for: exactly the configured resolution.
+#
+# On a machine whose display mode can be programmed (Bochs/QEMU BGA, VMware
+# SVGA, IBM VGA) the kernel sets the configured mode itself a moment later, so
+# what GRUB hands over hardly matters. On a bootloader-framebuffer machine -
+# real hardware, or a VM whose video device lacks those register interfaces -
+# there is no protected-mode VBE call path at all: the mode GRUB sets IS the
+# display mode for the whole session, and the desktop is rendered natively at
+# 1:1 inside it.
+#
+# Asking GRUB for the configured geometry therefore makes the DISPLAY exactly
+# the configured resolution: the whole screen is desktop, with no letterbox
+# border and no scaling. The resolution arrows follow the output's own size, so
+# they can still walk through the sizes this display can actually show.
+#
+# The depth stays the configured one: an 8bpp build must never silently become
+# 16bpp (see GFXPAYLOAD below), and a 4bpp build is the classic VGA path, which
+# asks GRUB for a text mode and programs mode 12h itself, because it never
+# takes a linear framebuffer.
+BOOT_SCREEN_WIDTH := $(CONFIG_SCREEN_WIDTH)
+BOOT_SCREEN_HEIGHT := $(CONFIG_SCREEN_HEIGHT)
+
+ASFLAGS := -DHALOXOS_BOOT_SCREEN_WIDTH=$(BOOT_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(BOOT_SCREEN_HEIGHT) -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH)
+
+# The default goal must stay `all`, no matter what gets defined after this
+# line. GNU make picks the FIRST target it reads as the default goal: rules
+# that appear before the first real target silently steal it. The WAD-module
+# stamp (added before `all:`, with a fully @-silent recipe) did exactly that -
+# a bare `make -j4` then "built" only the stamp, printing nothing and exiting
+# 0 as if the whole OS had been built.
+.DEFAULT_GOAL := all
+
 # -fdiagnostics-color=always: make does not run gcc on a TTY (output is
 # piped through RUN_LOG for the build log), so gcc would otherwise drop
 # colors from warnings/errors. 'always' keeps the colored diagnostics the
@@ -197,9 +229,9 @@ BUILD_PROFILE_COLOR := $(COLOR_GREEN)
 endif
 
 BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-ISO := build/HaloxOS-LiveCD_DEV.iso
-DISK := build/HaloxOS-Disk_DEV.img
-FLOPPY := build/HaloxOS-Floppy_DEV.img
+ISO := build/HaloxOS-LiveCD_1.1.iso
+DISK := build/HaloxOS-Disk_1.1.img
+FLOPPY := build/HaloxOS-Floppy_1.1.img
 KERNEL := build/kernel.bin
 KERNEL_ZST := build/kernel.bin.zst
 LOADER := build/loader.elf
@@ -216,7 +248,7 @@ build/loader_main.o \
 build/loader_zstd.o \
 build/loader_shim.o
 
-LOADER_FLAGS := -std=gnu11 $(OPT_LD) -Wall -Wextra -fdiagnostics-color=always -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -fno-asynchronous-unwind-tables -Iloader/include -Ibuild/generated -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH) -DHALOXOS_BOOT_SCREEN_WIDTH=$(CONFIG_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(CONFIG_SCREEN_HEIGHT) -DHALOXOS_FORCE_RAM_ERROR=$(NORAM_TEST)
+LOADER_FLAGS := -std=gnu11 $(OPT_LD) -Wall -Wextra -fdiagnostics-color=always -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -fno-asynchronous-unwind-tables -Iloader/include -Ibuild/generated -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH) -DHALOXOS_BOOT_SCREEN_WIDTH=$(BOOT_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(BOOT_SCREEN_HEIGHT) -DHALOXOS_FORCE_RAM_ERROR=$(NORAM_TEST)
 ifeq ($(CONFIG_SCREEN_DEPTH),4)
 LOADER_FLAGS += -DHALOXOS_BOOT_GRAPHICS_EXPECTED=0
 else
@@ -246,13 +278,35 @@ DOOM_WAD_END_BYTES := $(shell [ -n "$(DOOM_WAD)" ] && echo $$(( (2052 + $(DOOM_W
 # reads through the ATAPI layer - makes the ISO self-contained.
 DOOM_WAD_CD_SECTORS := $(shell [ -n "$(DOOM_WAD)" ] && echo $$(( ($$(stat -c %s $(DOOM_WAD)) + 2047) / 2048 )))
 # The WAD multiboot module is the portable boot-media path for DOOM: GRUB loads
-# it through the boot filesystem, so USB/Ventoy boots do not depend on ATA/ATAPI
+# it through the boot filesystem, so USB stick boots do not depend on ATA/ATAPI
 # visibility after the kernel starts. The loader relocates it safely in RAM.
 # Keep it ON by default for ISO/disk builds; the floppy target explicitly turns
 # it off because a 1.44 MB floppy cannot contain a 4 MB WAD module.
 DOOM_WAD_MODULE_BOOT ?= 1
+
+# A missing WAD is NOT a build failure.
+#
+# The OS is complete without it: the DOOM app reports its own "game data not
+# found" screen at runtime, and the three agents that ship game data (the
+# multiboot module, the ISO tail blob, the second-drive data disk) simply have
+# nothing to ship. Detect the absence once, here, so every later decision
+# agrees with every other one, and warn once (see build-intro).
+#
+# Forcing the module OFF is what keeps the default `make` from depending on
+# game data: with DOOM_WAD_MODULE_BOOT=0 the module drops out of the ISO's
+# prerequisite list AND out of grub.cfg (DOOM_MODULE_CFG is emptied by the
+# block below), so GRUB is never asked to load a file that does not exist.
+ifeq ($(DOOM_WAD),)
+DOOM_WAD_MISSING := 1
+DOOM_WAD_MODULE_BOOT := 0
+DOOM_WAD_HINT := DOOM1.WAD / DOOM.WAD / DOOMU.WAD / DOOM2.WAD, in the repository root or in src/modes/states/graphical/desktop/apps/DOOM/
+else
+DOOM_WAD_MISSING := 0
+DOOM_WAD_HINT :=
+endif
+
 # Multiboot module: GRUB loads the WAD into RAM via BIOS, so the kernel
-# reads it straight from memory on ANY boot media (USB/Ventoy, CD, disk)
+# reads it straight from memory on ANY boot media (USB stick, CD, disk)
 # - no ATA/ATAPI needed on real hardware. The loader relocates it above
 # the kernel memory span before decompressing (WAD_MODULE_RELOC_ADDR).
 DOOM_WAD_MODULE := build/doom.wadmodule
@@ -263,6 +317,32 @@ else
 DOOM_MODULE_CFG :=
 DOOM_WAD_MODULE_DEP :=
 endif
+
+# Stamp that records whether the last grub menu generation included the DOOM
+# WAD module line.
+#
+# The module line depends on whether a WAD FILE exists, and a WAD appearing or
+# disappearing touches no source file - so without this stamp a grub.cfg
+# generated by an earlier WAD-present build would keep its
+# `module /boot/doom.wadmodule` line, and GRUB would then refuse to boot that
+# image ("file not found") even though the build itself succeeded. Same
+# FORCE + text-compare trick as NORAM_STAMP/DOOM_WAD_EMBED_STAMP: the recipe
+# runs on every make invocation but only bumps the mtime when the state
+# actually flipped, which is what forces grub.cfg - and through it the media
+# image - to be regenerated. It is defined HERE because make expands the
+# prerequisite lists of the menu rules below when it reads them.
+DOOM_WAD_MODULE_STAMP := build/generated/doom_wad_module_stamp
+ifeq ($(DOOM_WAD_MODULE_BOOT),1)
+DOOM_WAD_MODULE_STAMP_TEXT := module
+else
+DOOM_WAD_MODULE_STAMP_TEXT := plain
+endif
+
+$(DOOM_WAD_MODULE_STAMP): FORCE | build/generated
+	@mkdir -p build/generated
+	@if [ -f $@ ] && [ "$$(cat $@ 2>/dev/null)" = "$(DOOM_WAD_MODULE_STAMP_TEXT)" ]; then exit 0; fi; \
+	printf '%s' '$(DOOM_WAD_MODULE_STAMP_TEXT)' > $@.tmp || { $(call LOG_ERROR,Failed to write $@); exit 1; }; \
+	mv -f $@.tmp $@ || { $(call LOG_ERROR,Failed to update $@); exit 1; }
 
 # Kernel-embedded WAD: DOOM1.WAD is baked into the kernel image as a
 # data array (generated C source in its own object), so the game data
@@ -314,6 +394,7 @@ DOOM_WAD_INFO_LBA := 2048
 DOOM_WAD_DATA_LBA := 2052
 KERNEL_OBJS := \
 build/boot.o \
+build/realmode.o \
 build/interrupts.o \
 $(CRASH_SYMBOLS_OBJ) \
 build/kernel.o \
@@ -325,6 +406,7 @@ build/user_frame_asset.o \
 build/notepad_icon_asset.o \
 build/terminal_icon_asset.o \
 build/game_icon_asset.o \
+build/demo_icon_asset.o \
 build/program_icon_asset.o \
 build/settings_icon_asset.o \
 build/explorer_icon_asset.o \
@@ -334,19 +416,9 @@ build/snake_icon_asset.o \
 build/guessnum_icon_asset.o \
 build/paint_icon_asset.o \
 	build/power_icon_asset.o \
-	build/run_icon_asset.o \
 	build/box3d_icon_asset.o \
 	build/firecracker_icon_asset.o \
 	build/doom_icon_asset.o \
-	build/run_player_asset.o \
-	build/run_player_died_asset.o \
-build/run_player16_asset.o \
-build/run_coin1_asset.o \
-build/run_coin2_asset.o \
-build/run_coin3_asset.o \
-build/run_coin4_asset.o \
-build/run_brick_asset.o \
-build/run_skull_asset.o \
 
 KERNEL_ENTRY := src/kernel/system/kernel.c
 KERNEL_FRAGMENTS := $(shell find src/driver src/kernel src/modes -name '*.c' ! -path '$(KERNEL_ENTRY)' | sort)
@@ -365,6 +437,11 @@ floppy: build-intro check-build install-deps
 
 build-intro:
 	@$(call LOG_INTRO)
+	@if [ "$(DOOM_WAD_MISSING)" = "1" ]; then \
+		$(call LOG_WARNING,DOOM WAD not found - building the OS without DOOM game data); \
+		$(call LOG_DEP,Searched for: $(DOOM_WAD_HINT)); \
+		$(call LOG_DEP,DOOM will show its own game-data-not-found screen. Everything else builds normally.); \
+	fi
 
 install-deps:
 	@missing=0; \
@@ -432,20 +509,32 @@ $(BUILD_INFO): FORCE | build/generated
 		printf '%s\n' "$$new_text" > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }; \
 	fi
 
+# gfxpayload is the ONLY way a bootloader-framebuffer machine (real hardware,
+# a VM without the BGA/SVGA register interfaces) gets its resolution: the
+# kernel has no protected-mode VBE call path, so whatever GRUB sets is what
+# the desktop renders at - natively at 1:1, since the canvas follows the
+# output mode. GRUB picks the first mode the firmware reports, so the
+# configured geometry is requested first and a ladder of standard sizes
+# follows it: a machine that cannot do the configured mode still boots a real
+# framebuffer instead of dropping back to text mode or the 4bpp VGA path.
+GFXPAYLOAD_LADDER_8 := 1024x768x8,800x600x8,640x480x8
+GFXPAYLOAD_LADDER_16 := 1366x768x32,1366x768x16,1280x720x32,1280x720x16,1280x800x16,1024x768x32,1024x768x16,800x600x32,800x600x16,640x480x32,640x480x16,640x480x15,640x480x8
+
 ifeq ($(CONFIG_SCREEN_DEPTH),4)
 GFXPAYLOAD := text
 else ifeq ($(CONFIG_SCREEN_DEPTH),8)
-# Request the configured geometry in real 8bpp / 256-colour mode.
+# Request the configured geometry in real 8bpp / 256-colour mode (see the
+# BOOT_SCREEN_* note above).
 # Keep only same-depth fallbacks so an 8bpp build never silently becomes 16bpp.
-GFXPAYLOAD := $(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x8
+GFXPAYLOAD := $(BOOT_SCREEN_WIDTH)x$(BOOT_SCREEN_HEIGHT)x8,$(GFXPAYLOAD_LADDER_8)
 else
-# Request the configured geometry in true 16bpp first.  15bpp is a
-# compatibility fallback for older VBE implementations; 8bpp is the final
-# colour fallback.  No 4bpp fallback is requested here.
-GFXPAYLOAD := $(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x16,$(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x15,$(CONFIG_SCREEN_WIDTH)x$(CONFIG_SCREEN_HEIGHT)x8
+# Request the configured geometry in true 16bpp first.  15bpp is a compatibility
+# fallback for older VBE implementations; 8bpp is the final colour fallback.
+# No 4bpp fallback is requested here.
+GFXPAYLOAD := $(BOOT_SCREEN_WIDTH)x$(BOOT_SCREEN_HEIGHT)x16,$(BOOT_SCREEN_WIDTH)x$(BOOT_SCREEN_HEIGHT)x15,$(BOOT_SCREEN_WIDTH)x$(BOOT_SCREEN_HEIGHT)x8,$(GFXPAYLOAD_LADDER_16)
 endif
 
-$(BOOT_DISK_CFG): src/config/config.h | build/generated
+$(BOOT_DISK_CFG): src/config/config.h $(DOOM_WAD_MODULE_STAMP) | build/generated
 	@$(call LOG_COMPILE,boot disk menu,$@)
 	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' $(DOOM_MODULE_CFG) '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
@@ -505,6 +594,10 @@ build/game_icon.bin: src/modes/states/graphical/desktop/apps/game_center/game.pn
 	@$(call LOG_COMPILE,$<,$@)
 	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
 
+build/demo_icon.bin: src/modes/states/graphical/desktop/apps/demo_center/demo.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
 build/program_icon.bin: src/modes/states/graphical/desktop/ui/icons/program.png build/tools/png2indexed | build
 	@$(call LOG_COMPILE,$<,$@)
 	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
@@ -541,10 +634,6 @@ build/power_icon.bin: src/modes/states/graphical/desktop/apps/power/power.png bu
 	@$(call LOG_COMPILE,$<,$@)
 	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
 
-build/run_icon.bin: src/modes/states/graphical/desktop/apps/runGame/appicon.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
 build/box3d_icon.bin: src/modes/states/graphical/desktop/apps/3DBox/appicon.png build/tools/png2indexed | build
 	@$(call LOG_COMPILE,$<,$@)
 	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
@@ -554,42 +643,6 @@ build/firecracker_icon.bin: src/modes/states/graphical/desktop/apps/firecracker/
 	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
 
 build/doom_icon.bin: src/modes/states/graphical/desktop/apps/DOOM/appicon.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_player.bin: src/modes/states/graphical/desktop/apps/runGame/spr/player-32x.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_player_died.bin: src/modes/states/graphical/desktop/apps/runGame/spr/player_died-32x.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_player16.bin: src/modes/states/graphical/desktop/apps/runGame/spr/player.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_coin1.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_coin2.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin2.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_coin3.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin3.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_coin4.bin: src/modes/states/graphical/desktop/apps/runGame/spr/coin4.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_brick.bin: src/modes/states/graphical/desktop/apps/runGame/spr/brick.png build/tools/png2indexed | build
-	@$(call LOG_COMPILE,$<,$@)
-	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
-
-build/run_skull.bin: src/modes/states/graphical/desktop/apps/runGame/spr/skull-48x.png build/tools/png2indexed | build
 	@$(call LOG_COMPILE,$<,$@)
 	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
 
@@ -618,6 +671,10 @@ build/terminal_icon_asset.o: build/terminal_icon.bin
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
 
 build/game_icon_asset.o: build/game_icon.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/demo_icon_asset.o: build/demo_icon.bin
 	@$(call LOG_COMPILE,$<,$@)
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
 
@@ -657,10 +714,6 @@ build/power_icon_asset.o: build/power_icon.bin
 	@$(call LOG_COMPILE,$<,$@)
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
 
-build/run_icon_asset.o: build/run_icon.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
 build/box3d_icon_asset.o: build/box3d_icon.bin
 	@$(call LOG_COMPILE,$<,$@)
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
@@ -673,45 +726,16 @@ build/doom_icon_asset.o: build/doom_icon.bin
 	@$(call LOG_COMPILE,$<,$@)
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
 
-build/run_player_asset.o: build/run_player.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_player_died_asset.o: build/run_player_died.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_player16_asset.o: build/run_player16.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_coin1_asset.o: build/run_coin1.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_coin2_asset.o: build/run_coin2.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_coin3_asset.o: build/run_coin3.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_coin4_asset.o: build/run_coin4.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_brick_asset.o: build/run_brick.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/run_skull_asset.o: build/run_skull.bin
-	@$(call LOG_COMPILE,$<,$@)
-	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
-
-build/boot.o: src/kernel/system/boot.asm | build
+build/boot.o: src/kernel/system/boot.asm Makefile | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(call RUN_LOG,$(AS) $(ASFLAGS) -f elf32 -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
+
+# The real-mode bridge for BIOS calls (VBE mode setting).  It is plain 32-bit
+# protected-mode code plus a 16-bit stub that is copied into low memory at
+# runtime, so it needs no bootloader flags - just the assembler.
+build/realmode.o: src/kernel/system/realmode.asm Makefile | build
+	@$(call LOG_COMPILE,$<,$@)
+	@$(call RUN_LOG,$(AS) -f elf32 -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
 
 build/interrupts.o: src/kernel/system/interrupts.asm | build
 	@$(call LOG_COMPILE,$<,$@)
@@ -761,7 +785,7 @@ build/kernel.o: $(KERNEL_SRC) $(BUILD_INFO) $(CRASH_SYMBOLS_H) $(DOOM_WAD_DATA_C
 
 # ===== zstd boot chain =====
 
-build/loader_boot.o: loader/boot.asm src/config/config.h | build
+build/loader_boot.o: loader/boot.asm src/config/config.h Makefile | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(call RUN_LOG,$(AS) $(ASFLAGS) -f elf32 -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
 
@@ -944,22 +968,31 @@ build/isodir/boot/kernel.bin.zst: $(KERNEL_ZST) | build/isodir/boot/grub
 	@cp $(KERNEL_ZST) $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
 
 # WAD multiboot module: GRUB loads it via BIOS, so the kernel finds the
-# game data in RAM on any boot media (USB/Ventoy, CD, disk).
+# game data in RAM on any boot media (USB stick, CD, disk).
+# The guard, the work and the [OK] line live in ONE shell (a single
+# backslash-joined recipe line) on purpose. Split into separate lines, a
+# missing WAD would only end the guard's own shell - make would then run the
+# remaining lines, write a 4-byte stub and fail on the stat of an empty path.
 build/doom.wadmodule: $(DOOM_WAD) Makefile | build
 	@if [ -z "$(DOOM_WAD)" ]; then \
-		$(call LOG_ERROR,DOOM1.WAD not found); exit 1; \
-	fi
-	@$(call LOG_COMPILE,$(DOOM_WAD),WAD multiboot module $@)
-	@printf 'DWAD' > $@ || exit 1; \
+		$(call LOG_WARNING,DOOM WAD not found - skipping the DOOM multiboot module); \
+		exit 0; \
+	fi; \
+	$(call LOG_COMPILE,$(DOOM_WAD),WAD multiboot module $@); \
+	printf 'DWAD' > $@ || exit 1; \
 	python3 -c "import struct; open('$@','ab').write(struct.pack('<III', $$(stat -c %s $(DOOM_WAD)), 0, 0))" || exit 1; \
-	cat $(DOOM_WAD) >> $@
-	@$(call LOG_OK,WAD multiboot module ready: $@)
+	cat $(DOOM_WAD) >> $@ || exit 1; \
+	$(call LOG_OK,WAD multiboot module ready: $@)
 
 build/isodir/boot/doom.wadmodule: build/doom.wadmodule | build/isodir/boot/grub
-	@$(call LOG_COMPILE,$<,$@)
-	@cp $< $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
+	@if [ ! -f $< ]; then \
+		$(call LOG_WARNING,No WAD module to stage - the ISO ships without DOOM game data); \
+		exit 0; \
+	fi; \
+	$(call LOG_COMPILE,$<,$@); \
+	cp $< $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
 
-build/isodir/boot/grub/grub.cfg: src/config/config.h $(DOOM_WAD_MODULE_DEP) | build/isodir/boot/grub
+build/isodir/boot/grub/grub.cfg: src/config/config.h $(DOOM_WAD_MODULE_DEP) $(DOOM_WAD_MODULE_STAMP) | build/isodir/boot/grub
 	@$(call LOG_COMPILE,boot menu,$@)
 	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    insmod gzio' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' $(DOOM_MODULE_CFG) '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
@@ -990,7 +1023,7 @@ define KERNEL_SIZE_REPORT
 	if python3 -c "import sys; sys.exit(0 if $$mem_mb < $$ram_limit else 1)"; then \
 		mem_left=$$(python3 -c "print('%.2f' % ($$ram_limit - $$mem_mb))"); \
 		if python3 -c "import sys; sys.exit(0 if $$mem_left <= 1.0 else 1)"; then \
-			printf '%b[WARNING!]%b %bOnly %s MB of headroom below the %s - close it up before adding anything heavy.%b\n' '$(COLOR_ORANGE)' '$(COLOR_RESET)' '$(COLOR_YELLOW)' "$$mem_left" "$$ram_note" '$(COLOR_RESET)'; \
+			printf '%b[WARNING!]%b %bOnly %s MB of headroom below the %s.%b\n' '$(COLOR_ORANGE)' '$(COLOR_RESET)' '$(COLOR_YELLOW)' "$$mem_left" "$$ram_note" '$(COLOR_RESET)'; \
 		else \
 			printf '%b[OK]%b %b%s MB of headroom below the %s%b\n' '$(COLOR_GREEN)' '$(COLOR_RESET)' '$(COLOR_BLUE)' "$$mem_left" "$$ram_note" '$(COLOR_RESET)'; \
 		fi; \
@@ -999,17 +1032,21 @@ define KERNEL_SIZE_REPORT
 	fi
 endef
 
+# Same single-shell rule as the WAD module above: a missing WAD must skip the
+# WHOLE disk, not just the guard line (the lines after it would stat an empty
+# path and fail the build).
 $(DOOMDISK): $(DOOM_WAD) Makefile | build
 	@if [ -z "$(DOOM_WAD)" ]; then \
-		$(call LOG_ERROR,DOOM1.WAD not found); exit 1; \
-	fi
-	@$(call LOG_COMPILE,$(DOOM_WAD),DOOM data disk (compact raw LBA $(DOOM_WAD_DATA_LBA)))
-	@truncate -s $$(( ($(DOOM_WAD_DATA_LBA) + $(DOOM_WAD_SECTORS) + 16) * 512 )) $@ || { $(call LOG_ERROR,Failed to create $@); exit 1; }
-	@printf 'DWAD' > build/doom_wad_info.bin || exit 1
-	@python3 -c "import struct; open('build/doom_wad_info.bin','ab').write(struct.pack('<III', $$(stat -c %s $(DOOM_WAD)), $(DOOM_WAD_DATA_LBA), 0))" || exit 1
-	@dd if=build/doom_wad_info.bin of=$@ bs=512 seek=$(DOOM_WAD_INFO_LBA) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write WAD info into $@); exit 1; }
-	@dd if=$(DOOM_WAD) of=$@ bs=512 seek=$(DOOM_WAD_DATA_LBA) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write WAD into $@); exit 1; }
-	@$(call LOG_OK,DOOM data disk ready: $@)
+		$(call LOG_WARNING,DOOM WAD not found - skipping the DOOM game-data disk); \
+		exit 0; \
+	fi; \
+	$(call LOG_COMPILE,$(DOOM_WAD),DOOM data disk (compact raw LBA $(DOOM_WAD_DATA_LBA))); \
+	truncate -s $$(( ($(DOOM_WAD_DATA_LBA) + $(DOOM_WAD_SECTORS) + 16) * 512 )) $@ || { $(call LOG_ERROR,Failed to create $@); exit 1; }; \
+	printf 'DWAD' > build/doom_wad_info.bin || exit 1; \
+	python3 -c "import struct; open('build/doom_wad_info.bin','ab').write(struct.pack('<III', $$(stat -c %s $(DOOM_WAD)), $(DOOM_WAD_DATA_LBA), 0))" || exit 1; \
+	dd if=build/doom_wad_info.bin of=$@ bs=512 seek=$(DOOM_WAD_INFO_LBA) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write WAD info into $@); exit 1; }; \
+	dd if=$(DOOM_WAD) of=$@ bs=512 seek=$(DOOM_WAD_DATA_LBA) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write WAD into $@); exit 1; }; \
+	$(call LOG_OK,DOOM data disk ready: $@)
 
 .PHONY: doomdisk
 doomdisk: | build
@@ -1137,8 +1174,18 @@ run-disk: $(DISK)
 
 # A 1.44 MB floppy cannot contain a 4.0 MB DOOM WAD. Keep the boot floppy
 # unchanged and attach the compact WAD disk as a second IDE device.
-run-floppy: $(FLOPPY) $(DOOMDISK)
-	@$(QEMU_BIN) -fda $(FLOPPY) -drive file=$(DOOMDISK),format=raw,if=ide,index=1,media=disk -boot a -m 16 -vga std
+ifeq ($(DOOM_WAD),)
+# Without a WAD there is no second-drive image to attach, and QEMU would
+# refuse the run over a missing file - so the floppy boots on its own.
+RUN_FLOPPY_DOOM_DEP :=
+RUN_FLOPPY_DOOM_ARGS :=
+else
+RUN_FLOPPY_DOOM_DEP := $(DOOMDISK)
+RUN_FLOPPY_DOOM_ARGS := -drive file=$(DOOMDISK),format=raw,if=ide,index=1,media=disk
+endif
+
+run-floppy: $(FLOPPY) $(RUN_FLOPPY_DOOM_DEP)
+	@$(QEMU_BIN) -fda $(FLOPPY) $(RUN_FLOPPY_DOOM_ARGS) -boot a -m 16 -vga std
 
 # Interactive QEMU launcher: asks for memory size and VGA type, then runs
 # the built ISO. Works on both Windows (MSYS2/MinGW shells with QEMU from

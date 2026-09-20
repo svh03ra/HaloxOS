@@ -135,6 +135,23 @@ static uint32_t pack_framebuffer_color(Color color) {
            (scale_channel_to_mask(color.b, fb.blue_mask_size) << fb.blue_position);
 }
 
+/*
+ * Bytes one output pixel occupies in the framebuffer.
+ *
+ * This exists because `fb.bpp / 8` is NOT it.  The packed 15-bit mode a lot
+ * of VGA BIOSes prefer for direct colour (VBE mode 0x110, 5-5-5) reports
+ * bpp 15, and 15/8 is 1 there - while the pixel really is two bytes wide,
+ * exactly like a 16bpp one.  Every place that turned a column count into a
+ * byte offset with that expression was therefore half a row to the left on
+ * such a card: the letterbox margins, the partial scanouts (moving pointer,
+ * clock, a dragged window) and the band fill.  That is the sheared, pasted
+ * looking desktop that appears on real hardware whose mode comes back as
+ * "640x480x15" while a QEMU or VMware mode is 16bpp and hides it.
+ */
+static size_t output_bytes_per_pixel(void) {
+    return ((size_t)fb.bpp + 7u) / 8u;
+}
+
 static void program_vga_palette(void) {
     if (video_backend == VIDEO_BACKEND_VGA) {
         vga_sync_palette();
@@ -255,8 +272,8 @@ static const uint32_t *present_lut_ready(void) {
  * The LUT already returns the packed framebuffer pixel, so two pixels
  * are merged into one 32-bit store and four into two. That removes most
  * of the per-pixel loop overhead (address scaling, compare, branch) from
- * the 15/16bpp scanout, which is what 86Box, v86 and every weak machine
- * spend their frame time in.
+ * the 15/16bpp scanout, which is where every slow machine spends its frame
+ * time.
  */
 static void present_row_16(const uint16_t *src, uint16_t *dest, uint32_t count,
                            const uint32_t *lut) {
@@ -350,8 +367,8 @@ static bool adopt_multiboot_framebuffer(uint32_t magic, const MultibootInfo *mbi
             fb.type = framebuffer_type;
         }
         if (fb.address != NULL &&
-            fb.width >= OS_WIDTH &&
-            fb.height >= OS_HEIGHT &&
+            fb.width >= OS_BASE_WIDTH &&
+            fb.height >= OS_BASE_HEIGHT &&
             fb.width <= MAX_OUTPUT_WIDTH &&
             fb.height <= MAX_OUTPUT_HEIGHT &&
             fb.pitch >= fb.width * ((fb.bpp + 7u) / 8u)) {
@@ -370,6 +387,19 @@ static bool adopt_multiboot_framebuffer(uint32_t magic, const MultibootInfo *mbi
             }
             video_backend = VIDEO_BACKEND_MULTIBOOT;
             update_present_maps();
+            /*
+             * This is the machine where the mode we just adopted is the only
+             * one the OS would ever see, so it is the one whose resolution
+             * list needs the video BIOS.
+             *
+             * Hand the block to vbe.c and NOTHING MORE.  The firmware is not
+             * called from here any more: this runs before the kernel has an
+             * interrupt table, so a fault inside a real-mode BIOS call had
+             * nowhere to go, and the machine reset with the speaker beeping
+             * and nothing on screen.  The question is asked later, from the
+             * running desktop, and only when the resolution list is opened.
+             */
+            vbe_note_boot_info(mbi);
             return true;
         }
     }
@@ -407,7 +437,7 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
         uint16_t current_bpp = bga_read(VBE_DISPI_INDEX_BPP);
         uint8_t current_type = current_bpp == 8 ? MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED
                                                 : MULTIBOOT_FRAMEBUFFER_TYPE_RGB;
-        if (current_width >= OS_WIDTH && current_height >= OS_HEIGHT &&
+        if (current_width >= OS_BASE_WIDTH && current_height >= OS_BASE_HEIGHT &&
             current_width <= MAX_OUTPUT_WIDTH && current_height <= MAX_OUTPUT_HEIGHT &&
             framebuffer_bpp_supported(current_type, (uint8_t)current_bpp) &&
             (bga_read(VBE_DISPI_INDEX_ENABLE) & VBE_DISPI_ENABLED) != 0) {
@@ -419,14 +449,26 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
             set_default_framebuffer_format(fb.bpp);
             video_backend = VIDEO_BACKEND_BGA;
             update_present_maps();
+            /* Book the booted mode as the fallback the mode setter can put
+             * back if a requested one turns out unusable. */
+            remember_usable_mode();
             return true;
         }
     }
 
-    if (adopt_multiboot_framebuffer(magic, mbi)) {
-        return true;
-    }
-
+    /*
+     * VMware SVGA is tried BEFORE the bootloader framebuffer, and that order
+     * is the whole point of the backend: the bootloader hands over a single
+     * fixed mode, while SVGA can program any mode the host offers (that is
+     * how the Resolution arrows work in Settings). With the old order the
+     * adopt below always succeeded first - GRUB sets gfxpayload on every
+     * boot - so a VMware guest silently ran on the fixed boot framebuffer
+     * and the Settings tab's resolution arrows were permanently greyed out.
+     *
+     * The fallback is unchanged and sits right below: if SVGA cannot give a
+     * usable mode (host bpp limits, fifo problems) the boot framebuffer is
+     * adopted exactly as before.
+     */
     if (init_vmware_svga_backend()) {
         return true;
     }
@@ -437,7 +479,9 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
      * of leaving the machine without a working backend - the graphical
      * boot menu / login then renders exactly like on any other card.
      */
-    serial_trace("WARNING", "VMware SVGA: usable mode not available - using bootloader framebuffer");
+    if (vmware_svga.device_present) {
+        serial_trace("WARNING", "VMware SVGA: usable mode not available - using bootloader framebuffer");
+    }
     vmware_restore_boot_mode();
     if (adopt_multiboot_framebuffer(magic, mbi)) {
         return true;
@@ -453,9 +497,9 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
         uint32_t bar0_text = 0;
         if (find_vga_framebuffer_bar(&bar0_text)) {
             fb.address = (uint8_t *)(uintptr_t)bar0_text;
-            fb.width = OS_WIDTH;
-            fb.height = OS_HEIGHT;
-            fb.pitch = OS_WIDTH;
+            fb.width = OS_BASE_WIDTH;
+            fb.height = OS_BASE_HEIGHT;
+            fb.pitch = OS_BASE_WIDTH;
             fb.bpp = 8;
             fb.type = MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED;
             set_default_framebuffer_format(fb.bpp);
@@ -475,29 +519,27 @@ static bool init_framebuffer(uint32_t magic, const MultibootInfo *mbi) {
     return true;
 }
 
-/* Letterbox margins only need to go black once per output geometry:
- * every scanout writes only the content area, so the bands survive
- * until the next mode change. Tracked with a small geometry cache. */
+/*
+ * Blank the letterbox bands around the content box.
+ *
+ * Every scanout writes only the content box, so the bands around it keep
+ * whatever the last bigger frame left there until they are painted. The
+ * work only has to happen when the geometry changes, which is what
+ * present_margins_dirty tracks (see its note in kernel.c): raised on every
+ * mode or canvas change, lowered here. A full-screen content box has no
+ * bands, so lower it and do nothing.
+ */
 static void present_fill_margins(void) {
-    static uint32_t last_w;
-    static uint32_t last_h;
-    static uint32_t last_pitch;
-    static uint32_t last_bpp;
-    static uintptr_t last_addr;
-    static bool margins_done;
     uint8_t index_black;
 
-    if (margins_done && last_w == fb.width && last_h == fb.height &&
-        last_pitch == fb.pitch && last_bpp == fb.bpp && last_addr == (uintptr_t)fb.address) {
+    if (!present_margins_dirty) {
         return;
     }
+    present_margins_dirty = false;
 
-    last_w = fb.width;
-    last_h = fb.height;
-    last_pitch = fb.pitch;
-    last_bpp = fb.bpp;
-    last_addr = (uintptr_t)fb.address;
-    margins_done = true;
+    if (present_content_width == fb.width && present_content_height == fb.height) {
+        return;
+    }
 
     if (fb.bpp == 8) {
         index_black = color_black;
@@ -520,10 +562,10 @@ static void present_fill_margins(void) {
             if (y < present_offset_y || y >= present_offset_y + present_content_height) {
                 memset_local(fb.address + row_off, 0, fb.pitch);
             } else {
-                uint32_t left_bytes = present_offset_x * (fb.bpp / 8u);
-                uint32_t right_bytes = (fb.width - present_offset_x - present_content_width) * (fb.bpp / 8u);
+                uint32_t left_bytes = present_offset_x * (uint32_t)output_bytes_per_pixel();
+                uint32_t right_bytes = (fb.width - present_offset_x - present_content_width) * (uint32_t)output_bytes_per_pixel();
                 memset_local(fb.address + row_off, 0, left_bytes);
-                memset_local(fb.address + row_off + left_bytes + present_content_width * (fb.bpp / 8u), 0, right_bytes);
+                memset_local(fb.address + row_off + left_bytes + present_content_width * (uint32_t)output_bytes_per_pixel(), 0, right_bytes);
             }
         }
     }
@@ -567,19 +609,61 @@ static void present(void) {
     if (present_content_width == OS_WIDTH && present_content_height == OS_HEIGHT &&
         fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT) {
         const uint32_t *lut = (fb.bpp > 8) ? present_lut_ready() : NULL;
+        /* present_offset_x is a COLUMN, not a byte count, so it has to be
+         * scaled by the output pixel size before it is added to a byte
+         * offset. Adding it raw put a letterboxed desktop at half its
+         * margin on every direct-colour output: a centred 800x600 canvas on
+         * a 1024-wide mode landed 56px left of centre instead of 112. */
+        const size_t left_bytes = (size_t)present_offset_x * output_bytes_per_pixel();
+        const bool direct565 = (fb.bpp == 16 && fb.red_position == 11 && fb.green_position == 5 &&
+                                fb.blue_position == 0 && fb.red_mask_size == 5 &&
+                                fb.green_mask_size == 6 && fb.blue_mask_size == 5 &&
+                                settings_applied.palette_mode == 2);
+
+        /*
+         * The desktop fills the framebuffer exactly - no letterbox in either
+         * direction, and each row's bytes are followed immediately by the next
+         * row's. The scanout is then ONE bulk pass over the whole image
+         * instead of 480 row-sized ones: the per-row form pays a call, a
+         * rep-prefix setup and a destination-address computation per row, so
+         * a 640x480 output pays that 480 times to move the same 614,400
+         * bytes. Nothing about the image changes; only the number of times
+         * the inner loops are entered.
+         */
+        if (present_offset_x == 0 && present_offset_y == 0 &&
+            fb.width == OS_WIDTH && fb.height == OS_HEIGHT &&
+            fb.pitch == (size_t)OS_WIDTH * output_bytes_per_pixel()) {
+            const uint32_t count = (uint32_t)OS_WIDTH * OS_HEIGHT;
+
+            if (fb.bpp == 8) {
+                memcpy_local(fb.address, backbuffer, count);
+            } else if (fb.bpp == 15 || fb.bpp == 16) {
+                if (direct565) {
+                    memcpy_local(fb.address, backbuffer_rgb565, (size_t)count * 2u);
+                } else {
+                    present_row_16(backbuffer_rgb565, (uint16_t *)(void *)fb.address, count, lut);
+                }
+            } else if (fb.bpp == 24) {
+                present_row_24(backbuffer_rgb565, fb.address, count, lut);
+            } else {
+                present_row_32(backbuffer_rgb565, (uint32_t *)(void *)fb.address, count, lut);
+            }
+
+            if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+                vmware_update_screen();
+            }
+            return;
+        }
 
         for (uint32_t y = 0; y < OS_HEIGHT; ++y) {
             const uint8_t *src = &backbuffer[y * OS_WIDTH];
             const uint16_t *src_rgb = &backbuffer_rgb565[y * OS_WIDTH];
-            size_t row_off = (size_t)(y + present_offset_y) * fb.pitch + present_offset_x;
+            size_t row_off = (size_t)(y + present_offset_y) * fb.pitch + left_bytes;
 
             if (fb.bpp == 8) {
                 memcpy_local(fb.address + row_off, src, OS_WIDTH);
             } else if (fb.bpp == 15 || fb.bpp == 16) {
-                if (fb.bpp == 16 && fb.red_position == 11 && fb.green_position == 5 &&
-                    fb.blue_position == 0 && fb.red_mask_size == 5 &&
-                    fb.green_mask_size == 6 && fb.blue_mask_size == 5 &&
-                    settings_applied.palette_mode == 2) {
+                if (direct565) {
                     /* True-color and the framebuffer layout IS RGB565:
                      * straight bulk copy, zero per-pixel math. */
                     memcpy_local(fb.address + row_off, src_rgb, OS_WIDTH * 2u);
@@ -594,10 +678,13 @@ static void present(void) {
                                OS_WIDTH, lut);
             }
         }
-        /* Black letterbox margins (fb larger than the desktop). */
-        if (fb.height > OS_HEIGHT || fb.width > OS_WIDTH) {
-            present_fill_margins();
-        }
+        /* Black letterbox bands (an output larger than the desktop). Called
+         * on every 1:1 scanout, not only for a geometry that has bands: the
+         * flag it reads is raised by every mode/canvas change, and a bigger
+         * content box - which has no bands of its own - still has to retire
+         * the bands it painted over, which is exactly what the older
+         * geometry-keyed cache never did. */
+        present_fill_margins();
         if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
             vmware_update_screen();
         }
@@ -637,8 +724,16 @@ static void present(void) {
 
             if (fb.bpp == 24) {
                 uint8_t *dest = fb.address + (size_t)y * fb.pitch;
+                uint32_t out_black = lut[0];
                 for (uint32_t x = 0; x < fb.width; ++x) {
-                    uint32_t packed = lut[backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]];
+                    /* Outside the content box this branch used to sample
+                     * source column 0 (the maps are 0 out there) and paint
+                     * a strip of the desktop into the letterbox band. */
+                    bool inside = inside_y && x >= present_offset_x &&
+                                  x < present_offset_x + present_content_width;
+                    uint32_t packed = inside
+                        ? lut[backbuffer_rgb565[(size_t)sy * OS_WIDTH + present_x_map[x]]]
+                        : out_black;
                     dest[x * 3 + 0] = (uint8_t)(packed & 0xFFu);
                     dest[x * 3 + 1] = (uint8_t)((packed >> 8) & 0xFFu);
                     dest[x * 3 + 2] = (uint8_t)((packed >> 16) & 0xFFu);
@@ -661,6 +756,22 @@ static void present(void) {
 }
 
 /*
+ * Whether a partial scan-out can be honoured at all.
+ *
+ * A scaled output, a backend that owns the whole screen (the VGA planar and
+ * VMware SVGA paths) or a framebuffer smaller than the canvas all force the
+ * full-frame scan-out instead. Callers that would otherwise spread one
+ * change over two rectangles ask this first: on those backends two
+ * rectangles are two whole frames painted, not one small one.
+ */
+static bool present_partial_supported(void) {
+    return present_content_width == OS_WIDTH && present_content_height == OS_HEIGHT &&
+           fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT &&
+           video_backend != VIDEO_BACKEND_VGA &&
+           video_backend != VIDEO_BACKEND_VMWARE_SVGA;
+}
+
+/*
  * Partial scanout: present only one rectangle of the desktop.
  *
  * This is what makes a moving pointer cheap. A full frame repaints the
@@ -675,9 +786,7 @@ static void present_rect(int x, int y, int w, int h) {
         return;
     }
 
-    if (present_content_width != OS_WIDTH || present_content_height != OS_HEIGHT ||
-        fb.width < OS_WIDTH || fb.height < OS_HEIGHT ||
-        video_backend == VIDEO_BACKEND_VGA || video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+    if (!present_partial_supported()) {
         present();
         return;
     }
@@ -690,10 +799,15 @@ static void present_rect(int x, int y, int w, int h) {
         return;
     }
 
+    /* Same unit rule as present(): the margin is a column count, so it is
+     * scaled here too (1 byte per pixel on the indexed output, 2/3/4 on the
+     * direct-colour ones). Without the scale a partial scanout - the moving
+     * pointer and the clock - painted its rectangle 56px off on a letterboxed
+     * 16bpp desktop. */
     if (fb.bpp == 8) {
         for (int row = y; row < y + h; ++row) {
             memcpy_local(fb.address + (size_t)(row + present_offset_y) * fb.pitch +
-                             present_offset_x + (size_t)x,
+                             (size_t)present_offset_x + (size_t)x,
                          &backbuffer[(size_t)row * OS_WIDTH + x], (size_t)w);
         }
         return;
@@ -701,11 +815,12 @@ static void present_rect(int x, int y, int w, int h) {
 
     {
         const uint32_t *lut = present_lut_ready();
+        const size_t left_bytes = (size_t)present_offset_x * output_bytes_per_pixel();
 
         for (int row = y; row < y + h; ++row) {
             const uint16_t *src = &backbuffer_rgb565[(size_t)row * OS_WIDTH + x];
             uint8_t *dest = fb.address + (size_t)(row + present_offset_y) * fb.pitch +
-                            present_offset_x + (size_t)x * (fb.bpp / 8u);
+                            left_bytes + (size_t)x * output_bytes_per_pixel();
 
             if (fb.bpp == 15 || fb.bpp == 16) {
                 present_row_16(src, (uint16_t *)(void *)dest, (uint32_t)w, lut);
@@ -721,7 +836,10 @@ static void present_rect(int x, int y, int w, int h) {
 
 static void clear_screen(uint8_t color) {
     if (present_need_index_plane()) {
-        memset_local(backbuffer, color, sizeof(backbuffer));
+        /* The canvas, not sizeof(backbuffer): the storage is sized for the
+         * largest canvas the OS can grow to, and clearing all of it would
+         * touch far more memory than the mode actually shows. */
+        memset_local(backbuffer, color, (size_t)OS_WIDTH * OS_HEIGHT);
     }
     if (present_need_rgb_plane()) {
         memset16_local(backbuffer_rgb565, pixel_rgb565_fast(color), OS_WIDTH * OS_HEIGHT);
@@ -767,15 +885,18 @@ static uint16_t plane_get_pixel_rgb(int x, int y) {
 
 /*
  * Window clip: when set, all pixel/rect/image drawing is confined to
- * the client area of the app window being rendered, so scenes like
- * Title Run! or the firecracker demo can never bleed outside their
- * window face onto the desktop. render_app_window enables it around
- * each app draw and disables it afterwards.
+ * the client area of the app window being rendered, so a scene like
+ * the firecracker demo can never bleed outside its window face onto
+ * the desktop. render_app_window enables it around each app draw and
+ * disables it afterwards.
  */
 static int clip_x0 = 0;
 static int clip_y0 = 0;
-static int clip_x1 = OS_WIDTH;
-static int clip_y1 = OS_HEIGHT;
+/* Compile-time defaults, not the live canvas: clip_x1/clip_y1 are set by
+ * reset_clip() before every draw, and OS_WIDTH is a runtime value that
+ * cannot appear in a static initializer. */
+static int clip_x1 = OS_BASE_WIDTH;
+static int clip_y1 = OS_BASE_HEIGHT;
 static bool clip_enabled = false;
 
 static void set_window_clip(int x, int y, int w, int h) {
@@ -885,39 +1006,48 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
     }
 
     if (!clip_enabled && x >= 0 && y >= 0 && x + 8 <= OS_WIDTH && y + 8 <= OS_HEIGHT) {
-        /* Fully on-screen: write rows directly, no per-pixel clipping.
-         * Colors and plane elections are resolved once per glyph, not per
-         * pixel, and only the presented plane is written. */
+        /*
+         * Fully on-screen: write rows directly, no per-pixel clipping.
+         *
+         * The two row bases are computed once and then stepped, instead of
+         * being recomputed from `(y + row) * OS_WIDTH + x` for both planes on
+         * every one of the eight rows: that address expression is two
+         * multiplies per row, i.e. more work than the eight pixel stores it
+         * precedes. Colours and the plane election still resolve once per
+         * glyph, never per pixel.
+         */
         bool want_index = present_need_index_plane();
         bool want_rgb = present_need_rgb_plane();
         uint16_t fg_rgb = want_rgb ? pixel_rgb565_fast(fg) : 0;
         uint16_t bg_rgb = (want_rgb && !transparent) ? pixel_rgb565_fast(bg) : 0;
+        uint8_t *dest = &backbuffer[(size_t)y * OS_WIDTH + x];
+        uint16_t *dest_rgb = &backbuffer_rgb565[(size_t)y * OS_WIDTH + x];
+        const uint8_t *glyph = font8x8_basic[glyph_index];
 
         for (int row = 0; row < 8; ++row) {
-            uint8_t bits = font8x8_basic[glyph_index][row];
-            uint8_t *dest = &backbuffer[(y + row) * OS_WIDTH + x];
-            uint16_t *dest_rgb = &backbuffer_rgb565[(y + row) * OS_WIDTH + x];
-
-            if (bits == 0) {
-                if (!transparent) {
-                    if (want_index) memset_local(dest, bg, 8);
-                    if (want_rgb) memset16_local(dest_rgb, bg_rgb, 8);
-                }
-                continue;
-            }
-            if (bits == 0xFFu) {
-                if (want_index) memset_local(dest, fg, 8);
-                if (want_rgb) memset16_local(dest_rgb, fg_rgb, 8);
-                continue;
-            }
+            uint8_t bits = glyph[row];
 
             if (transparent) {
-                for (int col = 0; col < 8; ++col) {
-                    if ((bits >> col) & 1u) {
-                        if (want_index) dest[col] = fg;
-                        if (want_rgb) dest_rgb[col] = fg_rgb;
-                    }
+                /*
+                 * Transparent text is what essentially every label, menu
+                 * entry and line of terminal output uses, and a glyph row has
+                 * a handful of set bits in it. Walking those bits directly
+                 * costs a bit-scan and a store each; the bit-at-a-time form
+                 * paid eight shifts and eight tests to find the same pixels,
+                 * and read both planes' flags at every column.
+                 */
+                while (bits != 0) {
+                    int col = __builtin_ctz(bits);
+                    if (want_index) dest[col] = fg;
+                    if (want_rgb) dest_rgb[col] = fg_rgb;
+                    bits = (uint8_t)(bits & (uint8_t)(bits - 1u));
                 }
+            } else if (bits == 0) {
+                if (want_index) memset_local(dest, bg, 8);
+                if (want_rgb) memset16_local(dest_rgb, bg_rgb, 8);
+            } else if (bits == 0xFFu) {
+                if (want_index) memset_local(dest, fg, 8);
+                if (want_rgb) memset16_local(dest_rgb, fg_rgb, 8);
             } else {
                 for (int col = 0; col < 8; ++col) {
                     if ((bits >> col) & 1u) {
@@ -929,6 +1059,8 @@ static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transp
                     }
                 }
             }
+            dest += OS_WIDTH;
+            dest_rgb += OS_WIDTH;
         }
         return;
     }
@@ -1379,6 +1511,94 @@ static int text_pixel_width(const char *text) {
 }
 
 /*
+ * Resolve a packed4 asset's 16-entry palette into the forms the output
+ * planes want: RGB565 always, and the kernel palette index only when the
+ * indexed plane is live. Both packed4 blitters start here, so the two
+ * cannot disagree about what a colour index means.
+ */
+static void packed4_palette_resolve(const uint8_t *image, uint16_t *pal_rgb,
+                                    uint8_t *pal_index, int *pal_count) {
+    const uint8_t *palette = image_packed4_palette(image);
+    int count = (int)image[6];
+    bool want_index = present_need_index_plane();
+
+    if (count > MAX_PACKED4_COLOURS) {
+        count = MAX_PACKED4_COLOURS;
+    }
+    for (int i = 0; i < MAX_PACKED4_COLOURS; ++i) {
+        uint16_t rgb = 0;
+
+        if (i < count) {
+            rgb = (uint16_t)(palette[i * 2] | ((uint16_t)palette[i * 2 + 1] << 8));
+            if (want_index) {
+                pal_index[i] = plane_index_for_rgb565(rgb);
+            }
+        } else if (want_index) {
+            pal_index[i] = 0;
+        }
+        pal_rgb[i] = rgb;
+    }
+    *pal_count = count;
+}
+
+/*
+ * Per-source-byte expansion table for packed4 rows.
+ *
+ * One source byte carries two pixels, so a 256-entry table keyed on the byte
+ * removes the nibble split, the palette bound test and one of the two stores
+ * from the inner loop: the loop body becomes a byte load, a table load and a
+ * single store per two pixels.
+ *
+ * It is cached rather than rebuilt per call. The wallpaper is re-expanded on
+ * every desktop repaint, and the tables describe the asset plus the plane
+ * election only - neither of which changes between frames - so rebuilding
+ * them 256 times per frame was pure waste on the most executed loop in the
+ * OS, and cost 1.5KB of stack in the blitter's frame for the privilege.
+ */
+static const uint8_t *packed4_tables_image = NULL;
+static bool packed4_tables_index = false;
+static bool packed4_tables_rgb = false;
+static uint32_t packed4_pair_rgb[256];
+static uint16_t packed4_pair_index[256];
+
+static void packed4_pair_tables(const uint8_t *image) {
+    uint16_t pal_rgb[MAX_PACKED4_COLOURS];
+    uint8_t pal_index[MAX_PACKED4_COLOURS];
+    bool want_index = present_need_index_plane();
+    bool want_rgb = present_need_rgb_plane();
+    int count;
+
+    /* The asset's palette comes out of the asset itself, so the image
+     * pointer plus the plane election is the whole key. */
+    if (image == packed4_tables_image && want_index == packed4_tables_index &&
+        want_rgb == packed4_tables_rgb) {
+        return;
+    }
+    packed4_palette_resolve(image, pal_rgb, pal_index, &count);
+
+    /* Entries past the palette clamp to colour 0 exactly as the per-pixel
+     * form did, so a byte whose nibbles are out of range paints the same
+     * pixels it painted before. */
+    for (uint32_t byte = 0; byte < 256; ++byte) {
+        int hi = (int)(byte >> 4);
+        int lo = (int)(byte & 0x0Fu);
+
+        if (hi >= count) {
+            hi = 0;
+        }
+        if (lo >= count) {
+            lo = 0;
+        }
+        packed4_pair_rgb[byte] = (uint32_t)pal_rgb[hi] | ((uint32_t)pal_rgb[lo] << 16);
+        packed4_pair_index[byte] = (uint16_t)((uint16_t)pal_index[hi] | ((uint16_t)pal_index[lo] << 8));
+    }
+
+    packed4_tables_image = image;
+    packed4_tables_index = want_index;
+    packed4_tables_rgb = want_rgb;
+}
+
+/*
  * Packed 4bpp blit. Two pixels leave per source byte, and the 16-entry
  * palette is resolved once per image: RGB565 for the presented plane, and
  * (only when the indexed plane is live) the kernel palette index for it.
@@ -1388,25 +1608,18 @@ static void draw_image_packed4(const uint8_t *image, int x0, int y0, int x1, int
                                int src_x0, int src_y0) {
     uint16_t width = image_width(image);
     uint32_t stride = ((uint32_t)width + 1u) / 2u;
-    const uint8_t *palette = image_packed4_palette(image);
     const uint8_t *packed = image_packed4_pixels(image);
-    int count = (int)image[6];
     bool want_index = present_need_index_plane();
     bool want_rgb = present_need_rgb_plane();
     uint16_t pal_rgb[MAX_PACKED4_COLOURS];
     uint8_t pal_index[MAX_PACKED4_COLOURS];
+    int count;
+    const uint32_t *pair_rgb = packed4_pair_rgb;
+    const uint16_t *pair_index = packed4_pair_index;
     int row_w = x1 - x0;
 
-    for (int i = 0; i < MAX_PACKED4_COLOURS; ++i) {
-        uint16_t rgb = 0;
-        if (i < count) {
-            rgb = (uint16_t)(palette[i * 2] | ((uint16_t)palette[i * 2 + 1] << 8));
-            if (want_index) {
-                pal_index[i] = plane_index_for_rgb565(rgb);
-            }
-        }
-        pal_rgb[i] = rgb;
-    }
+    packed4_pair_tables(image);
+    packed4_palette_resolve(image, pal_rgb, pal_index, &count);
 
     for (int py = 0; py < y1 - y0; ++py) {
         const uint8_t *row = packed + (size_t)(src_y0 + py) * stride;
@@ -1414,21 +1627,47 @@ static void draw_image_packed4(const uint8_t *image, int x0, int y0, int x1, int
         uint8_t *dest_idx = &backbuffer[(size_t)(y0 + py) * OS_WIDTH + x0];
         int px = 0;
 
-        /* Two pixels per source byte while both nibbles stay in range. */
-        if ((src_x0 & 1) == 0) {
-            for (; px + 1 < row_w; px += 2) {
-                uint8_t byte = row[(uint32_t)(src_x0 + px) >> 1];
-                int hi = (int)(byte >> 4);
-                int lo = (int)(byte & 0x0Fu);
-                if (hi >= count) hi = 0;
-                if (lo >= count) lo = 0;
-                if (want_rgb) {
-                    uint32_t pair = (uint32_t)pal_rgb[hi] | ((uint32_t)pal_rgb[lo] << 16);
-                    *(uint32_t *)(void *)(dest_rgb + px) = pair;
+        /*
+         * Two pixels per source byte while the byte covers both of them, and
+         * only when a single plane is live (the election is complementary, so
+         * this is the normal case; both live would need both stores).
+         *
+         * Eight pixels (four source bytes) per iteration: the body is two
+         * table loads and two stores per pair, so widening the step is what
+         * takes the loop overhead out of the row. This is the full-screen
+         * wallpaper on every desktop repaint, the single most executed loop
+         * in the OS.
+         */
+        if ((src_x0 & 1) == 0 && want_rgb != want_index) {
+            const uint8_t *src = row + (uint32_t)src_x0 / 2u;
+
+            if (want_rgb) {
+                uint32_t *dest32 = (uint32_t *)(void *)dest_rgb;
+
+                for (; px + 7 < row_w; px += 8) {
+                    dest32[0] = pair_rgb[src[0]];
+                    dest32[1] = pair_rgb[src[1]];
+                    dest32[2] = pair_rgb[src[2]];
+                    dest32[3] = pair_rgb[src[3]];
+                    dest32 += 4;
+                    src += 4;
                 }
-                if (want_index) {
-                    dest_idx[px] = pal_index[hi];
-                    dest_idx[px + 1] = pal_index[lo];
+                for (; px + 1 < row_w; px += 2) {
+                    *dest32++ = pair_rgb[*src++];
+                }
+            } else {
+                uint16_t *dest16 = (uint16_t *)(void *)dest_idx;
+
+                for (; px + 7 < row_w; px += 8) {
+                    dest16[0] = pair_index[src[0]];
+                    dest16[1] = pair_index[src[1]];
+                    dest16[2] = pair_index[src[2]];
+                    dest16[3] = pair_index[src[3]];
+                    dest16 += 4;
+                    src += 4;
+                }
+                for (; px + 1 < row_w; px += 2) {
+                    *dest16++ = pair_index[*src++];
                 }
             }
         }
@@ -1512,6 +1751,120 @@ static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) 
                 if (want_rgb) dest_r[px] = src_r[px];
                 if (want_index) dest_p[px] = pixels != NULL ? src_p[px] : rgb565_index_lut[src_r[px]];
             }
+        }
+    }
+}
+
+/*
+ * Blit an image scaled to FILL the whole canvas (nearest neighbour).
+ *
+ * The wallpapers are 640x480 paintings and a desktop from the mode table can
+ * be anything from the 640x480 base up to the canvas cap, so something has to
+ * decide what a bigger desktop shows. This is the "Stretch" wallpaper fit:
+ * one painting fills the screen at whatever size the desktop is, instead of
+ * repeating (a tiled painting shows its own borders as seams across the
+ * middle of the screen). Nearest neighbour is exact for the 1:1 case and
+ * cheap for the rest, because the source row and column are held in
+ * accumulators - no division per pixel, and no scaled copy of the art is
+ * stored anywhere.
+ *
+ * The per-pixel format work is the same three asset forms draw_image_at
+ * knows: v3 packed4 (what the backgrounds ship as), v2 rgb565 with the index
+ * LUT, and v1 with its stored index plane.
+ */
+static void draw_image_stretched(const uint8_t *image) {
+    uint16_t src_w = image_width(image);
+    uint16_t src_h = image_height(image);
+    int dst_w = OS_WIDTH;
+    int dst_h = OS_HEIGHT;
+    bool want_index = present_need_index_plane();
+    bool want_rgb = present_need_rgb_plane();
+    bool packed4 = image_is_packed4(image);
+    const uint16_t *rgb565 = packed4 ? NULL : image_rgb565(image);
+    const uint8_t *pixels = (!packed4 && !image_is_v2(image)) ? image_pixels(image) : NULL;
+    const uint8_t *packed = packed4 ? image_packed4_pixels(image) : NULL;
+    uint32_t packed_stride = ((uint32_t)src_w + 1u) / 2u;
+    uint16_t pal_rgb[MAX_PACKED4_COLOURS];
+    uint8_t pal_index[MAX_PACKED4_COLOURS];
+    int pal_count = packed4 ? (int)image[6] : 0;
+    int sy = 0;
+    int acc_y = 0;
+
+    if (src_w == 0 || src_h == 0 || dst_w <= 0 || dst_h <= 0) {
+        return;
+    }
+
+    /*
+     * The art is already the size of the canvas: nothing is stretched, and
+     * this is the case the OS boots into (a 640x480 wallpaper on the 640x480
+     * canvas). Routing it to the exact blitter is not a micro-optimisation -
+     * the loop below walks destination pixels with a source-column
+     * accumulator and re-tests the asset form, the palette bound and both
+     * plane elections on every one of them, which measured at ~29 emulated
+     * instructions per pixel and made the wallpaper 86% of a full desktop
+     * repaint. The 1:1 blitter resolves all of that once and expands two
+     * packed pixels per source byte.
+     *
+     * Only taken with the window clip off: the stretch below ignores the clip
+     * (it only ever paints the desktop), while the 1:1 blitter honours it.
+     */
+    if ((int)src_w == dst_w && (int)src_h == dst_h && !clip_enabled) {
+        draw_image_at(image, 0, 0, false);
+        return;
+    }
+
+    if (packed4) {
+        packed4_palette_resolve(image, pal_rgb, pal_index, &pal_count);
+    } else if (!rgb565_index_lut_ready && image_is_v2(image)) {
+        rgb565_index_lut_build();
+    }
+
+    for (int y = 0; y < dst_h; ++y) {
+        uint16_t *dest_r = &backbuffer_rgb565[(size_t)y * (size_t)dst_w];
+        uint8_t *dest_p = &backbuffer[(size_t)y * (size_t)dst_w];
+        int sx = 0;
+        int acc_x = 0;
+
+        for (int x = 0; x < dst_w; ++x) {
+            if (packed4) {
+                uint8_t byte = packed[(size_t)sy * packed_stride + ((uint32_t)sx >> 1)];
+                int entry = (int)((sx & 1) ? (byte & 0x0Fu) : (byte >> 4));
+                if (entry >= pal_count) {
+                    entry = 0;
+                }
+                if (want_rgb) {
+                    dest_r[x] = pal_rgb[entry];
+                }
+                if (want_index) {
+                    dest_p[x] = pal_index[entry];
+                }
+            } else {
+                size_t si = (size_t)sy * src_w + (size_t)sx;
+                if (want_rgb) {
+                    dest_r[x] = rgb565[si];
+                }
+                if (want_index) {
+                    dest_p[x] = pixels != NULL ? pixels[si] : rgb565_index_lut[rgb565[si]];
+                }
+            }
+
+            /* Advance the source column by src_w per destination column:
+             * the accumulator is the fraction of a source pixel covered so
+             * far, so this is exact nearest-neighbour with no division. */
+            acc_x += (int)src_w;
+            while (acc_x >= dst_w) {
+                acc_x -= dst_w;
+                ++sx;
+            }
+        }
+
+        acc_y += (int)src_h;
+        while (acc_y >= dst_h) {
+            acc_y -= dst_h;
+            ++sy;
+        }
+        if (sy >= (int)src_h) {
+            sy = (int)src_h - 1;
         }
     }
 }
