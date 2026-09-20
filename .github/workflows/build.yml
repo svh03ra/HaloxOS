@@ -47,8 +47,8 @@ jobs:
 
       - name: Verify Build
         run: |
-          test -s build/HaloxOS-LiveCD_DEV.iso
-          test -s build/HaloxOS-Disk_DEV.img
-          test -s build/HaloxOS-Floppy_DEV.img
+          test -s build/HaloxOS-LiveCD_1.1.iso
+          test -s build/HaloxOS-Disk_1.1.img
+          test -s build/HaloxOS-Floppy_1.1.img
           echo "All builds are ready:"
-          ls -lh build/HaloxOS-LiveCD_DEV.iso build/HaloxOS-Disk_DEV.img build/HaloxOS-Floppy_DEV.img
+          ls -lh build/HaloxOS-LiveCD_1.1.iso build/HaloxOS-Disk_1.1.img build/HaloxOS-Floppy_1.1.img
