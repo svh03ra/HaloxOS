@@ -1411,6 +1411,16 @@ doomdisk: | build
 # self-contained, so only the boot payloads (loader, kernel, WAD) are read
 # from the ISO. The part_* list matches the insmod lines grub-mkrescue
 # writes into its own core config.
+#
+# grub-mkrescue must be pointed at the i386-pc platform directory (-d).
+# Without it, it scans every platform under /usr/lib/grub and tries to
+# build EFI cores as well, applying this same --modules list to each one.
+# BIOS-only modules (biosdisk, vbe) do not exist for x86_64-efi, so a host
+# with grub-efi-amd64-bin installed fails with:
+#   grub-mkrescue: error: cannot open '.../x86_64-efi/biosdisk.mod'
+# HaloxOS boots through BIOS El Torito, so building only i386-pc is what
+# the ISO actually needs.
+ISO_GRUB_DIR := /usr/lib/grub/i386-pc
 ISO_GRUB_MODULES := biosdisk iso9660 fat normal echo configfile multiboot \
 	search search_fs_file vbe gzio \
 	part_acorn part_amiga part_apple part_bsd part_dfly part_dvh \
@@ -1420,7 +1430,7 @@ ISO_GRUB_MODULES := biosdisk iso9660 fat normal echo configfile multiboot \
 $(ISO): build/isodir/boot/loader.elf build/isodir/boot/kernel.bin.zst $(DOOM_WAD_MODULE_DEP) build/isodir/boot/grub/grub.cfg $(DOOM_WAD) build/bios-serial.template tools/fatpatch.py Makefile | $(OUT_DIR)
 	@$(call LOG_COMPILE,build/isodir,$@)
 	@if [ "$(DOOM_WAD_MODULE_BOOT)" != "1" ]; then rm -f build/isodir/boot/doom.wadmodule; fi
-	@$(call RUN_LOG,grub-mkrescue --modules='$(ISO_GRUB_MODULES)' -o $@ build/isodir) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@$(call RUN_LOG,grub-mkrescue -d $(ISO_GRUB_DIR) --modules='$(ISO_GRUB_MODULES)' -o $@ build/isodir) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 	@# ISO tail, in order: [pad to 1 MiB alignment][embedded FAT12
 	@# volume carrying the pre-allocated bios-serial.log][DOOM WAD blob
 	@# + info when a WAD is present]. The FAT volume is registered as
