@@ -21,6 +21,12 @@ static uint8_t from_bcd(uint8_t value) {
 static char datetime_cache[24];
 static bool datetime_cache_valid = false;
 static uint8_t datetime_cache_second = 0xFF;
+/* PIT second of the last CMOS poll.  The old refresh still did one port
+ * read on every frame (60 outb/inb pairs a second) just to discover the
+ * RTC second had not changed.  The taskbar clock only needs a new reading
+ * once a second, so gate the poll on the PIT second and make the common
+ * frame pay no ISA bus traffic at all. */
+static uint32_t datetime_last_poll_second = 0xFFFFFFFFu;
 
 /*
  * Taskbar clock widget: a 12-hour time line with seconds over a
@@ -200,10 +206,17 @@ static bool read_datetime_uncached(char *buffer, size_t max_len) {
  * a bus-hogging retry loop. */
 static void refresh_datetime_cache(void) {
     uint8_t now_second;
+    uint32_t poll_second;
 
     if ((int32_t)(timer_ticks - datetime_retry_tick) < 0) {
         return;
     }
+
+    poll_second = timer_ticks / TIMER_HZ;
+    if (poll_second == datetime_last_poll_second) {
+        return;
+    }
+    datetime_last_poll_second = poll_second;
 
     now_second = cmos_read(0x00);
     if (datetime_cache_valid && now_second == datetime_cache_second) {

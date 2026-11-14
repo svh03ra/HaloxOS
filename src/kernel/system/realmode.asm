@@ -7,6 +7,11 @@
 ; BIOS, a VM whose card has no Bochs/VMware registers), and its services live behind
 ; INT 10h - that is, in real mode.  This file is that bridge.
 ;
+; The bridge also carries the debug boot-log flush: the kernel has no USB
+; stack, so writing the serial trace back onto a dd'd ISO stick goes
+; through INT 13h (BIOS disk services) on this same path, with the vector
+; chosen per call through the RM_R_INT word (0x10 when zero).
+;
 ; The bridge needs a 16-bit code descriptor, which the flat table the kernel
 ; runs on does not have, so it installs a table of its own (realmode_install_gdt)
 ; with one entry added.  That table has to describe the SAME world the kernel
@@ -91,9 +96,23 @@ RM_R_EBP     equ 0x18
 RM_R_EFLAGS  equ 0x1C
 RM_R_DS      equ 0x20
 RM_R_ES      equ 0x24
+RM_R_INT     equ 0x26                    ; WORD: interrupt vector the stub
+                                         ; executes. Zero (the state the VBE
+                                         ; callers leave it in) keeps the
+                                         ; historical INT 10h, so the video
+                                         ; path needs no change; the boot-log
+                                         ; flush fills in 0x13 for BIOS disk
+                                         ; services.
 
 RM_FAULT     equ RM_LOW_BASE + 0x028     ; the vector a BIOS call faulted on,
                                          ; 0xFF while nothing has
+RM_STACK_SEG equ RM_LOW_BASE + 0x030     ; WORD: SS for the real-mode stub.  The
+                                         ; C side picks a stack that is clear of
+                                         ; live boot data (realmode_configure_stack)
+                                         ; because a firmware USB disk stack can
+                                         ; use several KB - far more than the
+                                         ; 2.5 KB the old fixed 0x9F00 top left.
+RM_STACK_PTR equ RM_LOW_BASE + 0x032     ; WORD: SP for the real-mode stub
 
 RM_SAVED     equ RM_LOW_BASE + 0x040     ; callers' state to come back to
 RM_S_ESP     equ 0x00
@@ -108,8 +127,16 @@ RM_IDT_LIMIT equ 0x03FF
 
 RM_BUF       equ RM_LOW_BASE + 0x100     ; 768 bytes for the VBE info blocks
 RM_STUB      equ RM_LOW_BASE + 0x400     ; the 16-bit stub is copied here
-RM_STACK_TOP equ 0x9F00                  ; real-mode stack top, just under the
-                                         ; EBDA, growing down towards the stub
+RM_STACK_TOP equ 0x9F00                  ; fallback stack top when nothing has
+                                         ; configured RM_STACK_SEG/RM_STACK_PTR
+                                         ; yet: the historical small stack, still
+                                         ; below the EBDA and above the stub
+RM_IVT_SAVE  equ RM_LOW_BASE + 0x800     ; 64-byte copy of the firmware's IVT
+                                         ; (0x0000..0x003F), taken before the
+                                         ; stub borrows the exception vectors
+RM_IVT_FLAG  equ RM_IVT_SAVE + 0x040     ; BYTE: 1 once that copy is complete, so
+                                         ; a fault during the copy itself cannot
+                                         ; make the handler restore half an IVT
 
 RM_SEL_CODE32 equ 0x10
 RM_SEL_DATA32 equ 0x18
@@ -128,6 +155,21 @@ global rm_stub16_end
 ; segment register at it.  Called once, before anything uses the bridge.
 realmode_install_gdt:
     push eax
+
+    ; A sane stack exists even if no caller configured one: the low block is
+    ; ordinary memory, so its words can hold anything after the loader.  The
+    ; configured size is kept when it is a legal one (1 KB..32 KB); anything
+    ; else falls back to the historical top.
+    mov ax, [RM_STACK_PTR]
+    test ax, ax
+    jz .stack_default
+    cmp ax, 0x8000
+    jbe .stack_done
+.stack_default:
+    mov word [RM_STACK_SEG], 0
+    mov word [RM_STACK_PTR], RM_STACK_TOP
+.stack_done:
+
     lgdt [rm_gdt_pointer]
     mov ax, RM_SEL_DATA32
     mov ds, ax
@@ -179,6 +221,16 @@ realmode_call:
     out 0x21, al
     out 0xA1, al
 
+    ; The real-mode stack was chosen by realmode_configure_stack() (a size
+    ; and position that clear the multiboot data and the EBDA).  With nothing
+    ; configured yet, keep the historical 0x9F00 top rather than running on
+    ; whatever SS:SP the caller happened to have.
+    cmp word [RM_STACK_PTR], 0
+    jne .stack_ready
+    mov word [RM_STACK_SEG], 0
+    mov word [RM_STACK_PTR], RM_STACK_TOP
+.stack_ready:
+
     ; the interrupt table the stub will use: the IVT, at the bottom of memory
     mov word [RM_IDTR], RM_IDT_LIMIT
     mov dword [RM_IDTR + 2], 0
@@ -189,6 +241,21 @@ realmode_call:
     mov edi, RM_STUB
     mov ecx, rm_stub16_end - rm_stub16_start
     rep movsb
+
+    ; ---- caller's interrupt vector into the copied `int imm8` ---------
+    ; The operand byte of the stub's INT instruction is patched per call
+    ; (the original blob in .text keeps INT 10h, so nothing here is
+    ; permanent).  Zero means INT 10h: the VBE callers clear the whole
+    ; register file, including this word, so they behave exactly as
+    ; before the field existed.  INT 13h (0x13) is outside the borrowed
+    ; exception range 0x00..0x0F, so it reaches the firmware's own disk
+    ; services untouched, the same way INT 10h reaches the video BIOS.
+    mov al, [RM_REGS + RM_R_INT]
+    test al, al
+    jnz .vector_chosen
+    mov al, 0x10
+.vector_chosen:
+    mov [RM_STUB + (rm16_int_op - rm_stub16_start) + 1], al
 
     ; ---- switch to the 16-bit view -----------------------------------
     ; The 16-bit code descriptor is flat and 16-bit, so this lands on the
@@ -274,13 +341,56 @@ rm_stub16_start:
     jmp word 0x0000:(RM_STUB + (rm16_real - rm_stub16_start))
 
 rm16_real:
-    ; The same for every data segment: real-mode zeros, so the BIOS can save,
+    ; The same for EVERY data segment: real-mode zeros, so the BIOS can save,
     ; restore and far-jump our state without ever seeing a protected selector.
+    ;
+    ; FS and GS are especially easy to miss because the original VBE callers
+    ; do not use them.  Leaving either at the protected-mode data selector
+    ; (0x18) leaves its protected descriptor cache live after CR0.PE is
+    ; cleared.  SeaBIOS happens not to inspect those registers, but VMware's
+    ; CSM and several physical CSM implementations do while handling INT 13h;
+    ; their disk calls can then fail even though DS/ES/SS look like real mode.
+    ; A firmware-visible real-mode call must therefore normalise all six data
+    ; segment registers, not just the three this stub addresses directly.
     xor ax, ax
     mov ds, ax
     mov es, ax
+    mov fs, ax
+    mov gs, ax
+    ;
+    ; ESP needs the same treatment even though only SP is named below.  A
+    ; 16-bit load into SP leaves the upper half of ESP holding whatever the
+    ; protected-mode caller left there, and the CPU does not clear it when
+    ; CR0.PE goes to zero.  A BIOS written for 32-bit flat mode (SeaBIOS is)
+    ; then pushes its register frame at the full 32-bit SS:ESP - far above the
+    ; stack we reserved - while its own `movzx esp,sp` view of the frame is
+    ; down at the real-mode SP.  It reads a frame nobody wrote, dispatches on
+    ; the garbage function number and, in the worst case, sets a legacy video
+    ; mode under the running desktop.  Zero the high half before SS is loaded,
+    ; so the `mov ss` / `mov sp` pair below stays adjacent and interrupt-atomic.
+    xor esp, esp
+    mov ax, [RM_STACK_SEG]
     mov ss, ax
-    mov sp, RM_STACK_TOP
+    mov sp, [RM_STACK_PTR]
+
+    ; Save the firmware's own interrupt table before borrowing any of it.
+    ;
+    ; The stub installs its exception trampolines over vectors 0x00..0x0F and
+    ; used to leave them there after the call.  That is not cosmetic: a
+    ; USB-legacy keyboard is injected into real mode by calling the INT 09h
+    ; handler found in this table, and a firmware INT 13h handler can chain
+    ; through INT 08h for timing.  Leaving our trampolines behind replaced
+    ; both with code that switches back to protected mode and returns into a
+    ; stale stack - the machine then ignores every key (or hangs) even though
+    ; the kernel itself is fine.  The copy is restored on both the normal and
+    ; the fault path, so the firmware's real-mode world is exactly as found.
+    mov byte [RM_IVT_FLAG], 0
+    cld
+    xor si, si
+    mov di, RM_IVT_SAVE
+    mov cx, 16
+    rep movsd
+    mov byte [RM_IVT_FLAG], 1
 
     ; Point the interrupt table at the IVT.  Clearing CR0.PE does not reload
     ; it, so without this the first INT still reads its vector out of whatever
@@ -340,7 +450,10 @@ rm16_set_vectors:
     mov edi, [RM_REGS + RM_R_EDI]
     mov ebp, [RM_REGS + RM_R_EBP]
 
-    int 0x10
+rm16_int_op:
+    int 0x10    ; the operand byte is patched per call by realmode_call
+                ; (see the vector note there); the original stays 0x10 so
+                ; the blob is intact for the next copy
 
     ; Result registers back into the file.  The low 16 bits of the flags are
     ; enough: VBE reports failure only through carry.  DS is reloaded first,
@@ -364,6 +477,24 @@ rm16_set_vectors:
     mov dword [RM_REGS + RM_R_EBP], ebp
     mov ax, es
     mov word [RM_REGS + RM_R_ES], ax
+
+    ; Hand the firmware its interrupt table back before leaving.  See the
+    ; save above: the trampolines must not outlive the call.
+    ;
+    ; ES must be zeroed first.  A BIOS is free to return with any ES it
+    ; likes, and this copy goes through ES:DI - with a firmware-chosen ES the
+    ; restore would write the saved table somewhere else entirely and leave
+    ; the trampolines in place, which is exactly the failure this restore
+    ; exists to prevent.  (The save at the top is immune: ES is still zero
+    ; there, because the caller's ES is loaded only just before the INT.)
+    xor ax, ax
+    mov es, ax
+    cld
+    mov si, RM_IVT_SAVE
+    xor di, di
+    mov cx, 16
+    rep movsd
+    mov byte [RM_IVT_FLAG], 0
 
     ; ---- straight back into protected mode ---------------------------
     ; CS still holds the real-mode zero loaded above; the far jump is what
@@ -407,14 +538,31 @@ rm16_vec_%+rm16_vector:
 ; the stack.
 rm16_fault:
     ; Nothing the fault left behind can be trusted, SS:SP included, so this
-    ; establishes its own stack before it touches anything at all.
+    ; establishes its own stack before it touches anything at all.  ESP's high
+    ; half is as stale here as it is in rm16_real, so it is cleared first.
     mov bl, al
     xor ax, ax
     mov ds, ax
     mov es, ax
+    mov fs, ax
+    mov gs, ax
+    xor esp, esp
+    mov ax, [RM_STACK_SEG]
     mov ss, ax
-    mov sp, RM_STACK_TOP
+    mov sp, [RM_STACK_PTR]
     mov [RM_FAULT], bl
+
+    ; Give the IVT back too, unless the fault happened while it was being
+    ; copied (RM_IVT_FLAG is only set once the whole 64 bytes are there).
+    cmp byte [RM_IVT_FLAG], 0
+    je .ivt_done
+    cld
+    mov si, RM_IVT_SAVE
+    xor di, di
+    mov cx, 16
+    rep movsd
+    mov byte [RM_IVT_FLAG], 0
+.ivt_done:
 
     ; ... and leaves real mode exactly the way the normal path does, only
     ; reporting the failure rather than carrying on with the call.
@@ -424,6 +572,12 @@ rm16_fault:
     jmp dword RM_SEL_CODE32:realmode_faulted
 
 rm_stub16_end:
+
+; The IVT copy lives directly above the copied stub.  If the stub ever grows
+; into it the save would overwrite running code; fail the build instead.
+%if (rm_stub16_end - rm_stub16_start) > (RM_IVT_SAVE - RM_STUB)
+%error "realmode stub no longer fits below the IVT save area"
+%endif
 
 ; ---------------------------------------------------------------------------
 ; The bridge's GDT and the layout table the C side reads.
@@ -467,5 +621,9 @@ rm_layout:
     dd RM_R_DS
     dd RM_R_ES
     dd RM_FAULT
+    dd RM_R_INT
+    dd RM_STACK_SEG
+    dd RM_STACK_PTR
+    dd RM_IVT_FLAG
 
 section .note.GNU-stack noalloc noexec nowrite progbits

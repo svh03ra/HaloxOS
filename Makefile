@@ -16,7 +16,15 @@ LOG_FILE = build_log.txt
 # Truncate the log while make reads the makefile (not from a recipe): with
 # a parallel build the recipes start out of order, and a recipe that
 # truncated the log could otherwise wipe lines another job already wrote.
+#
+# Only the top-level make may do this.  The kernel recipe invokes
+# sub-makes for its second and third link passes; without the guard each
+# of those would truncate the log mid-build and throw away every line
+# that explained a failure (exactly what made the first-run parallel
+# failure so hard to see).
+ifeq ($(MAKELEVEL),0)
 $(shell : > $(LOG_FILE))
+endif
 
 # Parallel build. The kernel amalgamation, the loader, zstd, the asset
 # pipeline and the ISO packaging are independent targets, so the default
@@ -30,7 +38,15 @@ endif
 ifeq ($(JOBS),0)
 JOBS := 2
 endif
+# Only the top-level make sets the job count.  A sub-make inherits the
+# jobserver through MAKEFLAGS; forcing -j again makes make reset the
+# jobserver ("warning: -jN forced in makefile") and can hide ordering
+# bugs instead of preserving the parent's scheduling.
+ifeq ($(MAKELEVEL),0)
+ifeq ($(filter -j%,$(MAKEFLAGS)),)
 MAKEFLAGS += -j$(JOBS)
+endif
+endif
 
 # Run a tool while preserving its real exit status, showing stdout/stderr live,
 # and appending the same complete diagnostics to build_log.txt.
@@ -53,6 +69,13 @@ COLOR_BLUE := \033[94m
 COLOR_RED := \033[31m
 COLOR_ORANGE := \033[38;5;208m
 COLOR_WHITE := \033[97m
+
+# Copy a finished boot image into $(OUT_DIR).  Shared by every media rule
+# and by the format conversions, so the output folder always mirrors the
+# images this build actually produced.
+define PUBLISH_OUT
+case "$(1)" in $(OUT_DIR)/*) ;; *) mkdir -p $(OUT_DIR) && cp -f $(1) $(OUT_DIR)/ || { $(call LOG_ERROR,Failed to copy $(1) to $(OUT_DIR)/); exit 1; } ;; esac
+endef
 
 LOG_COMPILE = printf '%b[Compiling...]%b %b%s%b %b%s%b\n' '$(COLOR_GREEN)' '$(COLOR_RESET)' '$(COLOR_YELLOW)' "$(1)" '$(COLOR_RESET)' '$(COLOR_BLUE)' "$(2)" '$(COLOR_RESET)' && printf '[Compiling...] %s -> %s\n' "$(1)" "$(2)" >> $(LOG_FILE)
 LOG_COMPILE_LOG = printf '[Compiling...] %s -> %s\n' "$(1)" "$(2)" >> $(LOG_FILE)
@@ -119,18 +142,43 @@ OPT ?= -O2
 OPT_LD ?= -O2
 CFLAGS := -std=gnu11 $(OPT) -Wall -Wextra -fdiagnostics-color=always -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -fno-asynchronous-unwind-tables -fno-unwind-tables -Ibuild/generated -Isrc/modes/states/graphical/desktop/apps/DOOM/port/include
 LDFLAGS := -T linker.ld
-# Debug builds keep EBP frame pointers so the crash handler can walk the
-# stack chain, embed debug line info for the BSOD backtrace symbol table,
-# and get the addr2line symbol data generated after the final link.
-# Release builds omit the frame pointer: one less register spill per call
-# in the rendering hot paths.
+# Both profiles keep EBP frame pointers: the crash handler walks the stack
+# chain to show a backtrace, and release builds print the raw return
+# addresses (their symbol table is intentionally empty). Debug builds also
+# embed line info for the BSOD backtrace symbol table and the addr2line
+# symbol data generated after the final link.
+CFLAGS += -fno-omit-frame-pointer
 ifeq ($(CONFIG_DEBUG),1)
 # -g1 = line tables only. The crash handler needs file:line (addr2line)
 # and the EBP chain needs frame pointers; full -g type/debug info is not
 # read anywhere, costs megabytes of object file I/O and slows every
 # compile and link. -g1 keeps the whole backtrace feature and builds far
 # faster.
-CFLAGS += -fno-omit-frame-pointer -g1
+CFLAGS += -g1
+endif
+# Real-hardware bring-up knob: ask the firmware's INT 16h keyboard path even
+# when the 8042 has already delivered bytes.  The default (0) only falls back
+# when port 0x60 has been silent, so a working PS/2 path never double-reads.
+# The forced mode is a test mode only: a firmware INT 16h peek can consume a
+# scancode the 8042 path would otherwise have delivered, so it is expected to
+# lose keys on a machine whose 8042 works.
+BIOS_KBD_FORCE ?= 0
+ifneq ($(BIOS_KBD_FORCE),0)
+CFLAGS += -DHALOXOS_FORCE_BIOS_KEYBOARD=1
+endif
+# Diagnostic knob: set to 0 to remove the INT 16h keyboard fallback entirely.
+# This isolates a suspected firmware-keyboard/8042 interaction without
+# touching the PS/2 polling path.
+BIOS_KBD_FALLBACK ?= 1
+ifeq ($(BIOS_KBD_FALLBACK),0)
+CFLAGS += -DHALOXOS_DISABLE_BIOS_KEYBOARD_FALLBACK=1
+endif
+# Native xHCI HID keyboard test knob: initialize the driver even when the
+# 8042 or firmware INT 16h path looks usable.  The default (0) leaves a
+# working legacy path untouched.
+XHCI_HID_FORCE ?= 0
+ifneq ($(XHCI_HID_FORCE),0)
+CFLAGS += -DHALOXOS_FORCE_XHCI_HID=1
 endif
 HOSTCFLAGS = -std=c11 -O2 -Wall -Wextra -fdiagnostics-color=always $(shell pkg-config --cflags libpng)
 HOSTLIBS = $(shell pkg-config --libs libpng)
@@ -170,10 +218,72 @@ else
 QEMU_BIN := qemu-system-i386
 endif
 
-QEMU_ARGS = -cdrom $(ISO)
-ifneq ($(filter serial,$(MAKECMDGOALS)),)
-QEMU_ARGS += -serial stdio -monitor none
+# qemu-img converts the raw disk image into the native format of the other
+# hypervisors. It ships beside qemu-system-i386 in the Windows installer, so
+# try that sibling first, then PATH, then the same common install locations.
+ifeq ($(HOST_OS),windows)
+QEMU_IMG := $(shell \
+	if [ -n "$(QEMU_BIN)" ] && [ -x "$(dir $(QEMU_BIN))qemu-img.exe" ]; then \
+		echo "$(dir $(QEMU_BIN))qemu-img.exe"; \
+	else \
+		q=$$(command -v qemu-img 2>/dev/null); \
+		if [ -n "$$q" ]; then echo "$$q"; \
+		else \
+			for c in "C:/Program Files/qemu/qemu-img.exe" \
+			         "C:/Program Files (x86)/qemu/qemu-img.exe" \
+			         "C:/qemu/qemu-img.exe" \
+			         "C:/msys64/mingw64/bin/qemu-img.exe" \
+			         "C:/msys64/usr/bin/qemu-img.exe" \
+			         "$(USERPROFILE)/qemu/qemu-img.exe"; do \
+				if [ -f "$$c" ]; then echo "$$c"; break; fi; \
+			done; \
+		fi; \
+	fi)
+else
+QEMU_IMG := qemu-img
 endif
+
+# ===== debug serial COM1 capture (debug builds only) =====
+#
+# Every QEMU boot of a built medium (CD-ROM ISO, hard disk, floppy, USB
+# stick) captures the full COM1 debug trace into a temporary
+# build/bios-serial.log, regenerated fresh on each boot (and wiped by
+# `make clean` together with the rest of build/). The log carries the
+# whole boot story in order:
+#   - the firmware's own debug output (SeaBIOS -> debugcon port 0x402),
+#     so the file starts at the very first BIOS step
+#   - the zstd loader's pre-compression trace ([LDR] lines, printed
+#     before the compressed kernel starts)
+#   - the kernel's serial_trace() lines, including the crash dump
+#
+# The BIOS debugcon backend and the COM1 backend both append to the SAME
+# file (append mode is why each launcher removes the log right before
+# QEMU starts): the BIOS stream finishes before the loader begins
+# writing, so the log reads chronologically.
+#
+# `make run serial` keeps the live COM1 view on the terminal and tees
+# the same stream into the file through the stdio chardev's logfile
+# option. Release builds keep the previous behaviour: plain stdio in
+# serial mode, no capture otherwise.
+SERIAL_LOG := build/bios-serial.log
+
+ifeq ($(CONFIG_DEBUG),1)
+ifneq ($(filter serial,$(MAKECMDGOALS)),)
+SERIAL_LOG_ARGS := -chardev stdio,id=ser0,logfile=$(SERIAL_LOG),logappend=on -serial chardev:ser0 -monitor none -chardev file,id=biosdbg,path=$(SERIAL_LOG),append=on -device isa-debugcon,iobase=0x402,chardev=biosdbg
+else
+SERIAL_LOG_ARGS := -chardev file,id=debuglog,path=$(SERIAL_LOG),append=on,mux=on -serial chardev:debuglog -device isa-debugcon,iobase=0x402,chardev=debuglog
+endif
+SERIAL_LOG_RESET := rm -f $(SERIAL_LOG)
+SERIAL_LOG_DONE := $(call LOG_CLEAN_OK,Serial COM1 debug log saved: $(SERIAL_LOG))
+else
+ifneq ($(filter serial,$(MAKECMDGOALS)),)
+SERIAL_LOG_ARGS := -serial stdio -monitor none
+endif
+SERIAL_LOG_RESET :=
+SERIAL_LOG_DONE :=
+endif
+
+QEMU_ARGS = -cdrom $(ISO) $(SERIAL_LOG_ARGS)
 
 # DOOM game data disk (raw WAD stamp, same layout as the hard-disk
 # build): attached as a second drive so the ISO boot can read the WAD
@@ -201,13 +311,18 @@ NORAM_STAMP_TEXT := test
 else
 NORAM_STAMP_TEXT := normal
 endif
-ARCH_PACKAGES := nasm gcc binutils grub xorriso pkgconf libpng dosfstools parted mtools zstd python3 qemu-system-x86
-DEBIAN_PACKAGES := nasm gcc gcc-multilib binutils grub-pc-bin grub-common xorriso pkg-config libpng-dev dosfstools parted mtools zstd python3 qemu-system-x86
+ARCH_PACKAGES := nasm gcc binutils grub xorriso pkgconf libpng dosfstools parted mtools zstd python3 qemu-system-x86 qemu-img
+DEBIAN_PACKAGES := nasm gcc gcc-multilib binutils grub-pc-bin grub-common xorriso pkg-config libpng-dev dosfstools parted mtools zstd python3 qemu-system-x86 qemu-utils
 
-ifneq ($(filter disk,$(MAKECMDGOALS)),)
+# The hypervisor format targets build the hard disk too, so a one-shot
+# `make vmware` (without an explicit `disk` goal) reports the right media.
+DISK_FORMAT_GOALS := vmware vmw vmdk qemu qcow qcow2 qem hyper-v hyperv hv vhd virtualbox vb vbox vdi
+ifneq ($(filter disk $(DISK_FORMAT_GOALS),$(MAKECMDGOALS)),)
 BUILD_MEDIA := Hard Disk
 else ifneq ($(filter floppy,$(MAKECMDGOALS)),)
 BUILD_MEDIA := Floppy
+else ifneq ($(filter usb,$(MAKECMDGOALS)),)
+BUILD_MEDIA := USB
 else
 BUILD_MEDIA := CD-ROM (Default)
 endif
@@ -229,9 +344,38 @@ BUILD_PROFILE_COLOR := $(COLOR_GREEN)
 endif
 
 BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-ISO := build/HaloxOS-LiveCD_1.1.iso
-DISK := build/HaloxOS-Disk_1.1.img
-FLOPPY := build/HaloxOS-Floppy_1.1.img
+# Output folder: every finished image is written directly into build/out/,
+# so the build tree never accumulates loose .iso/.img/.vmdk copies next to
+# the object files. `make out` only reports what is available.
+OUT_DIR := build/out
+
+ISO := $(OUT_DIR)/HaloxOS-LiveCD_1.1.iso
+DISK := $(OUT_DIR)/HaloxOS-Disk_1.1.img
+# A BIOS-bootable USB image, not a dd'd ISO hybrid. A USB stick is a hard
+# disk to the firmware; the ISO's first partition starts at LBA 1 and leaves
+# no conventional MBR gap, which some BIOSes refuse to boot. This image keeps
+# GRUB's boot.img in the MBR and core.img in the 1 MiB gap before a FAT32
+# partition, matching the GNU GRUB BIOS installation layout.
+USB := $(OUT_DIR)/HaloxOS-USB_1.1.img
+USB_PART_START := 2048
+USB_PART_END := 126975
+USB_PART_SECTORS := 124928
+# The USB image also carries the ISO's 512 KiB FAT12 log volume, registered
+# as MBR partition 2.  A 64 MiB image is 131072 512-byte sectors.
+USB_LOG_START := 126976
+USB_LOG_SECTORS := 1024
+# Converted copies of the same raw disk image, one per hypervisor format.
+# `make disk <format>` builds the raw image and then converts it; the raw
+# image itself is never replaced, so the QEMU launchers keep working.
+DISK_VMDK  := $(DISK:.img=.vmdk)
+DISK_QCOW2 := $(DISK:.img=.qcow2)
+DISK_VHD   := $(DISK:.img=.vhd)
+DISK_VDI   := $(DISK:.img=.vdi)
+FLOPPY := $(OUT_DIR)/HaloxOS-Floppy_1.1.img
+
+# The output folder must exist before the media recipes write into it.
+$(OUT_DIR):
+	@mkdir -p $(OUT_DIR)
 KERNEL := build/kernel.bin
 KERNEL_ZST := build/kernel.bin.zst
 LOADER := build/loader.elf
@@ -241,14 +385,26 @@ CRASH_SYMBOLS_H := build/generated/crash_symbols.h
 CRASH_SYMBOLS_C := build/generated/crash_symbols.c
 CRASH_SYMBOLS_OBJ := build/crash_symbols.o
 CRASH_SYMBOL_MAX := 400
+# Loader-side backtrace table (debug builds). Separate output directory and
+# object so the loader's symbols never collide with the kernel's table; the
+# generated files are the same format tools/mkcrashtable.py emits.
+LOADER_SYMBOLS_DIR := build/generated/loader_symbols
+LOADER_SYMBOLS_H := $(LOADER_SYMBOLS_DIR)/crash_symbols.h
+LOADER_SYMBOLS_C := $(LOADER_SYMBOLS_DIR)/crash_symbols.c
+LOADER_SYMBOLS_OBJ := build/loader_symbols.o
+LOADER_SYMBOL_MAX := 512
 RAM_REQUIREMENT_H := build/generated/ram_requirement.h
 LOADER_OBJS := \
 build/loader_boot.o \
 build/loader_main.o \
 build/loader_zstd.o \
-build/loader_shim.o
+build/loader_shim.o \
+$(LOADER_SYMBOLS_OBJ)
 
-LOADER_FLAGS := -std=gnu11 $(OPT_LD) -Wall -Wextra -fdiagnostics-color=always -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -fno-asynchronous-unwind-tables -Iloader/include -Ibuild/generated -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH) -DHALOXOS_BOOT_SCREEN_WIDTH=$(BOOT_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(BOOT_SCREEN_HEIGHT) -DHALOXOS_FORCE_RAM_ERROR=$(NORAM_TEST)
+LOADER_FLAGS := -std=gnu11 $(OPT_LD) -Wall -Wextra -fdiagnostics-color=always -ffreestanding -fno-stack-protector -fno-pic -m32 -march=i386 -fno-asynchronous-unwind-tables -I$(LOADER_SYMBOLS_DIR) -Iloader/include -Ibuild/generated -DHALOXOS_BOOT_SCREEN_DEPTH=$(CONFIG_SCREEN_DEPTH) -DHALOXOS_BOOT_SCREEN_WIDTH=$(BOOT_SCREEN_WIDTH) -DHALOXOS_BOOT_SCREEN_HEIGHT=$(BOOT_SCREEN_HEIGHT) -DHALOXOS_FORCE_RAM_ERROR=$(NORAM_TEST) -DHALOXOS_LOADER_TRACE=$(CONFIG_DEBUG)
+ifeq ($(CONFIG_DEBUG),1)
+LOADER_FLAGS += -g -fno-omit-frame-pointer
+endif
 ifeq ($(CONFIG_SCREEN_DEPTH),4)
 LOADER_FLAGS += -DHALOXOS_BOOT_GRAPHICS_EXPECTED=0
 else
@@ -264,6 +420,20 @@ BOOT_FLOPPY_CFG := build/generated/boot_floppy.cfg
 CORE_DISK_CFG := build/generated/core_disk.cfg
 CORE_FLOPPY_CFG := build/generated/core_floppy.cfg
 DESKTOP_LAYOUT := build/generated/desktop_layout_sector.bin
+# Debug serial boot log (src/kernel/debug/bootlog.c): a pre-allocated
+# bios-serial.log template the kernel auto-saves the COM1 debug trace
+# into. The ISO embeds it in a small FAT12 volume appended after the
+# ISO9660 content and registered in the hybrid MBR, so a dd'd USB stick
+# shows the file to any host; the disk image keeps it in the existing
+# FAT16 partition. No extraction step: the file is just there.
+BOOTLOG_FILE_BYTES := 65536
+BOOTLOG_FAT_KB := 512
+BOOTLOG_FAT_BLOCKS := 256
+
+# The pre-allocated, zero-filled template with its hidden tail stamp.
+build/bios-serial.template: tools/mkfatlog.py | build
+	@$(call LOG_COMPILE,bios-serial.log template,$@)
+	@$(PYTHON) tools/mkfatlog.py $@ $(BOOTLOG_FILE_BYTES) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 # The caller may point at any legal IWAD explicitly, e.g.
 # `make DOOM_WAD=/path/to/DOOM2.WAD`.  Without an override select only
 # canonical IWAD filenames; do not glob *.wad, because a PWAD alone is
@@ -311,11 +481,21 @@ endif
 # the kernel memory span before decompressing (WAD_MODULE_RELOC_ADDR).
 DOOM_WAD_MODULE := build/doom.wadmodule
 ifeq ($(DOOM_WAD_MODULE_BOOT),1)
+# The module is optional: on a machine at the 5 MB boot floor GRUB cannot
+# stage a 4 MB module and prints "error: out of memory." before continuing.
+# Keep the console terminal active around it: hiding that message behind a
+# serial-only window made a failed module load look exactly like a boot hang
+# on machines with no serial port.
 DOOM_MODULE_CFG := '    module /boot/doom.wadmodule'
 DOOM_WAD_MODULE_DEP := build/isodir/boot/doom.wadmodule
+# The disk image copies the module straight from build/.  It must be a
+# prerequisite, not just an `[ -f ]` test in the recipe: after `make clean`
+# the module does not exist yet, and grub.cfg still references it.
+DOOM_WAD_MODULE_IMAGE_DEP := $(DOOM_WAD_MODULE)
 else
 DOOM_MODULE_CFG :=
 DOOM_WAD_MODULE_DEP :=
+DOOM_WAD_MODULE_IMAGE_DEP :=
 endif
 
 # Stamp that records whether the last grub menu generation included the DOOM
@@ -419,17 +599,35 @@ build/paint_icon_asset.o \
 	build/box3d_icon_asset.o \
 	build/firecracker_icon_asset.o \
 	build/doom_icon_asset.o \
+	build/coinrun_icon_asset.o \
+	build/stress_icon_asset.o \
+	build/coin_spr_player_asset.o \
+	build/coin_spr_player_flip_asset.o \
+	build/coin_spr_skull_asset.o \
+	build/coin_spr_brick_asset.o \
+	build/coin_spr_coin1_asset.o \
+	build/coin_spr_coin1_flip_asset.o \
+	build/coin_spr_coin2_asset.o \
+	build/coin_spr_coin2_flip_asset.o \
+	build/coin_spr_coin3_asset.o \
+	build/coin_spr_coin3_flip_asset.o \
+	build/coin_spr_coin4_asset.o \
+	build/coin_spr_1up_asset.o \
+	build/coin_spr_hud_lives_asset.o \
+	build/coin_spr_hud_clock_asset.o \
 
 KERNEL_ENTRY := src/kernel/system/kernel.c
 KERNEL_FRAGMENTS := $(shell find src/driver src/kernel src/modes -name '*.c' ! -path '$(KERNEL_ENTRY)' | sort)
 KERNEL_HEADERS := src/config/config.h
 KERNEL_SRC := $(KERNEL_ENTRY) $(KERNEL_FRAGMENTS) $(KERNEL_HEADERS)
 
-.PHONY: all clean run run-iso run-disk run-floppy serial disk floppy build-intro install-deps FORCE
+.PHONY: all clean run run-iso run-disk run-floppy run-usb run-usb-iso serial capture disk floppy usb out build-intro install-deps FORCE
 all: build-intro check-build install-deps $(ISO)
 	@$(call LOG_OK,Build completed successfully!)
 
 disk: build-intro check-build install-deps $(DISK)
+
+usb: build-intro check-build install-deps $(USB)
 
 floppy: build-intro check-build install-deps
 	@$(call LOG_WARNING,Floppy target: kernel-embedded WAD disabled so the kernel fits a 1.44 MB floppy)
@@ -450,6 +648,7 @@ install-deps:
 	command -v ld >/dev/null 2>&1 || missing=1; \
 	command -v grub-mkrescue >/dev/null 2>&1 || missing=1; \
 	command -v grub-mkimage >/dev/null 2>&1 || missing=1; \
+	command -v grub-file >/dev/null 2>&1 || missing=1; \
 	command -v xorriso >/dev/null 2>&1 || missing=1; \
 	if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists libpng; then missing=1; fi; \
 	command -v mkfs.fat >/dev/null 2>&1 || missing=1; \
@@ -459,6 +658,7 @@ install-deps:
 	command -v zstd >/dev/null 2>&1 || missing=1; \
 	command -v $(PYTHON) >/dev/null 2>&1 || missing=1; \
 	command -v qemu-system-i386 >/dev/null 2>&1 || missing=1; \
+	command -v qemu-img >/dev/null 2>&1 || missing=1; \
 	if [ $$missing -eq 1 ]; then \
 		$(call LOG_DEP,Before starting build installing required packages.); \
 		$(call LOG_DEP,[#] Checking build dependencies... Let's get some orderin'); \
@@ -481,6 +681,23 @@ install-deps:
 check-build:
 	@if [ -f "$(ISO)" ]; then \
 		$(call LOG_WARNING,You have already built exists!); \
+	fi
+
+# Re-sync the output folder from whatever this tree has already produced,
+# without rebuilding anything.  The media rules copy their own image as they
+# finish; this target is for trees that built several formats over time.
+out:
+	@mkdir -p $(OUT_DIR)
+	@count=0; \
+	for f in $(ISO) $(DISK) $(USB) $(FLOPPY) $(DISK_VMDK) $(DISK_QCOW2) $(DISK_VHD) $(DISK_VDI); do \
+		if [ -f "$$f" ]; then \
+			count=$$((count + 1)); \
+		fi; \
+	done; \
+	if [ $$count -eq 0 ]; then \
+		$(call LOG_WARNING,No images to publish yet - build one medium first); \
+	else \
+		$(call LOG_OK,$$count image(s) available in $(OUT_DIR)/); \
 	fi
 
 build:
@@ -517,8 +734,8 @@ $(BUILD_INFO): FORCE | build/generated
 # configured geometry is requested first and a ladder of standard sizes
 # follows it: a machine that cannot do the configured mode still boots a real
 # framebuffer instead of dropping back to text mode or the 4bpp VGA path.
-GFXPAYLOAD_LADDER_8 := 1024x768x8,800x600x8,640x480x8
-GFXPAYLOAD_LADDER_16 := 1366x768x32,1366x768x16,1280x720x32,1280x720x16,1280x800x16,1024x768x32,1024x768x16,800x600x32,800x600x16,640x480x32,640x480x16,640x480x15,640x480x8
+GFXPAYLOAD_LADDER_8 := 1920x1200x8,1920x1080x8,1680x1050x8,1600x1200x8,1600x900x8,1440x900x8,1400x1050x8,1366x768x8,1280x1024x8,1280x800x8,1280x720x8,1152x864x8,1024x768x8,800x600x8,640x480x8
+GFXPAYLOAD_LADDER_16 := 1920x1200x32,1920x1200x16,1920x1080x32,1920x1080x16,1680x1050x32,1680x1050x16,1600x1200x32,1600x1200x16,1600x900x32,1600x900x16,1440x900x32,1440x900x16,1400x1050x32,1400x1050x16,1366x768x32,1366x768x16,1280x1024x32,1280x1024x16,1280x800x16,1280x720x32,1280x720x16,1152x864x16,1024x768x32,1024x768x16,800x600x32,800x600x16,640x480x32,640x480x16,640x480x15,640x480x8
 
 ifeq ($(CONFIG_SCREEN_DEPTH),4)
 GFXPAYLOAD := text
@@ -534,25 +751,72 @@ else
 GFXPAYLOAD := $(BOOT_SCREEN_WIDTH)x$(BOOT_SCREEN_HEIGHT)x16,$(BOOT_SCREEN_WIDTH)x$(BOOT_SCREEN_HEIGHT)x15,$(BOOT_SCREEN_WIDTH)x$(BOOT_SCREEN_HEIGHT)x8,$(GFXPAYLOAD_LADDER_16)
 endif
 
-$(BOOT_DISK_CFG): src/config/config.h $(DOOM_WAD_MODULE_STAMP) | build/generated
-	@$(call LOG_COMPILE,boot disk menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' $(DOOM_MODULE_CFG) '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+# GRUB always auto-boots the sole HaloxOS entry (timeout=0); the menu is not
+# shown during normal startup. Debug builds still print phase markers and
+# mirror them to COM1 before doing any video-BIOS work. Previously
+# `insmod all_video` ran before terminal_output/menu setup, so a VBE/SeaVGABIOS
+# problem could look exactly like a hard hang at "Welcome to GRUB!".
+# For i386-pc BIOS, VBE is the backend the Multiboot framebuffer handoff needs;
+# do not probe every unrelated graphics backend through `all_video`.
+# Native 4-bpp VGA builds do not need VBE at all.
+ifeq ($(CONFIG_SCREEN_DEPTH),4)
+GRUB_VIDEO_SETUP :=
+else
+GRUB_VIDEO_SETUP := '    insmod vbe'
+endif
+ifeq ($(CONFIG_DEBUG),1)
+GRUB_TIMEOUT := 0
+GRUB_TRACE_TOP := 'echo "[GRUB] configuration loaded"'
+GRUB_TRACE_ENTRY := '    echo "[GRUB] boot entry selected"'
+# Mirror GRUB checkpoints to COM1 for the existing QEMU/hardware logger.
+# Keep console output enabled so a missing physical UART never hides them.
+GRUB_SERIAL_SETUP := 'insmod serial' 'serial --unit=0 --speed=115200' 'terminal_input console serial' 'terminal_output console serial'
+GRUB_CORE_SERIAL_SETUP := 'insmod serial' 'serial --unit=0 --speed=115200' 'terminal_input console serial' 'terminal_output console serial'
+GRUB_CORE_SERIAL_MODULE := serial
+ifeq ($(CONFIG_SCREEN_DEPTH),4)
+GRUB_TRACE_VBE :=
+else
+GRUB_TRACE_VBE := '    echo "[GRUB] VBE module loaded"'
+endif
+GRUB_TRACE_MODE := '    echo "[GRUB] gfxpayload set; next: multiboot loader"'
+GRUB_TRACE_LOADER := '    echo "[GRUB] loader accepted; next: load kernel module"'
+GRUB_TRACE_MODULES := '    echo "[GRUB] modules loaded; transferring control"'
+GRUB_CORE_TRACE_START := 'echo "[GRUB-CORE] embedded config entered"'
+GRUB_CORE_TRACE_SEARCH := 'echo "[GRUB-CORE] boot filesystem search completed"'
+else
+GRUB_TIMEOUT := 0
+GRUB_TRACE_TOP :=
+GRUB_TRACE_ENTRY :=
+GRUB_SERIAL_SETUP :=
+GRUB_CORE_SERIAL_SETUP :=
+GRUB_CORE_SERIAL_MODULE :=
+GRUB_TRACE_VBE :=
+GRUB_TRACE_MODE :=
+GRUB_TRACE_LOADER :=
+GRUB_TRACE_MODULES :=
+GRUB_CORE_TRACE_START :=
+GRUB_CORE_TRACE_SEARCH :=
+endif
 
-$(BOOT_FLOPPY_CFG): src/config/config.h | build/generated
+$(BOOT_DISK_CFG): src/config/config.h $(DOOM_WAD_MODULE_STAMP) Makefile | build/generated
+	@$(call LOG_COMPILE,boot disk menu,$@)
+	@printf '%s\n' 'set timeout_style=hidden' 'set timeout=$(GRUB_TIMEOUT)' 'set default=0' 'terminal_output console' $(GRUB_TRACE_TOP) $(GRUB_SERIAL_SETUP) 'menuentry "HaloxOS!" {' $(GRUB_TRACE_ENTRY) $(GRUB_VIDEO_SETUP) $(GRUB_TRACE_VBE) '    set gfxpayload=$(GFXPAYLOAD)' $(GRUB_TRACE_MODE) '    multiboot /boot/loader.elf halox.boot=$$root' $(GRUB_TRACE_LOADER) '    module /boot/kernel.bin.zst' $(DOOM_MODULE_CFG) $(GRUB_TRACE_MODULES) '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+
+$(BOOT_FLOPPY_CFG): src/config/config.h Makefile | build/generated
 	@$(call LOG_COMPILE,boot floppy menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout_style=hidden' 'set timeout=$(GRUB_TIMEOUT)' 'set default=0' 'terminal_output console' $(GRUB_TRACE_TOP) $(GRUB_SERIAL_SETUP) 'menuentry "HaloxOS!" {' $(GRUB_TRACE_ENTRY) $(GRUB_VIDEO_SETUP) $(GRUB_TRACE_VBE) '    set gfxpayload=$(GFXPAYLOAD)' $(GRUB_TRACE_MODE) '    multiboot /boot/loader.elf halox.boot=$$root' $(GRUB_TRACE_LOADER) '    module /boot/kernel.bin.zst' $(GRUB_TRACE_MODULES) '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(CORE_DISK_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,core disk menu,$@)
-	@printf '%s\n' 'search --file /boot/grub/grub.cfg --set=root' 'set prefix=($$root)/boot/grub' 'configfile /boot/grub/grub.cfg' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'terminal_output console' $(GRUB_CORE_SERIAL_SETUP) $(GRUB_CORE_TRACE_START) 'search --no-floppy --file --set=root /boot/grub/grub.cfg' $(GRUB_CORE_TRACE_SEARCH) 'set prefix=($$root)/boot/grub' 'configfile /boot/grub/grub.cfg' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(CORE_FLOPPY_CFG): FORCE | build/generated
 	@$(call LOG_COMPILE,core floppy menu,$@)
-	@printf '%s\n' 'search --file /boot/grub/grub.cfg --set=root' 'set prefix=($$root)/boot/grub' 'configfile /boot/grub/grub.cfg' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'terminal_output console' $(GRUB_CORE_SERIAL_SETUP) $(GRUB_CORE_TRACE_START) 'search --no-floppy --file --set=root /boot/grub/grub.cfg' $(GRUB_CORE_TRACE_SEARCH) 'set prefix=($$root)/boot/grub' 'configfile /boot/grub/grub.cfg' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(DESKTOP_LAYOUT): | build/generated
 	@$(call LOG_COMPILE,desktop layout,$@)
-	@$(PYTHON) -c "import struct; magic=0x484C5850; positions=[(18,24),(18,104),(18,184),(96,24),(96,104),(96,184),(174,24),(174,104),(174,184),(252,24),(252,104)]; checksum=magic; payload=[]; [payload.extend(p) for p in positions]; [globals().__setitem__('checksum', checksum ^ v) for v in payload]; data=struct.pack('<II' + 'i' * len(payload), magic, checksum, *payload); open('$(DESKTOP_LAYOUT)', 'wb').write(data + b'\\x00' * (512 - len(data)))" || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@$(PYTHON) -c "import struct; magic=0x484C5850; positions=[(18,24),(18,104),(18,184),(96,24),(96,104),(96,184),(174,24),(174,104),(174,184),(252,24),(252,104)]; payload=[p[0] for p in positions] + [p[1] for p in positions]; checksum=magic; [globals().__setitem__('checksum', checksum ^ v) for v in payload]; data=struct.pack('<II' + 'i' * len(payload), magic, checksum, *payload); open('$(DESKTOP_LAYOUT)', 'wb').write(data + b'\\x00' * (512 - len(data)))" || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 build/tools/png2indexed: tools/png2indexed.c | build/tools
 	@$(call LOG_COMPILE,$<,$@)
@@ -726,6 +990,33 @@ build/doom_icon_asset.o: build/doom_icon.bin
 	@$(call LOG_COMPILE,$<,$@)
 	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
 
+# Coin Run! app icon (the 16x16 HUD lives sprite scaled 2x to 32x32) and
+# its game sprites. The sprites keep the original dimensions so the ported
+# collision boxes line up with the art.
+build/coinrun_icon.bin: src/modes/states/graphical/desktop/apps/coin_game/coinrun.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/coin_spr_%.bin: src/modes/states/graphical/desktop/apps/coin_game/sprites/%.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/coinrun_icon_asset.o: build/coinrun_icon.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/coin_spr_%_asset.o: build/coin_spr_%.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
+build/stress_icon.bin: src/modes/states/graphical/desktop/apps/stress/stress.png build/tools/png2indexed | build
+	@$(call LOG_COMPILE,$<,$@)
+	@build/tools/png2indexed $< $@ || { $(call LOG_ERROR,Failed to convert $< to $@); exit 1; }
+
+build/stress_icon_asset.o: build/stress_icon.bin
+	@$(call LOG_COMPILE,$<,$@)
+	@$(LD) -m elf_i386 -r -b binary -o $@ $< || { $(call LOG_ERROR,Failed to package $< to $@); exit 1; }
+
 build/boot.o: src/kernel/system/boot.asm Makefile | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(call RUN_LOG,$(AS) $(ASFLAGS) -f elf32 -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
@@ -789,7 +1080,14 @@ build/loader_boot.o: loader/boot.asm src/config/config.h Makefile | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(call RUN_LOG,$(AS) $(ASFLAGS) -f elf32 -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
 
-build/loader_main.o: loader/main.c loader/include/string.h src/config/config.h $(NORAM_STAMP) $(DOOM_WAD_DATA_C) $(RAM_REQUIREMENT_H) | build
+# The kernel link's second pass rewrites ram_requirement.h from the real
+# __bss_end and relinks.  The loader embeds the same header, so it must
+# not compile until that pass is done: otherwise a parallel first build
+# can bake in the pre-link stub (a too-small RAM gate) and only the next
+# `make` - after the header is final - produces a correct loader.  The
+# order-only dependency serialises the two without making the loader
+# relink every time the kernel does.
+build/loader_main.o: loader/main.c loader/include/string.h src/config/config.h $(NORAM_STAMP) $(DOOM_WAD_DATA_C) $(RAM_REQUIREMENT_H) $(LOADER_SYMBOLS_H) | build $(KERNEL)
 	@$(call LOG_COMPILE,$<,$@)
 	@if [ ! -f $(RAM_REQUIREMENT_H) ]; then $(MAKE) --no-print-directory $(RAM_REQUIREMENT_H) || exit 1; fi
 	@$(call RUN_LOG,$(CC) $(LOADER_FLAGS) -c -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
@@ -802,7 +1100,9 @@ build/loader_main.o: loader/main.c loader/include/string.h src/config/config.h $
 #                above the real image, never above a guessed size)
 #   gate_bytes = info_addr + one more 64 KiB (stack/mmap breathing room)
 #   req_mb     = ceil(gate_bytes / 1 MiB)  -> what the BOOT ERROR screen shows
-# With span_end ~5.34 MB this yields a 6 MB gate: nominal 6 MB machines boot.
+# The zstd scratch block is placed by the loader itself, so it adds nothing
+# to the gate. With the current span this yields a 5 MB gate: 5 MB machines
+# boot.
 # The embedded-WAD span build keeps its dedicated 22 MB layout. There is no
 # hardcoded floor: the gate is whatever the real image needs, so the boot
 # requirement always shrinks/grows with the kernel automatically.
@@ -824,15 +1124,16 @@ $(RAM_REQUIREMENT_H): Makefile tools/gen_rr.sh | build/generated
 				echo '#define HALOXOS_KERNEL_RAM_REQUIRED_BYTES 0x1600000u'; \
 				echo '#define HALOXOS_KERNEL_RAM_GATE_BYTES 0x1600000u'; \
 			else \
-				echo '#define HALOXOS_KERNEL_MEMORY_BYTES 0x580000u'; \
-				echo '#define HALOXOS_LOADER_INFO_ADDR 0x590000u'; \
-				echo '#define HALOXOS_KERNEL_RAM_REQUIRED_MB 6u'; \
-				echo '#define HALOXOS_KERNEL_RAM_REQUIRED_BYTES 0x600000u'; \
-				echo '#define HALOXOS_KERNEL_RAM_GATE_BYTES 0x600000u'; \
+				echo '#define HALOXOS_KERNEL_MEMORY_BYTES 0x460000u'; \
+				echo '#define HALOXOS_LOADER_INFO_ADDR 0x470000u'; \
+				echo '#define HALOXOS_KERNEL_RAM_REQUIRED_MB 5u'; \
+				echo '#define HALOXOS_KERNEL_RAM_REQUIRED_BYTES 0x500000u'; \
+				echo '#define HALOXOS_KERNEL_RAM_GATE_BYTES 0x480000u'; \
 			fi; \
 			echo ''; \
 			echo '#endif'; \
-		} > $@ || { $(call LOG_ERROR,Failed to create stub $@); exit 1; }; \
+		} > $@.stub.tmp || { $(call LOG_ERROR,Failed to create stub $@); exit 1; }; \
+		mv -f $@.stub.tmp $@ || { $(call LOG_ERROR,Failed to install stub $@); exit 1; }; \
 	else \
 		bash tools/gen_rr.sh $(KERNEL) $@ $(DOOM_WAD_EMBED_STATE); \
 	fi
@@ -855,9 +1156,43 @@ build/loader_shim.o: loader/shim.c loader/include/string.h | build
 	@$(call LOG_COMPILE,$<,$@)
 	@$(call RUN_LOG,$(CC) $(LOADER_FLAGS) -c -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
 
+# Loader backtrace symbol table. Same fixed-size trick as the kernel's
+# crash table (see CRASH_SYMBOLS_*): the loader is linked once with the
+# previous/empty table, the table is regenerated from that just-linked ELF,
+# and only this object is recompiled before the final link. Only text
+# symbols are needed for return-address lookup, so data symbols cannot
+# shadow a code frame.
+# Makefile is a prerequisite because LOADER_SYMBOL_MAX lives here: the
+# header's CRASH_SYMBOL_MAX must match the table the data pass emits.
+$(LOADER_SYMBOLS_H): Makefile | build/generated
+	@if [ ! -f $@ ] || ! grep -q 'CRASH_SYMBOL_MAX $(LOADER_SYMBOL_MAX)$$' $@; then \
+		$(call RUN_LOG,$(PYTHON) tools/mkcrashtable.py /nonexistent $(LOADER_SYMBOLS_DIR) --empty --max $(LOADER_SYMBOL_MAX) --text) || { $(call LOG_ERROR,Failed to create the loader symbol table); exit 1; }; \
+	fi
+
+$(LOADER_SYMBOLS_C): $(LOADER_SYMBOLS_H) FORCE | build/generated
+	@if [ "$(CONFIG_DEBUG)" != "1" ] || [ ! -f $(LOADER) ]; then \
+		$(call RUN_LOG,$(PYTHON) tools/mkcrashtable.py /nonexistent $(LOADER_SYMBOLS_DIR) --empty --max $(LOADER_SYMBOL_MAX) --text) || { $(call LOG_ERROR,Failed to create the loader symbol table); exit 1; }; \
+	else \
+		$(call RUN_LOG,$(PYTHON) tools/mkcrashtable.py $(LOADER) $(LOADER_SYMBOLS_DIR) --max $(LOADER_SYMBOL_MAX) --text) || { $(call LOG_ERROR,Failed to create the loader symbol table); exit 1; }; \
+	fi
+
+$(LOADER_SYMBOLS_OBJ): $(LOADER_SYMBOLS_C) | build
+	@$(call LOG_COMPILE,$<,$@)
+	@$(call RUN_LOG,$(CC) $(LOADER_FLAGS) -c -o $@ $<) || { $(call LOG_ERROR,Failed to compile $< to $@); exit 1; }
+
 $(LOADER): $(LOADER_OBJS) loader/linker.ld
 	@$(call LOG_COMPILE,loader objects,$@)
 	@$(call RUN_LOG,$(LD) -m elf_i386 -T loader/linker.ld -o $@ $(LOADER_OBJS)) || { $(call LOG_ERROR,Failed to link $@); exit 1; }
+	@grub-file --is-x86-multiboot $@ || { $(call LOG_ERROR,$@ has no valid Multiboot-1 header in GRUB's scan window); exit 1; }
+ifeq ($(CONFIG_DEBUG),1)
+	@# Pass 2: refresh the table from the just-linked loader. .text comes
+	@# before .rodata in loader/linker.ld, so replacing the table strings
+	@# cannot move a code address; the relinked frames stay valid.
+	@$(MAKE) --no-print-directory $(LOADER_SYMBOLS_C)
+	@$(MAKE) --no-print-directory $(LOADER_SYMBOLS_OBJ)
+	@$(call RUN_LOG,$(LD) -m elf_i386 -T loader/linker.ld -o $@ $(LOADER_OBJS)) || { $(call LOG_ERROR,Failed to link $@); exit 1; }
+	@grub-file --is-x86-multiboot $@ || { $(call LOG_ERROR,$@ has no valid Multiboot-1 header in GRUB's scan window); exit 1; }
+endif
 
 # Flat binary kernel image: file offset 0 == link address 0x200000, so the
 # loader can decompress it straight into place and jump to the entry VMA.
@@ -880,11 +1215,11 @@ $(KERNEL_ZST): $(KERNEL_FLAT) | build
 
 $(DISK_CORE): $(CORE_DISK_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@$(call RUN_LOG,grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot search search_fs_file vbe all_video) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@$(call RUN_LOG,grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_DISK_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal echo configfile multiboot search search_fs_file vbe $(GRUB_CORE_SERIAL_MODULE)) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 $(FLOPPY_CORE): $(CORE_FLOPPY_CFG) | build
 	@$(call LOG_COMPILE,$<,$@)
-	@$(call RUN_LOG,grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal configfile multiboot search search_fs_file vbe all_video) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@$(call RUN_LOG,grub-mkimage -O i386-pc -o $@ -d /usr/lib/grub/i386-pc -c $(CORE_FLOPPY_CFG) -p '(,msdos1)/boot/grub' biosdisk part_msdos fat normal echo configfile multiboot search search_fs_file vbe $(GRUB_CORE_SERIAL_MODULE)) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 # Symbol table for the debug-build crash-handler backtrace.
 #
@@ -907,7 +1242,11 @@ $(CRASH_SYMBOLS_H): | build/generated
 		$(call RUN_LOG,$(PYTHON) tools/mkcrashtable.py /nonexistent build/generated --empty --max $(CRASH_SYMBOL_MAX)) || { $(call LOG_ERROR,Failed to create the crash symbol table); exit 1; }; \
 	fi
 
-$(CRASH_SYMBOLS_C): FORCE | build/generated
+# The header rule below creates both files (an initial empty table), so
+# crash_symbols.c must not be generated in parallel with it: two
+# mkcrashtable.py processes writing the same .tmp files is a race even
+# though each final replace is atomic.
+$(CRASH_SYMBOLS_C): $(CRASH_SYMBOLS_H) FORCE | build/generated
 	@if [ "$(CONFIG_DEBUG)" != "1" ] || [ ! -f $(KERNEL) ]; then \
 		$(call RUN_LOG,$(PYTHON) tools/mkcrashtable.py /nonexistent build/generated --empty --max $(CRASH_SYMBOL_MAX)) || { $(call LOG_ERROR,Failed to create the crash symbol table); exit 1; }; \
 	else \
@@ -943,7 +1282,7 @@ $(KERNEL): $(KERNEL_OBJS)
 	@# stub kernel.o had to compile against - and it is newer than the
 	@# rule's prerequisites, so make would call the target up to date and
 	@# the kernel would keep the stub's gate forever. That is what made a
-	@# 6 MB machine fail even though the real span only needs 5.5 MB.
+	@# low-memory machine fail even though the real span fit it.
 	@# gen_rr.sh content-compares, so kernel.o is recompiled (and relinked)
 	@# only when the real span actually differs from the stub.
 	@bash tools/gen_rr.sh $(KERNEL) $(RAM_REQUIREMENT_H) $(DOOM_WAD_EMBED_STATE) || { $(call LOG_ERROR,Failed to generate $(RAM_REQUIREMENT_H)); exit 1; }
@@ -961,7 +1300,14 @@ endif
 
 build/isodir/boot/loader.elf: $(LOADER) | build/isodir/boot/grub
 	@$(call LOG_COMPILE,$<,$@)
-	@cp $(LOADER) $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
+	@# A debug build links the loader with full DWARF for the crash-symbol
+	@# table (about 0.9 MiB). GRUB reads that whole file into its heap while
+	@# loading the multiboot segments, and on a 5 MB machine the extra 0.9 MiB
+	@# is what pushes it over the edge: 'error: out of memory.' and no kernel
+	@# module. The symbols live in the generated table compiled into the ELF,
+	@# not in the debug sections, so strip those for the boot medium and keep
+	@# the unstripped build/loader.elf for symbol tables.
+	@$(OBJCOPY) --strip-debug $(LOADER) $@ || { $(call LOG_ERROR,Failed to strip $(LOADER) for the ISO); exit 1; }
 
 build/isodir/boot/kernel.bin.zst: $(KERNEL_ZST) | build/isodir/boot/grub
 	@$(call LOG_COMPILE,$<,$@)
@@ -992,9 +1338,9 @@ build/isodir/boot/doom.wadmodule: build/doom.wadmodule | build/isodir/boot/grub
 	$(call LOG_COMPILE,$<,$@); \
 	cp $< $@ || { $(call LOG_ERROR,Failed to copy $< to $@); exit 1; }
 
-build/isodir/boot/grub/grub.cfg: src/config/config.h $(DOOM_WAD_MODULE_DEP) $(DOOM_WAD_MODULE_STAMP) | build/isodir/boot/grub
+build/isodir/boot/grub/grub.cfg: src/config/config.h $(DOOM_WAD_MODULE_DEP) $(DOOM_WAD_MODULE_STAMP) Makefile | build/isodir/boot/grub
 	@$(call LOG_COMPILE,boot menu,$@)
-	@printf '%s\n' 'set timeout=0' 'set default=0' 'insmod all_video' 'set gfxpayload=$(GFXPAYLOAD)' 'terminal_output console' 'menuentry "HaloxOS!" {' '    insmod gzio' '    multiboot /boot/loader.elf' '    module /boot/kernel.bin.zst' $(DOOM_MODULE_CFG) '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@printf '%s\n' 'set timeout_style=hidden' 'set timeout=$(GRUB_TIMEOUT)' 'set default=0' 'terminal_output console' $(GRUB_TRACE_TOP) $(GRUB_SERIAL_SETUP) 'menuentry "HaloxOS!" {' $(GRUB_TRACE_ENTRY) $(GRUB_VIDEO_SETUP) $(GRUB_TRACE_VBE) '    set gfxpayload=$(GFXPAYLOAD)' $(GRUB_TRACE_MODE) '    insmod gzio' '    multiboot /boot/loader.elf halox.boot=$$root' $(GRUB_TRACE_LOADER) '    module /boot/kernel.bin.zst' $(DOOM_MODULE_CFG) $(GRUB_TRACE_MODULES) '    boot' '}' > $@ || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
 
 # Kernel size report: prints the actual kernel image/memory numbers in
 # the same blue info colour as the rest of the build log, right before the
@@ -1018,11 +1364,11 @@ define KERNEL_SIZE_REPORT
 	if [ "$(DOOM_WAD_EMBED_STATE)" = "1" ]; then \
 		ram_limit=22.0; ram_note='embedded-WAD span build: 22 MB RAM floor'; \
 	else \
-		ram_limit=$$(python3 -c "print(int(open('build/generated/ram_requirement.h').read().split('HALOXOS_KERNEL_RAM_REQUIRED_MB ')[1].split('u')[0]))"); ram_note="$${ram_limit} MB auto-fit boot floor (generated from the kernel span)"; \
+		ram_limit=$$(python3 -c "print(int(open('build/generated/ram_requirement.h').read().split('HALOXOS_KERNEL_RAM_REQUIRED_MB ')[1].split('u')[0]))"); ram_note="$${ram_limit} MB boot floor"; \
 	fi; \
 	if python3 -c "import sys; sys.exit(0 if $$mem_mb < $$ram_limit else 1)"; then \
 		mem_left=$$(python3 -c "print('%.2f' % ($$ram_limit - $$mem_mb))"); \
-		if python3 -c "import sys; sys.exit(0 if $$mem_left <= 1.0 else 1)"; then \
+		if python3 -c "import sys; sys.exit(0 if $$mem_left <= 0.5 else 1)"; then \
 			printf '%b[WARNING!]%b %bOnly %s MB of headroom below the %s.%b\n' '$(COLOR_ORANGE)' '$(COLOR_RESET)' '$(COLOR_YELLOW)' "$$mem_left" "$$ram_note" '$(COLOR_RESET)'; \
 		else \
 			printf '%b[OK]%b %b%s MB of headroom below the %s%b\n' '$(COLOR_GREEN)' '$(COLOR_RESET)' '$(COLOR_BLUE)' "$$mem_left" "$$ram_note" '$(COLOR_RESET)'; \
@@ -1056,25 +1402,61 @@ doomdisk: | build
 		$(MAKE) --no-print-directory $(DOOMDISK); \
 	fi
 
-$(ISO): build/isodir/boot/loader.elf build/isodir/boot/kernel.bin.zst $(DOOM_WAD_MODULE_DEP) build/isodir/boot/grub/grub.cfg $(DOOM_WAD) Makefile
+# Modules embedded in the ISO's El Torito GRUB core. A stock
+# grub-mkrescue core carries only biosdisk and iso9660, then loads
+# normal.mod and every other module from /boot/grub/i386-pc on the ISO
+# through the firmware disk stack. On some real machines that second-stage
+# load never completes and boot stops right after "Welcome to GRUB!".
+# Embedding every module the core config and grub.cfg use makes GRUB
+# self-contained, so only the boot payloads (loader, kernel, WAD) are read
+# from the ISO. The part_* list matches the insmod lines grub-mkrescue
+# writes into its own core config.
+ISO_GRUB_MODULES := biosdisk iso9660 fat normal echo configfile multiboot \
+	search search_fs_file vbe gzio \
+	part_acorn part_amiga part_apple part_bsd part_dfly part_dvh \
+	part_gpt part_msdos part_plan part_sun part_sunpc \
+	$(GRUB_CORE_SERIAL_MODULE)
+
+$(ISO): build/isodir/boot/loader.elf build/isodir/boot/kernel.bin.zst $(DOOM_WAD_MODULE_DEP) build/isodir/boot/grub/grub.cfg $(DOOM_WAD) build/bios-serial.template tools/fatpatch.py Makefile | $(OUT_DIR)
 	@$(call LOG_COMPILE,build/isodir,$@)
 	@if [ "$(DOOM_WAD_MODULE_BOOT)" != "1" ]; then rm -f build/isodir/boot/doom.wadmodule; fi
-	@$(call RUN_LOG,grub-mkrescue -o $@ build/isodir) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
-	@if [ -n "$(DOOM_WAD)" ]; then \
+	@$(call RUN_LOG,grub-mkrescue --modules='$(ISO_GRUB_MODULES)' -o $@ build/isodir) || { $(call LOG_ERROR,Failed to generate $@); exit 1; }
+	@# ISO tail, in order: [pad to 1 MiB alignment][embedded FAT12
+	@# volume carrying the pre-allocated bios-serial.log][DOOM WAD blob
+	@# + info when a WAD is present]. The FAT volume is registered as
+	@# MBR partition entry 2, so a stick the ISO is dd'd onto shows
+	@# bios-serial.log to any host with no extraction step; the kernel
+	@# locates it at boot through the MBR and writes it via BIOS INT 13h.
+	@iso_end=$$(( ($$(stat -c %s $@) + 2047) / 2048 )); \
+	fat_blk=$$(( ( (iso_end + 511) / 512 ) * 512 )); \
+	wad_blk=$$(( fat_blk + $(BOOTLOG_FAT_BLOCKS) )); \
+	if [ -n "$(DOOM_WAD)" ]; then \
+		tail_blks=$$(( wad_blk + $(DOOM_WAD_CD_SECTORS) + 1 )); \
+	else \
+		tail_blks=$$wad_blk; \
+	fi; \
+	truncate -s $$(( tail_blks * 2048 )) $@ || { $(call LOG_ERROR,Failed to reserve the boot-log volume in $@); exit 1; }; \
+	$(call LOG_COMPILE,bios-serial.log volume,embedded FAT12 at block $$fat_blk); \
+	truncate -s $(BOOTLOG_FAT_KB)K build/bootlog-fat.img || exit 1; \
+	mkfs.fat -F 12 -n HALOXLOG build/bootlog-fat.img >/dev/null 2>&1 || { $(call LOG_ERROR,Failed to format the bios-serial.log volume); exit 1; }; \
+	mcopy -i build/bootlog-fat.img build/bios-serial.template ::/bios-serial.log || { $(call LOG_ERROR,Failed to place bios-serial.log in its volume); exit 1; }; \
+	$(PYTHON) tools/fatpatch.py zero-size build/bootlog-fat.img 0 || { $(call LOG_ERROR,Failed to prepare the bios-serial.log volume); exit 1; }; \
+	dd if=build/bootlog-fat.img of=$@ bs=2048 seek=$$fat_blk conv=notrunc status=none || { $(call LOG_ERROR,Failed to embed the bios-serial.log volume into $@); exit 1; }; \
+	$(PYTHON) tools/fatpatch.py mbr $@ $$(( fat_blk * 4 )) $$(( $(BOOTLOG_FAT_KB) * 2 )) || { $(call LOG_ERROR,Failed to register the boot-log volume in the MBR); exit 1; }; \
+	if [ -n "$(DOOM_WAD)" ]; then \
 		$(call LOG_COMPILE,$(DOOM_WAD),DOOM WAD blob (ISO tail, 2048B sectors)); \
-		iso_end=$$(( ($$(stat -c %s $@) + 2047) / 2048 )); \
-		truncate -s $$(( (iso_end + $(DOOM_WAD_CD_SECTORS) + 1) * 2048 )) $@ || exit 1; \
 		printf 'DWAD' > build/doom_wad_info_cd.bin || exit 1; \
-		python3 -c "import struct; open('build/doom_wad_info_cd.bin','ab').write(struct.pack('<III', $$(stat -c %s $(DOOM_WAD)), $$iso_end, 0))" || exit 1; \
-		dd if=$(DOOM_WAD) of=$@ bs=2048 seek=$$iso_end conv=notrunc status=none || exit 1; \
-		dd if=build/doom_wad_info_cd.bin of=$@ bs=2048 seek=$$((iso_end + $(DOOM_WAD_CD_SECTORS))) conv=notrunc status=none || exit 1; \
+		python3 -c "import struct; open('build/doom_wad_info_cd.bin','ab').write(struct.pack('<III', $$(stat -c %s $(DOOM_WAD)), $$wad_blk, 0))" || exit 1; \
+		dd if=$(DOOM_WAD) of=$@ bs=2048 seek=$$wad_blk conv=notrunc status=none || exit 1; \
+		dd if=build/doom_wad_info_cd.bin of=$@ bs=2048 seek=$$((wad_blk + $(DOOM_WAD_CD_SECTORS))) conv=notrunc status=none || exit 1; \
 	else \
 		$(call LOG_WARNING,DOOM1.WAD not found - DOOM app will show the missing-WAD error screen); \
 	fi
+	@$(call PUBLISH_OUT,$(ISO))
 	@$(KERNEL_SIZE_REPORT)
-	@$(call LOG_OK,Build Finished!)
+	@$(call LOG_OK,Build Finished! $(ISO))
 
-$(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT) $(DOOM_WAD) Makefile | build
+$(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT) $(DOOM_WAD) $(DOOM_WAD_MODULE_IMAGE_DEP) build/bios-serial.template tools/fatpatch.py Makefile | build $(OUT_DIR)
 	@$(call LOG_COMPILE,Empty disk image,$@)
 	@truncate -s 64M $@ || { $(call LOG_ERROR,Failed to create $@); exit 1; }
 	@$(call LOG_COMPILE,$@,msdos partition table)
@@ -1097,7 +1479,11 @@ $(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT)
 	@$(call LOG_COMPILE,$(BOOT_DISK_CFG),$@)
 	@mcopy -i $@@@$(DISK_PART_OFFSET) $(BOOT_DISK_CFG) ::/boot/grub/grub.cfg || { $(call LOG_ERROR,Failed to copy $(BOOT_DISK_CFG) into $@); exit 1; }
 	@$(call LOG_COMPILE,$(LOADER),$@)
-	@mcopy -i $@@@$(DISK_PART_OFFSET) $(LOADER) ::/boot/loader.elf || { $(call LOG_ERROR,Failed to copy $(LOADER) into $@); exit 1; }
+	@# Same reason as the ISO copy: GRUB reads the whole ELF file into its
+	@# heap, so the DWARF sections only cost boot RAM on a small machine.
+	@$(OBJCOPY) --strip-debug $(LOADER) build/loader.disk.elf || { $(call LOG_ERROR,Failed to strip $(LOADER) for the disk); exit 1; }
+	@mcopy -i $@@@$(DISK_PART_OFFSET) build/loader.disk.elf ::/boot/loader.elf || { $(call LOG_ERROR,Failed to copy $(LOADER) into $@); exit 1; }
+	@rm -f build/loader.disk.elf
 	@$(call LOG_COMPILE,$(KERNEL_ZST),$@)
 	@mcopy -i $@@@$(DISK_PART_OFFSET) $(KERNEL_ZST) ::/boot/kernel.bin.zst || { $(call LOG_ERROR,Failed to copy $(KERNEL_ZST) into $@); exit 1; }
 	@if [ "$(DOOM_WAD_MODULE_BOOT)" = "1" ] && [ -f "$(DOOM_WAD_MODULE)" ]; then \
@@ -1111,6 +1497,12 @@ $(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT)
 	@dd if=$(DISK_CORE) of=$@ bs=512 seek=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(DISK_CORE) into $@); exit 1; }
 	@$(call LOG_COMPILE,$(DESKTOP_LAYOUT),$@)
 	@dd if=$(DESKTOP_LAYOUT) of=$@ bs=512 seek=$(DESKTOP_LAYOUT_LBA) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(DESKTOP_LAYOUT) into $@); exit 1; }
+	@# bios-serial.log: the pre-allocated template inside the FAT16
+	@# partition, its directory size zeroed so a fresh disk shows an
+	@# empty file the kernel then grows as it auto-saves the trace.
+	@$(call LOG_COMPILE,bios-serial.log volume,FAT16 partition)
+	@mcopy -i $@@@$(DISK_PART_OFFSET) build/bios-serial.template ::/bios-serial.log || { $(call LOG_ERROR,Failed to place bios-serial.log into $@); exit 1; }
+	@$(PYTHON) tools/fatpatch.py zero-size $@ $(DISK_PART_OFFSET) || { $(call LOG_ERROR,Failed to prepare bios-serial.log in $@); exit 1; }
 	@if [ -n "$(DOOM_WAD)" ]; then \
 		$(call LOG_COMPILE,$(DOOM_WAD),DOOM game data (compact raw LBA $(DOOM_WAD_DATA_LBA))); \
 		if [ $$(stat -c %s $@) -lt $(DOOM_WAD_END_BYTES) ]; then truncate -s $(DOOM_WAD_END_BYTES) $@ || exit 1; fi; \
@@ -1121,10 +1513,129 @@ $(DISK): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DESKTOP_LAYOUT)
 	else \
 		$(call LOG_WARNING,DOOM1.WAD not found - DOOM app will show the missing-WAD error screen); \
 	fi
+	@$(call PUBLISH_OUT,$(DISK))
 	@$(KERNEL_SIZE_REPORT)
-	@$(call LOG_OK,Disk Image Finished!)
+	@$(call LOG_OK,Disk Image Finished! $(DISK))
 
-$(FLOPPY): $(LOADER) $(KERNEL_ZST) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
+# ===== BIOS-bootable USB image =====
+#
+# A USB stick is presented to the firmware as a hard disk. The ISO is a
+# hybrid image whose first partition begins at LBA 1 (there is no ordinary
+# MBR gap); some BIOSes refuse that layout and stop at "GRUB loading".
+# This image uses the conventional BIOS layout instead:
+#   LBA 0        GRUB boot.img + an active MBR partition entry
+#   LBA 1..      Grub core.img in the 1 MiB MBR gap
+#   LBA 2048     FAT32 partition with /boot/grub, loader, kernel and WAD
+# The core image is the same one used by the hard-disk target and embeds all
+# modules needed to read the FAT partition, so GRUB does not need a
+# second-stage module load from the boot medium.
+$(USB): $(LOADER) $(KERNEL_ZST) $(DISK_CORE) $(BOOT_DISK_CFG) $(DOOM_WAD_MODULE_IMAGE_DEP) build/bios-serial.template tools/fatpatch.py Makefile | build $(OUT_DIR)
+	@$(call LOG_COMPILE,USB image,$@)
+	@truncate -s 64M $@ || { $(call LOG_ERROR,Failed to create $@); exit 1; }
+	@parted -s $@ unit s mklabel msdos mkpart primary fat32 $(USB_PART_START)s $(USB_PART_END)s || { $(call LOG_ERROR,Failed to partition $@); exit 1; }
+	@parted -s $@ set 1 boot on || { $(call LOG_ERROR,Failed to mark the USB partition bootable); exit 1; }
+	@$(call LOG_COMPILE,$@,FAT32 filesystem)
+	@rm -f build/usb-part.img
+	@truncate -s $$(( $(USB_PART_SECTORS) * 512 )) build/usb-part.img || { $(call LOG_ERROR,Failed to create the USB FAT32 partition); exit 1; }
+	@mkfs.fat -F 32 -h $(USB_PART_START) -n HALOXOSUSB build/usb-part.img >/dev/null 2>&1 || { $(call LOG_ERROR,Failed to format the USB FAT32 partition); exit 1; }
+	@$(call LOG_COMPILE,boot directories,$@)
+	@mmd -i build/usb-part.img ::/boot ::/boot/grub || { $(call LOG_ERROR,Failed to create boot directories in $@); exit 1; }
+	@mcopy -i build/usb-part.img $(BOOT_DISK_CFG) ::/boot/grub/grub.cfg || { $(call LOG_ERROR,Failed to copy $(BOOT_DISK_CFG) into $@); exit 1; }
+	@$(call LOG_COMPILE,$(LOADER),$@)
+	@$(OBJCOPY) --strip-debug $(LOADER) build/loader.usb.elf || { $(call LOG_ERROR,Failed to strip $(LOADER) for USB); exit 1; }
+	@mcopy -i build/usb-part.img build/loader.usb.elf ::/boot/loader.elf || { $(call LOG_ERROR,Failed to copy $(LOADER) into $@); exit 1; }
+	@rm -f build/loader.usb.elf
+	@$(call LOG_COMPILE,$(KERNEL_ZST),$@)
+	@mcopy -i build/usb-part.img $(KERNEL_ZST) ::/boot/kernel.bin.zst || { $(call LOG_ERROR,Failed to copy $(KERNEL_ZST) into $@); exit 1; }
+	@if [ "$(DOOM_WAD_MODULE_BOOT)" = "1" ] && [ -f "$(DOOM_WAD_MODULE)" ]; then \
+		$(call LOG_COMPILE,$(DOOM_WAD_MODULE),$@); \
+		mcopy -i build/usb-part.img $(DOOM_WAD_MODULE) ::/boot/doom.wadmodule || { $(call LOG_ERROR,Failed to copy $(DOOM_WAD_MODULE) into $@); exit 1; }; \
+	fi
+	@$(call LOG_COMPILE,$(GRUB_BOOT_IMG),$@)
+	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=446 count=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write the USB boot sector); exit 1; }
+	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=1 skip=510 seek=510 count=2 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write the USB boot signature); exit 1; }
+	@$(call LOG_COMPILE,$(DISK_CORE),$@)
+	@dd if=$(DISK_CORE) of=$@ bs=512 seek=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write the USB GRUB core); exit 1; }
+	@dd if=build/usb-part.img of=$@ bs=512 seek=$(USB_PART_START) conv=notrunc status=none || { $(call LOG_ERROR,Failed to write the USB FAT32 partition); exit 1; }
+	@$(call LOG_COMPILE,bios-serial.log volume,USB partition 2)
+	@rm -f build/bootlog-usb-fat.img
+	@truncate -s $(BOOTLOG_FAT_KB)K build/bootlog-usb-fat.img || { $(call LOG_ERROR,Failed to create the USB boot-log volume); exit 1; }
+	@mkfs.fat -F 12 -n HALOXLOG build/bootlog-usb-fat.img >/dev/null 2>&1 || { $(call LOG_ERROR,Failed to format the USB boot-log volume); exit 1; }
+	@mcopy -i build/bootlog-usb-fat.img build/bios-serial.template ::/bios-serial.log || { $(call LOG_ERROR,Failed to place bios-serial.log in the USB image); exit 1; }
+	@$(PYTHON) tools/fatpatch.py zero-size build/bootlog-usb-fat.img 0 || { $(call LOG_ERROR,Failed to prepare bios-serial.log in the USB image); exit 1; }
+	@dd if=build/bootlog-usb-fat.img of=$@ bs=512 seek=$(USB_LOG_START) conv=notrunc status=none || { $(call LOG_ERROR,Failed to embed the USB boot-log volume); exit 1; }
+	@$(PYTHON) tools/fatpatch.py mbr $@ $(USB_LOG_START) $(USB_LOG_SECTORS) || { $(call LOG_ERROR,Failed to register the USB boot-log volume); exit 1; }
+	@$(call PUBLISH_OUT,$(USB))
+	@$(KERNEL_SIZE_REPORT)
+	@$(call LOG_OK,USB Image Finished! $(USB))
+
+# ===== native disk images for other hypervisors =====
+#
+# `make disk` leaves a raw image. The targets below convert that same image
+# with qemu-img (installed with QEMU) into the format each hypervisor
+# expects, keeping the raw image untouched:
+#
+#   make disk vmware       -> build/out/HaloxOS-Disk_1.1.vmdk  (VMware Workstation/Player, ESXi)
+#   make disk qemu         -> build/out/HaloxOS-Disk_1.1.qcow2 (QEMU/KVM, Proxmox)
+#   make disk hyper-v      -> build/out/HaloxOS-Disk_1.1.vhd   (Hyper-V Gen 1, Virtual PC)
+#   make disk virtualbox   -> build/out/HaloxOS-Disk_1.1.vdi   (VirtualBox)
+#
+# Short spellings: vmw/vmdk, qcow/qcow2/qem, hv/hyperv/vhd, vb/vbox/vdi.
+# Each format target depends on `disk`, so `make vmware` works as a one-shot
+# build+convert too. The conversion writes <output>.tmp and renames it only
+# after qemu-img succeeds, so a failed conversion never leaves a half image
+# behind.
+#
+# The macro takes the output file as its last argument. The alias recipes
+# below call it directly instead of invoking a sub-make: `$(DISK)` depends on
+# the FORCE-driven core image, so a sub-make would rebuild the whole raw disk
+# a second time after the parent `disk` target had just built it.
+define CONVERT_DISK
+if ! command -v "$(QEMU_IMG)" >/dev/null 2>&1 && [ ! -x "$(QEMU_IMG)" ]; then \
+	$(call LOG_ERROR,qemu-img was not found - it is needed to create $(1) disk images); \
+	$(call LOG_DEP,Debian/Ubuntu/WSL: sudo apt-get install qemu-utils); \
+	$(call LOG_DEP,Arch Linux: sudo pacman -S qemu-img); \
+	$(call LOG_DEP,Windows: install QEMU from https://qemu.weilnetz.de/w64/); \
+	exit 1; \
+fi; \
+$(call LOG_COMPILE,$(DISK),$(5)); \
+rm -f $(5).tmp; \
+if ! "$(QEMU_IMG)" convert -f raw -O $(2) $(3) $(DISK) $(5).tmp; then \
+	rm -f $(5).tmp; \
+	$(call LOG_ERROR,Failed to convert $(DISK) to $(5)); \
+	exit 1; \
+fi; \
+mv -f $(5).tmp $(5) || { $(call LOG_ERROR,Failed to install $(5)); exit 1; }; \
+$(call PUBLISH_OUT,$(5)); \
+$(call LOG_OK,$(4) image ready: $(5))
+endef
+
+$(DISK_VMDK): $(DISK) Makefile
+	@$(call CONVERT_DISK,VMware,vmdk,-o subformat=monolithicSparse,VMware VMDK,$@)
+
+$(DISK_QCOW2): $(DISK) Makefile
+	@$(call CONVERT_DISK,QEMU,qcow2,,QEMU qcow2,$@)
+
+$(DISK_VHD): $(DISK) Makefile
+	@$(call CONVERT_DISK,Hyper-V,vpc,-o subformat=dynamic,Hyper-V VHD,$@)
+
+$(DISK_VDI): $(DISK) Makefile
+	@$(call CONVERT_DISK,VirtualBox,vdi,,VirtualBox VDI,$@)
+
+.PHONY: vmware vmw vmdk qemu qcow qcow2 qem hyper-v hyperv hv vhd virtualbox vb vbox vdi
+vmware vmw vmdk: disk
+	@$(call CONVERT_DISK,VMware,vmdk,-o subformat=monolithicSparse,VMware VMDK,$(DISK_VMDK))
+
+qemu qcow qcow2 qem: disk
+	@$(call CONVERT_DISK,QEMU,qcow2,,QEMU qcow2,$(DISK_QCOW2))
+
+hyper-v hyperv hv vhd: disk
+	@$(call CONVERT_DISK,Hyper-V,vpc,-o subformat=dynamic,Hyper-V VHD,$(DISK_VHD))
+
+virtualbox vb vbox vdi: disk
+	@$(call CONVERT_DISK,VirtualBox,vdi,,VirtualBox VDI,$(DISK_VDI))
+
+$(FLOPPY): $(LOADER) $(KERNEL_ZST) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build $(OUT_DIR)
 	@core_sectors=$$((($$(stat -c %s $(FLOPPY_CORE)) + 511) / 512)); \
 	if [ $$core_sectors -ge $(FLOPPY_PART_START) ]; then \
 		$(call LOG_ERROR,Floppy core image is too large: $$core_sectors sectors); \
@@ -1152,25 +1663,37 @@ $(FLOPPY): $(LOADER) $(KERNEL_ZST) $(FLOPPY_CORE) $(BOOT_FLOPPY_CFG) | build
 	@$(call LOG_COMPILE,$(BOOT_FLOPPY_CFG),$@)
 	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) $(BOOT_FLOPPY_CFG) ::/boot/grub/grub.cfg || { $(call LOG_ERROR,Failed to copy $(BOOT_FLOPPY_CFG) into $@); exit 1; }
 	@$(call LOG_COMPILE,$(LOADER),$@)
-	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) $(LOADER) ::/boot/loader.elf || { $(call LOG_ERROR,Failed to copy $(LOADER) into $@); exit 1; }
+	@# A debug build links the loader with full DWARF for the crash-symbol
+	@# table (about 0.9 MiB). That table is already baked into the ELF; the
+	@# debug sections are not needed at boot, and the FAT12 partition is only
+	@# about 1.26 MiB. Strip a copy for the floppy so loader + kernel still
+	@# fit; the unstripped build/loader.elf stays available for symbol tables.
+	@$(OBJCOPY) --strip-debug $(LOADER) build/loader.floppy.elf || { $(call LOG_ERROR,Failed to strip $(LOADER) for the floppy); exit 1; }
+	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) build/loader.floppy.elf ::/boot/loader.elf || { $(call LOG_ERROR,Failed to copy $(LOADER) into $@); exit 1; }
 	@$(call LOG_COMPILE,$(KERNEL_ZST),$@)
 	@mcopy -i $@@@$(FLOPPY_PART_OFFSET) $(KERNEL_ZST) ::/boot/kernel.bin.zst || { $(call LOG_ERROR,Failed to copy $(KERNEL_ZST) into $@); exit 1; }
+	@rm -f build/loader.floppy.elf
 	@$(call LOG_COMPILE,$(GRUB_BOOT_IMG),$@)
 	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=446 count=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write boot sector into $@); exit 1; }
 	@dd if=$(GRUB_BOOT_IMG) of=$@ bs=1 skip=510 seek=510 count=2 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write boot signature into $@); exit 1; }
 	@$(call LOG_COMPILE,$(FLOPPY_CORE),$@)
 	@dd if=$(FLOPPY_CORE) of=$@ bs=512 seek=1 conv=notrunc status=none || { $(call LOG_ERROR,Failed to write $(FLOPPY_CORE) into $@); exit 1; }
+	@$(call PUBLISH_OUT,$(FLOPPY))
 	@$(KERNEL_SIZE_REPORT)
-	@$(call LOG_OK,Floppy Image Finished!)
+	@$(call LOG_OK,Floppy Image Finished! $(FLOPPY))
 
 # Explicit media launchers. These are useful for testing each WAD path
 # independently instead of hiding a disk-read problem behind the normal
 # all-in-one runner.
 run-iso: $(ISO)
-	@$(QEMU_BIN) -cdrom $(ISO) -m 16 -vga std
+	@$(SERIAL_LOG_RESET)
+	@$(QEMU_BIN) -cdrom $(ISO) $(SERIAL_LOG_ARGS) -m 16 -vga std
+	@$(SERIAL_LOG_DONE)
 
 run-disk: $(DISK)
-	@$(QEMU_BIN) -drive file=$(DISK),format=raw,if=ide,index=0,media=disk -boot c -m 16 -vga std
+	@$(SERIAL_LOG_RESET)
+	@$(QEMU_BIN) -drive file=$(DISK),format=raw,if=ide,index=0,media=disk -boot c $(SERIAL_LOG_ARGS) -m 16 -vga std
+	@$(SERIAL_LOG_DONE)
 
 # A 1.44 MB floppy cannot contain a 4.0 MB DOOM WAD. Keep the boot floppy
 # unchanged and attach the compact WAD disk as a second IDE device.
@@ -1185,7 +1708,26 @@ RUN_FLOPPY_DOOM_ARGS := -drive file=$(DOOMDISK),format=raw,if=ide,index=1,media=
 endif
 
 run-floppy: $(FLOPPY) $(RUN_FLOPPY_DOOM_DEP)
-	@$(QEMU_BIN) -fda $(FLOPPY) $(RUN_FLOPPY_DOOM_ARGS) -boot a -m 16 -vga std
+	@$(SERIAL_LOG_RESET)
+	@$(QEMU_BIN) -fda $(FLOPPY) $(RUN_FLOPPY_DOOM_ARGS) -boot a $(SERIAL_LOG_ARGS) -m 16 -vga std
+	@$(SERIAL_LOG_DONE)
+
+# USB stick boot: boot the dedicated BIOS USB image through EHCI, the same
+# path a real USB stick uses. `run-usb-iso` keeps the older ISO-hybrid view.
+# Attach it to EHCI, not the default UHCI controller: QEMU's UHCI model
+# times out on bulk transfers (the same failure mode as `-usb`), which
+# hides real boot problems behind emulation noise.  Real machines use
+# EHCI/xHCI for USB 2.0/3.0 sticks.
+run-usb: $(USB)
+	@$(SERIAL_LOG_RESET)
+	@$(QEMU_BIN) -device usb-ehci,id=ehci -drive if=none,id=usbmem,format=raw,file=$(USB) -device usb-storage,drive=usbmem,bus=ehci.0,bootindex=0 $(SERIAL_LOG_ARGS) -m 16 -vga std
+	@$(SERIAL_LOG_DONE)
+
+# Keep the ISO hybrid path available for checking the CD/USB-hybrid image.
+run-usb-iso: $(ISO)
+	@$(SERIAL_LOG_RESET)
+	@$(QEMU_BIN) -device usb-ehci,id=ehci -drive if=none,id=usbmem,format=raw,file=$(ISO) -device usb-storage,drive=usbmem,bus=ehci.0,bootindex=0 $(SERIAL_LOG_ARGS) -m 16 -vga std
+	@$(SERIAL_LOG_DONE)
 
 # Interactive QEMU launcher: asks for memory size and VGA type, then runs
 # the built ISO. Works on both Windows (MSYS2/MinGW shells with QEMU from
@@ -1207,6 +1749,7 @@ else
 	fi
 endif
 	@$(call LOG_DEP,Detected OS: $(HOST_OS) | QEMU: $(QEMU_BIN))
+	@$(SERIAL_LOG_RESET)
 	@if [ -n "$(DOOM_WAD)" ]; then \
 		$(MAKE) --no-print-directory $(DOOMDISK) >/dev/null 2>&1 || true; \
 	fi
@@ -1236,6 +1779,7 @@ endif
 	esac; \
 	$(call LOG_DEP,Launching QEMU: $$mem MB RAM, VGA $$vga); \
 	"$(QEMU_BIN)" $(QEMU_ARGS) $$doom_drive -m $$mem -vga $$vga
+	@$(SERIAL_LOG_DONE)
 
 # Low-RAM test build: rebuilds the ISO with the loader's "not enough RAM"
 # BOOT ERROR screen forced at boot (fake RAM shortage), so it can be
@@ -1252,7 +1796,37 @@ endif
 serial:
 	@:
 
+# Real-hardware counterpart of the QEMU serial capture: logs the target
+# machine's physical COM1 to the same build/bios-serial.log. The OS
+# cannot write the log to its own boot medium (no USB mass-storage stack,
+# read-only CDs, raw-sector-only ATA), so a second machine catches the
+# trace over a null-modem cable or a USB-serial adapter instead:
+#
+#   make capture PORT=/dev/ttyUSB0      (Linux capture machine)
+#   make capture PORT=COM3             (Windows capture machine)
+#
+# Works for a target booted from any medium (USB stick, real disk,
+# floppy, CD): the serial trace is identical, only the capture side
+# writes the file. BAUD=... overrides for slower UARTs. Ctrl+C stops the
+# capture and reports where the log landed.
+BAUD ?= 115200
+capture:
+	@if [ -z "$(PORT)" ]; then \
+		$(call LOG_ERROR,PORT is required: make capture PORT=/dev/ttyUSB0 or PORT=COM3); \
+		exit 1; \
+	fi
+	@mkdir -p build
+	@$(PYTHON) tools/serial-capture.py "$(PORT)" --baud $(BAUD) --out $(SERIAL_LOG)
+
 clean:
-	@rm -rf build || { printf '%b[ERROR!]%b Failed to remove build artifacts\n' '\033[31m' '\033[0m'; exit 1; }
+	@# Windows tools (editors, MCP servers, shells) can keep an open handle
+	@# on the build directory itself. Remove every artifact, then try the
+	@# now-empty directory; only fail if something is actually left behind.
+	@rm -rf build 2>/dev/null || true
+	@rmdir build 2>/dev/null || true
+	@if [ -e build ] && { [ ! -d build ] || [ -n "$$(ls -A build 2>/dev/null)" ]; }; then \
+		printf '%b[ERROR!]%b Failed to remove build artifacts\n' '\033[31m' '\033[0m'; \
+		exit 1; \
+	fi
 	@$(call LOG_CLEAN_OK,Clean Done!)
 

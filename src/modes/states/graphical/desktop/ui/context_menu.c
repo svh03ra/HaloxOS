@@ -44,6 +44,7 @@ static void handle_context_menu_click(void) {
     int row = (mouse.y - context_menu_y) / 16;
     if (row == 0) {
         desktop_auto_grid = !desktop_auto_grid;
+        ui_input_dirty = true;
         if (desktop_auto_grid) {
             desktop_auto_grid_icons();
         }

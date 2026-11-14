@@ -14,28 +14,28 @@
  * single, consistent owner of the icon pixels.
  */
 static void render_desktop_icons(void) {
-    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+    /* Paint in the live icon z-order, not array order: the icon under the
+     * pointer is the one the click test will pick (see desktop_icon_order
+     * in desktop_icons.c). */
+    for (int pos = 0; pos < DESKTOP_ICON_COUNT; ++pos) {
+        int i = desktop_icon_paint_at(pos);
         draw_desktop_icon(i, i == selected_desktop_icon || desktop_icon_multi_selected[i]);
     }
 }
 
-/* 4x4 pixel snap-grid overlay.
+/* 16x16 pixel snap-grid overlay.
  *
  * Off unless the debugger's "show grid" (aliases: app grid, desktop grid,
  * ag, dg, ...) turns it on, so the desktop does not start up looking like
- * graph paper. Auto-Grid still snaps icon drags to the same 4x4 grid; only
- * these dots are command-controlled. Light dots so it reads on any
+ * graph paper. Auto-Grid still snaps icon drags to the same 16x16 grid;
+ * only these dots are command-controlled. Light dots so it reads on any
  * wallpaper without hiding the icons.
  *
- * Counting a 4px lattice by eye does not work on a scaled output (a VBE
- * mode wider than the 640-wide canvas, or a zoomed emulator window): there
- * every logical pixel becomes an NxN block, so the same 4px step measures
- * 8 screen pixels at 2x and 16 at 4x, and the desktop reads as an 8x8 or
- * 16x16 grid even though nothing is snapped that coarsely. So every fourth
- * dot in both axes gets a small plus - enough to count the fine step at a
- * glance, without coarsening the snap. The dots still sit exactly where a
+ * Every fourth dot in both axes gets a small plus: at 16px the lattice is
+ * easy to count, and the plus marks 64px so a drag target can be read at a
+ * glance instead of counting cells. The dots still sit exactly where a
  * drag lands, which is the point of showing them. */
-#define DESKTOP_GRID_MAJOR 16
+#define DESKTOP_GRID_MAJOR 64
 
 static void draw_desktop_grid_overlay(void) {
     if (!desktop_grid_overlay_on) {
@@ -79,6 +79,12 @@ static void draw_desktop_grid_overlay(void) {
 static bool cursor_over_clickable_at(int px, int py) {
     const Window *window = desktop_top_window_at(px, py);
 
+    /* The bitmap screen covers the whole desktop: only its scrollbar and
+     * size boxes are clickable, so do not inherit the hand from a window
+     * underneath. */
+    if (debug_memory_pointer_visible()) {
+        return cursor_hand_hint;
+    }
     if (cursor_hand_hint) {
         return true;
     }
@@ -188,6 +194,12 @@ static void cursor_capture_under(int x, int y, int w, int h, bool hand) {
     cursor_capture_ok = true;
 }
 
+/* The background under the pointer was repainted by someone else (the
+ * debugger overlay, a game frame), so the save-under snapshot is stale. */
+static void cursor_invalidate_capture(void) {
+    cursor_capture_ok = false;
+}
+
 /* Put the captured pixels back and forget them. */
 static void cursor_capture_restore(void) {
     if (!cursor_capture_ok) {
@@ -208,10 +220,17 @@ static void cursor_capture_restore(void) {
 /* Is the saved background still a valid stand-in for what is on screen?
  * Any repaint, overlay, pointer lock or pointer-shape change says no. */
 static bool cursor_capture_valid(void) {
-    if (!cursor_capture_ok) {
+    if (doom_pointer_locked()) {
         return false;
     }
-    if (debug_overlay_open || doom_pointer_locked()) {
+    if (debug_overlay_open && !debug_memory_pointer_visible()) {
+        /* The overlay owns the screen outside its box and nothing is
+         * stamped there.  A motion frame just restores (clears) the last
+         * stamp, so it is safe - and stops every pixel of travel in the
+         * wallpaper strip from forcing a full desktop recomposite. */
+        return true;
+    }
+    if (!cursor_capture_ok) {
         return false;
     }
     return cursor_over_clickable() == cursor_captured_hand;
@@ -227,6 +246,19 @@ static void render_cursor(void) {
          * the gate's painted-vs-live test does not force pointless full
          * repaints on a quiet locked DOOM. Pointer motion still dirties
          * the desktop through the input driver. */
+        cursor_painted_x = mouse.x;
+        cursor_painted_y = mouse.y;
+        return;
+    }
+
+    /* The debugger overlay owns everything outside its own box: a pointer
+     * parked on the wallpaper strip around the box used to be stamped
+     * there and nothing ever repainted that strip, so the arrow stayed on
+     * screen as a frozen ghost.  Restore/clear it instead.  Every partial
+     * caller has already restored the save-under box before this call; the
+     * full-frame caller paints the wallpaper over it. */
+    if (debug_overlay_open && !debug_memory_pointer_visible()) {
+        cursor_capture_ok = false;
         cursor_painted_x = mouse.x;
         cursor_painted_y = mouse.y;
         return;
@@ -257,6 +289,19 @@ static void render_cursor(void) {
     /* Snapshot what the pointer is about to cover, then draw over it. */
     cursor_box_at(hand, mleft, mx, my, &box_x, &box_y, &box_w, &box_h);
     cursor_capture_under(box_x, box_y, box_w, box_h, hand);
+
+    /* The debugger overlay only owns its own box; the wallpaper strip
+     * around it has no repaint that would erase a pointer drawn there.  A
+     * hotspot on the very edge of the box otherwise paints the arrow into
+     * that strip, where it stayed as a frozen ghost.  The hotspot test in
+     * render_cursor()/desktop already hides a pointer outside the box;
+     * clipping the glyph makes the border case safe as well: the visible
+     * part stops at the box edge. */
+    if (debug_overlay_open) {
+        set_window_clip(debug_memory_view_x(), debug_memory_view_y(),
+                        debug_memory_view_w(), debug_memory_view_h());
+    }
+
     /* black outline */
     static const uint16_t outline[12] = {
         0b1000000000000000,
@@ -326,6 +371,9 @@ static void render_cursor(void) {
                 }
             }
         }
+        if (debug_overlay_open) {
+            clear_window_clip();
+        }
         return;
     }
 
@@ -345,6 +393,10 @@ static void render_cursor(void) {
                 draw_pixel(mx + col, my + row, color_white);
             }
         }
+    }
+
+    if (debug_overlay_open) {
+        clear_window_clip();
     }
 }
 

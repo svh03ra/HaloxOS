@@ -3,6 +3,29 @@
 
 // This repository is licensed under the GNU General Public License.
 
+/* 4px checkerboard drop shadow on the right/bottom of the active window.
+ * Trails are painted behind the windows; this shadow is the visual cue that
+ * the moving window is still the front face, not another trail ghost. */
+static void draw_window_drop_shadow(const Window *window) {
+    int right = window->x + window->w;
+    int bottom = window->y + window->h;
+
+    for (int py = window->y + 4; py < bottom + 4; ++py) {
+        for (int px = right; px < right + 4; ++px) {
+            if (ui_checker_dot(px, py, 2)) {
+                draw_pixel(px, py, color_gray_dark);
+            }
+        }
+    }
+    for (int py = bottom; py < bottom + 4; ++py) {
+        for (int px = window->x + 4; px < right + 4; ++px) {
+            if (ui_checker_dot(px, py, 2)) {
+                draw_pixel(px, py, color_gray_dark);
+            }
+        }
+    }
+}
+
 static void draw_window_chrome(const Window *window) {
     bool is_test = (window >= test_windows && window < test_windows + MAX_TEST_WINDOWS);
     int app_idx;

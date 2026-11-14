@@ -30,29 +30,40 @@
 /* The bridge (realmode.asm)                                                 */
 /* ------------------------------------------------------------------------ */
 
-extern const uint32_t rm_layout[17];
+extern const uint32_t rm_layout[21];
 extern int realmode_call(void);
 extern void realmode_install_gdt(void);
 
 /* Indices into rm_layout: the low-memory addresses the 16-bit half uses. */
+/* These are INDICES into rm_layout, not offsets in the register file.
+ * Keep them aligned with the exported table in realmode.asm.  Entry 17 was
+ * added for RM_R_INT; omitting it here shifted the stack fields by one entry.
+ * That made realmode_configure_stack() write to physical address 0x0026 (the
+ * INT 09h vector's segment word) and put the stack segment in the wrong slot.
+ * On real machines this can break USB-legacy keyboard input and leave BIOS
+ * INT 13h calls running on the tiny fallback stack. */
 enum {
-    RM_L_BASE,
-    RM_L_REGS,
-    RM_L_SAVED,
-    RM_L_BUF,
-    RM_L_STUB,
-    RM_L_STACK,
-    RM_L_EAX,
-    RM_L_EBX,
-    RM_L_ECX,
-    RM_L_EDX,
-    RM_L_ESI,
-    RM_L_EDI,
-    RM_L_EBP,
-    RM_L_FLAGS,
-    RM_L_DS,
-    RM_L_ES,
-    RM_L_FAULT /* the vector a BIOS call faulted on, or 0xFF for none */
+    RM_L_BASE       = 0,
+    RM_L_REGS       = 1,
+    RM_L_SAVED      = 2,
+    RM_L_BUF        = 3,
+    RM_L_STUB       = 4,
+    RM_L_STACK      = 5,
+    RM_L_EAX        = 6,
+    RM_L_EBX        = 7,
+    RM_L_ECX        = 8,
+    RM_L_EDX        = 9,
+    RM_L_ESI        = 10,
+    RM_L_EDI        = 11,
+    RM_L_EBP        = 12,
+    RM_L_FLAGS      = 13,
+    RM_L_DS         = 14,
+    RM_L_ES         = 15,
+    RM_L_FAULT      = 16, /* the vector a BIOS call faulted on, or 0xFF */
+    RM_L_INT        = 17, /* WORD address: selected INT vector (register-file offset 0x26) */
+    RM_L_STACK_SEG  = 18, /* WORD address: SS for the real-mode stub */
+    RM_L_STACK_PTR  = 19, /* WORD address: SP for the real-mode stub */
+    RM_L_IVT_FLAG   = 20  /* BYTE address: 1 while the IVT copy is usable */
 };
 
 #define RM_REG_COUNT 10
@@ -137,16 +148,7 @@ static uint32_t vbe_reg_read(int field) {
 #define VBE_DEPTH_16   2
 #define VBE_DEPTH_32   3
 
-#define VBE_MAX_SIZES 40
-
-/*
- * The VGA BIOS's own "who serves INT 10h" byte in the BIOS data area, and the
- * bit in it that the vgabios behind QEMU's cards tests at the top of its VBE
- * entry.  See vbe_bios_call for what it is used for and why it is only touched
- * after a call has visibly been ignored.
- */
-#define VBE_BDA_VGA_STATE 0x4B9
-#define VBE_BDA_OWNER_BIT 0x40
+#define VBE_MAX_SIZES 64
 
 /*
  * What the firmware said about one mode, kept from the walk at boot.  A mode
@@ -180,32 +182,25 @@ typedef struct {
 } VbeSize;
 
 /*
- * Where one version of the ModeInfoBlock keeps its trailing fields.  Only the
- * colour masks move between versions (VBE 3.0 dropped the 1.x BankSize byte);
- * the linear-framebuffer base stays at 0x28 in every version a linear mode can
- * come from.  Which layout is in force is decided per mode by validating the
- * masks it yields, so a wrong entry in this table cannot silently decode a
- * mode with the wrong channels - it simply fails the check and the next entry
- * is tried.
+ * The ModeInfoBlock is one fixed layout in every VBE version this kernel can
+ * get a linear mode from.  The fields below were read back from a real
+ * firmware's blocks (QEMU/SeaBIOS cirrus) rather than assumed: the colour
+ * masks sit at 0x1F..0x24, the physical framebuffer base at 0x28, and the
+ * linear-mode pitch at 0x32 (VBE 3.0 and later only).
+ *
+ * A classic trap is reading 0x30 as the linear pitch: that is VBE 2.0's
+ * OffScreenMemSize word, usually zero, and 0x34 is the image-page count
+ * rather than a pitch.  Using either one either rejects every direct-colour
+ * mode or programs a stride the card never agreed to.
  */
-typedef struct {
-    uint8_t red_size;
-    uint8_t red_position;
-    uint8_t green_size;
-    uint8_t green_position;
-    uint8_t blue_size;
-    uint8_t blue_position;
-    uint8_t phys_base;
-    uint8_t lin_pitch;
-} VbeTailLayout;
-
-static const VbeTailLayout vbe_tail_layouts[] = {
-    /* VBE 2.0/3.0: masks at 0x1E..0x23, physical base 0x28, linear pitch 0x30. */
-    {0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x28, 0x30},
-    /* VBE 1.0, and the 2.0 cards that kept its positions: 0x1F..0x24, pitch
-     * at 0x34 where 3.0 splits its last reserved dword. */
-    {0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x28, 0x34}
-};
+#define VBE_MI_PHYS_BASE     0x28
+#define VBE_MI_LIN_PITCH     0x32
+#define VBE_MI_RED_SIZE      0x1F
+#define VBE_MI_RED_POS       0x20
+#define VBE_MI_GREEN_SIZE    0x21
+#define VBE_MI_GREEN_POS     0x22
+#define VBE_MI_BLUE_SIZE     0x23
+#define VBE_MI_BLUE_POS      0x24
 
 /* One mode, read out of a ModeInfoBlock. */
 typedef struct {
@@ -228,6 +223,8 @@ static VbeSize vbe_sizes[VBE_MAX_SIZES];
 static int vbe_size_count = 0;
 static bool vbe_usable = false;
 static bool vbe_probed = false;
+/* SeaVGABIOS/coreboot (CSM compatibility layer) advertises modes it cannot program. */
+static bool vbe_fixed_surface = false;
 
 /*
  * Is the firmware allowed to be asked anything yet?
@@ -272,10 +269,18 @@ typedef enum {
     VBE_STATUS_BAD_LIST,      /* the mode-list pointer is unusable */
     VBE_STATUS_NO_MODES,      /* a controller, but no mode this kernel can show */
     VBE_STATUS_FAULTED,       /* the firmware faulted inside a call */
-    VBE_STATUS_READY          /* the firmware's own list is the resolution row */
+    VBE_STATUS_READY,         /* the firmware's own list is the resolution row */
+    VBE_STATUS_FIXED          /* every listed mode describes one fixed surface */
 } VbeStatus;
 
 static uint8_t vbe_status = VBE_STATUS_IDLE;
+
+/*
+ * The VBE version the controller reported in 4F00 (BCD, e.g. 0x0300).  Only
+ * the linear-pitch field depends on it; every other field decoded from a
+ * ModeInfoBlock is at the same offset in all versions.
+ */
+static uint16_t vbe_version = 0;
 
 /* Entries of the firmware's mode list: walked, refused by the firmware, and
  * refused here because the block described nothing presentable.  Counted so a
@@ -299,39 +304,6 @@ static const MultibootInfo *vbe_boot_info = NULL;
  * hang.  Hitting the cap is not an error - the list is truncated.
  */
 #define VBE_MAX_MODE_LIST 256
-
-/*
- * The display controller's own view of the mode, read from its timing
- * registers rather than the firmware's answers.
- *
- * This is the only party that cannot lie about a mode set: 4F02 is a request
- * the firmware may accept, echo back and report as current in 4F03 without its
- * mode set having reached the hardware, and believing that is what put the
- * desktop's new geometry on a screen that could not show it.  The controller
- * has to be reprogrammed for a mode of another size or pitch, so its registers
- * are the evidence - and asking them costs no BIOS call at all, which matters
- * on a machine whose firmware does not survive being called during boot.
- */
-static void vbe_crtc_geometry(uint16_t *width, uint16_t *pitch) {
-    /* 0x01: horizontal display end, in characters of 8 pixels. */
-    outb(VGA_CRTC_INDEX, 0x01);
-    *width = (((uint16_t)inb(VGA_CRTC_DATA) + 1u) * 8u);
-    /* 0x13: offset, in 8-byte units - the scan-line pitch in bytes. */
-    outb(VGA_CRTC_INDEX, 0x13);
-    *pitch = ((uint16_t)inb(VGA_CRTC_DATA) * 8u);
-}
-
-/*
- * Does a register reading describe this value?  Some cards clock characters
- * at 16 pixels, which halves or doubles what the register says, so the two
- * encodings either side of the plain one are accepted.  Nothing else is: a
- * reading that is neither the geometry asked for nor the one that was on
- * screen is not this mode.
- */
-static bool vbe_crtc_matches(uint16_t decoded, uint16_t wanted) {
-    return decoded == wanted || decoded == (uint16_t)(wanted * 2u) ||
-           decoded == (uint16_t)(wanted / 2u);
-}
 
 /*
  * The display controller's timing registers, as a fingerprint.
@@ -367,9 +339,15 @@ static bool vbe_crtc_unchanged(const uint8_t *a, const uint8_t *b) {
     return true;
 }
 
-/* Set once a call has been seen to need the BIOS data area's owner bit up
- * front, so later calls do not have to discover it by being ignored. */
-static bool vbe_needs_owner_flag = false;
+static uint32_t vbe_crtc_hash(const uint8_t *regs) {
+    uint32_t hash = 2166136261u;
+
+    for (unsigned i = 0; i < VBE_CRTC_REGS; ++i) {
+        hash ^= regs[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
 
 /* ------------------------------------------------------------------------ */
 /* Small helpers                                                             */
@@ -389,24 +367,6 @@ static uint8_t *vbe_info_block(void) {
 
 static uint8_t *vbe_mode_block(void) {
     return vbe_info_block() + VBE_INFO_SIZE;
-}
-
-/* The BIOS data area's VGA state byte, which carries the owner bit above.  The
- * address is held in a volatile object so that the accesses through it are not
- * folded into a fixed address the compiler can argue about. */
-static volatile uint32_t vbe_owner_flag_address = VBE_BDA_VGA_STATE;
-
-static volatile uint8_t *vbe_owner_flag_byte(void) {
-    return (volatile uint8_t *)(uintptr_t)vbe_owner_flag_address;
-}
-
-/*
- * A call the firmware never looked at comes back with carry clear and AX still
- * holding the function number it was given - as opposed to a VBE failure, which
- * answers AX = 0x014F and the like.
- */
-static bool vbe_call_was_ignored(uint16_t ax) {
-    return (uint16_t)vbe_reg_read(RM_L_EAX) == ax;
 }
 
 /*
@@ -446,39 +406,19 @@ static bool vbe_firmware_faulted(void) {
  * `buffer_linear` exactly (segment = linear >> 4, offset = the low nibble).
  * Carry set, or an AX other than 4Fh, means the BIOS refused.
  *
- * A call the video BIOS never serviced is retried once with the owner bit in
- * the BIOS data area set (see above) - a mode set through the BIOS clears that
- * bit, and from then on the VBE entry ignores everything until it is put back.
+ * An earlier version retried a call that came back with AX unchanged, on the
+ * theory that firmware ignores the first VBE call after the OS takes over.
+ * That was a symptom of the bridge truncating its stack pointer; with the
+ * stack fixed the first call is serviced (see realmode.asm).
  */
 static bool vbe_bios_call(uint16_t ax, uint16_t bx, uint16_t cx, uint32_t buffer_linear) {
-    volatile uint8_t *owner = vbe_owner_flag_byte();
     uint32_t flags;
-    bool ignored;
-
-    if (vbe_needs_owner_flag) {
-        *owner |= VBE_BDA_OWNER_BIT;
-    }
 
     if (!vbe_bios_issue(ax, bx, cx, buffer_linear)) {
         return vbe_firmware_faulted();
     }
+
     flags = vbe_reg_read(RM_L_FLAGS);
-    ignored = (flags & 0x0001u) == 0 && vbe_call_was_ignored(ax);
-
-    if (ignored && !vbe_needs_owner_flag && (*owner & VBE_BDA_OWNER_BIT) == 0) {
-        *owner |= VBE_BDA_OWNER_BIT;
-        if (!vbe_bios_issue(ax, bx, cx, buffer_linear)) {
-            return vbe_firmware_faulted();
-        }
-        flags = vbe_reg_read(RM_L_FLAGS);
-        if ((flags & 0x0001u) == 0 && !vbe_call_was_ignored(ax)) {
-            /* That was it: this firmware wants the bit set before every call,
-             * not just this one. */
-            vbe_needs_owner_flag = true;
-            serial_trace("INFO", "VBE: the video BIOS needs its owner bit asserted");
-        }
-    }
-
     if ((flags & 0x0001u) != 0) {
         return false;
     }
@@ -556,6 +496,30 @@ static void vbe_sort_sizes(void) {
     }
 }
 
+/* The list Settings will offer, one line per entry.  When a machine reports a
+ * wrong row or a mode that will not apply, this is the record of what the
+ * firmware actually answered during the walk - the app shows only the labels. */
+static void vbe_log_sizes(void) {
+    if (!debug) {
+        return;
+    }
+    for (int i = 0; i < vbe_size_count; ++i) {
+        serial_trace_begin("INFO");
+        serial_write_string("VBE: size ");
+        serial_write_uint(vbe_sizes[i].width);
+        serial_write_char('x');
+        serial_write_uint(vbe_sizes[i].height);
+        serial_write_string(" (8/16/32-bit modes: ");
+        serial_write_uint(vbe_sizes[i].mode_8 != 0);
+        serial_write_char('/');
+        serial_write_uint(vbe_sizes[i].mode_16 != 0);
+        serial_write_char('/');
+        serial_write_uint(vbe_sizes[i].mode_32 != 0);
+        serial_write_string(")");
+        serial_write_string("\n");
+    }
+}
+
 /* The parts of a mode-info block that every VBE version puts in the same
  * place.  The tail is filled in by whoever picks a layout. */
 static void vbe_read_geometry(const uint8_t *mi, VbeModeInfo *out) {
@@ -621,43 +585,56 @@ static bool vbe_masks_are_valid(const VbeModeInfo *m) {
 }
 
 /*
- * Read a mode-info block.  The geometry is at fixed offsets; the tail is the
- * per-version part, so each documented layout is tried and the first one that
- * yields a programmable mode wins.  False means the block describes nothing
- * this kernel could put on screen.
+ * Read a mode-info block.  Every field used here is at the same offset in
+ * every VBE version that can describe a linear mode; the one versioned field
+ * is the linear pitch, which VBE 3.0 added at 0x32 and older firmware leaves
+ * zero.  The block is accepted only if it describes geometry, a framebuffer
+ * base and a pitch this kernel could actually program.
  */
 static bool vbe_read_mode_info(const uint8_t *mi, VbeModeInfo *out) {
+    uint32_t min_pitch;
+
     vbe_read_geometry(mi, out);
+    out->linear_base = vbe_read32(mi + VBE_MI_PHYS_BASE);
 
-    for (unsigned i = 0; i < sizeof(vbe_tail_layouts) / sizeof(vbe_tail_layouts[0]); ++i) {
-        const VbeTailLayout *tail = &vbe_tail_layouts[i];
-        VbeModeInfo candidate = *out;
-        uint16_t lin_pitch = tail->lin_pitch != 0 ? vbe_read16(mi + tail->lin_pitch) : 0;
+    if (out->bpp > 8) {
+        /* Masks only exist for direct colour; an indexed mode is decoded
+         * through its palette. */
+        out->red_mask_size = mi[VBE_MI_RED_SIZE];
+        out->red_position = mi[VBE_MI_RED_POS];
+        out->green_mask_size = mi[VBE_MI_GREEN_SIZE];
+        out->green_position = mi[VBE_MI_GREEN_POS];
+        out->blue_mask_size = mi[VBE_MI_BLUE_SIZE];
+        out->blue_position = mi[VBE_MI_BLUE_POS];
+        out->has_masks = true;
+    }
 
-        candidate.linear_base = vbe_read32(mi + tail->phys_base);
-        if (lin_pitch != 0) {
-            /* VBE 3.0's linear pitch, when the firmware publishes one. */
-            candidate.pitch = lin_pitch;
-        }
-        if (candidate.bpp > 8) {
-            /* Masks only exist for direct colour; an indexed mode is decoded
-             * through its palette. */
-            candidate.red_mask_size = mi[tail->red_size];
-            candidate.red_position = mi[tail->red_position];
-            candidate.green_mask_size = mi[tail->green_size];
-            candidate.green_position = mi[tail->green_position];
-            candidate.blue_mask_size = mi[tail->blue_size];
-            candidate.blue_position = mi[tail->blue_position];
-            candidate.has_masks = true;
-        }
+    min_pitch = ((uint32_t)out->bpp + 7u) / 8u * out->width;
 
-        if (vbe_mode_is_real(&candidate) &&
-            (!candidate.has_masks || vbe_masks_are_valid(&candidate))) {
-            *out = candidate;
-            return true;
+    /*
+     * BytesPerScanLine at 0x10 is mandatory in every version and is the
+     * fallback.  VBE 3.0's LinBytesPerScanLine at 0x32 is the stride the
+     * linear mode really uses, and on some cards it differs from the banked
+     * one, so it wins when it is present and plausible.  The plausibility
+     * window keeps a reserved/garbage word from being mistaken for a pitch:
+     * a row needs at least the pixels and cannot be padded by more than a
+     * page beyond them.
+     */
+    if (vbe_version >= 0x0300 && out->pitch >= min_pitch) {
+        uint16_t linear_pitch = vbe_read16(mi + VBE_MI_LIN_PITCH);
+
+        if (linear_pitch >= min_pitch && linear_pitch <= min_pitch + 8192u) {
+            out->pitch = linear_pitch;
         }
     }
-    return false;
+
+    if (!vbe_mode_is_real(out)) {
+        return false;
+    }
+    if (out->has_masks && !vbe_masks_are_valid(out)) {
+        return false;
+    }
+    return true;
 }
 
 /* The description the walk kept for one mode, archived from its block. */
@@ -741,6 +718,18 @@ static void vbe_record_mode(uint16_t mode) {
         return;
     }
 
+    /* 480p floor for the resolution row.
+     *
+     * Firmware lists routinely start at 320x200, 640x400 or 640x350. Those
+     * modes are below the smallest desktop the OS offers now, so they are not
+     * added at all: the row walks from 480p upward on every backend, built-in
+     * table or firmware list. Counting them as rejected keeps the boot trace
+     * honest about how many entries the walk dropped. */
+    if (info.height < 480) {
+        ++vbe_list_rejected;
+        return;
+    }
+
     index = vbe_size_index(info.width, info.height);
     if (index < 0) {
         if (vbe_size_count >= VBE_MAX_SIZES) {
@@ -758,6 +747,68 @@ static void vbe_record_mode(uint16_t mode) {
     vbe_store_mode(&vbe_sizes[index], mode, &info);
 }
 
+/* Do the half-open ranges [a_start,a_end) and [b_start,b_end) collide? */
+static bool vbe_ranges_overlap(uint32_t a_start, uint32_t a_end,
+                               uint32_t b_start, uint32_t b_end) {
+    return a_start < b_end && b_start < a_end;
+}
+
+/*
+ * Is [start,end) safe for the real-mode bridge or one of its transfer buffers?
+ *
+ * Every address the bridge or a caller uses must be clear of low-memory state
+ * that is still live after the loader hands over:
+ *
+ *   - the firmware's extended BIOS data area, whose start the BIOS data area
+ *     publishes at 0x040E;
+ *   - the multiboot structure itself (read for framebuffer details while
+ *     initialising the video mode);
+ *   - the memory map and module list, whose raw low-memory pointers the kernel
+ *     still dereferences later (crash dump / module scan).
+ *
+ * This used to be checked only by the VBE probe, which runs after the desktop
+ * asks for a mode change.  The boot log's early sync calls INT 13h through the
+ * same bridge BEFORE the video mode set, so the same ownership test has to be
+ * available that early.  Refusing the range keeps the old conservative
+ * behaviour: skip the firmware call instead of corrupting live boot state.
+ */
+bool realmode_range_is_free(const MultibootInfo *mbi, uint32_t start, uint32_t end) {
+    uint16_t ebda_segment = *(volatile uint16_t *)(uintptr_t)0x040E;
+    uint32_t ebda_base = (uint32_t)ebda_segment << 4;
+
+    if (end <= start) {
+        return false;
+    }
+    /*
+     * The EBDA runs from its published base up to the top of conventional
+     * memory.  Only tests where both ends can actually collide matter: an
+     * EBDA above a transfer window in the 0x20000s is fine.
+     */
+    if (ebda_base != 0 && ebda_base < end && start < 0xA0000u) {
+        return false;
+    }
+
+    if (mbi == NULL) {
+        return false;
+    }
+    if (vbe_ranges_overlap(start, end,
+                           (uint32_t)(uintptr_t)mbi,
+                           (uint32_t)(uintptr_t)mbi + sizeof(MultibootInfo))) {
+        return false;
+    }
+    if ((mbi->flags & (1u << 6)) != 0 && mbi->mmap_addr != 0 && mbi->mmap_length != 0 &&
+        vbe_ranges_overlap(start, end, mbi->mmap_addr,
+                           mbi->mmap_addr + mbi->mmap_length)) {
+        return false;
+    }
+    if ((mbi->flags & (1u << 3)) != 0 && mbi->mods_addr != 0 && mbi->mods_count != 0 &&
+        vbe_ranges_overlap(start, end, mbi->mods_addr,
+                           mbi->mods_addr + mbi->mods_count * 16u)) {
+        return false;
+    }
+    return true;
+}
+
 /*
  * Is the low-memory block free?  The bridge owns it (see rm_layout), and the
  * pointers the multiboot structure carries (the module list, the memory map)
@@ -765,41 +816,153 @@ static void vbe_record_mode(uint16_t mode) {
  * be inside it.  A machine that puts them there keeps the old behaviour: no
  * runtime mode setting, rather than a corrupted boot.
  */
+static uint32_t realmode_stack_top_value;
+static uint32_t realmode_stack_bytes_value;
+
+/*
+ * Give the real-mode stub a real stack.
+ *
+ * The bridge used to run on the 2.5 KB between 0x8400 (its stub) and 0x9F00
+ * (its top).  That is enough for the video BIOS, which is why VBE calls have
+ * always worked, but it is not enough for a firmware USB disk or USB legacy
+ * keyboard stack, which can recurse through several layers and keep working
+ * state on the stack.  An overflow there lands inside the stub and shows up
+ * as "INT 13h extensions absent" or as a dead keyboard, not as an obvious
+ * stack fault.
+ *
+ * The largest free window below the EBDA wins, checked against exactly the
+ * same ownership rules as the rest of the bridge (multiboot structure, memory
+ * map, module list, EBDA).  If no window is free, the old 0x9F00 top stays and
+ * the call is no worse off than before.
+ */
+void realmode_configure_stack(const MultibootInfo *mbi) {
+    static const uint32_t sizes[3] = {0x8000u, 0x2000u, 0x800u};
+    uint16_t ebda_segment;
+    uint32_t top;
+
+    /* Fail closed if the C indices and assembly's published low-memory map
+     * ever drift apart again. In particular, do not let a layout mismatch
+     * turn a stack assignment into a write to the real-mode IVT. */
+    if (rm_layout[RM_L_INT] != 0x0026u ||
+        rm_layout[RM_L_STACK_SEG] != 0x8030u ||
+        rm_layout[RM_L_STACK_PTR] != 0x8032u ||
+        rm_layout[RM_L_IVT_FLAG] != 0x8840u) {
+        serial_trace("ERROR", "realmode: rm_layout mismatch; refusing stack configuration");
+        return;
+    }
+
+    ebda_segment = *(volatile uint16_t *)(uintptr_t)0x040E;
+    top = (uint32_t)ebda_segment << 4;
+
+    if (top < 0x10000u || top > 0xA0000u) {
+        /* No usable EBDA pointer: stop below the conventional EBDA base
+         * (0x9FC00) rather than at 0xA0000, so a firmware that forgot to
+         * publish the pointer still cannot have its data area overwritten. */
+        top = 0x9F000u;
+    }
+    for (int i = 0; i < 3; ++i) {
+        uint32_t base = (top - sizes[i]) & ~0xFu;
+
+        if (base < 0x9000u) {
+            continue; /* would run down into the stub/register block */
+        }
+        if (!realmode_range_is_free(mbi, base, top)) {
+            continue;
+        }
+        *(volatile uint16_t *)(uintptr_t)rm_layout[RM_L_STACK_SEG] =
+            (uint16_t)(base >> 4);
+        *(volatile uint16_t *)(uintptr_t)rm_layout[RM_L_STACK_PTR] =
+            (uint16_t)sizes[i];
+        realmode_stack_top_value = top;
+        realmode_stack_bytes_value = sizes[i];
+        return;
+    }
+
+    *(volatile uint16_t *)(uintptr_t)rm_layout[RM_L_STACK_SEG] = 0;
+    *(volatile uint16_t *)(uintptr_t)rm_layout[RM_L_STACK_PTR] = 0x9F00;
+    realmode_stack_top_value = 0x9F00;
+    realmode_stack_bytes_value = 0x9F00;
+    serial_trace("WARNING", "realmode: no free stack window below the EBDA; keeping the small stack");
+}
+
+uint32_t realmode_stack_top_address(void) {
+    return realmode_stack_top_value;
+}
+
+uint32_t realmode_stack_bytes(void) {
+    return realmode_stack_bytes_value;
+}
+
 static bool vbe_low_block_is_free(const MultibootInfo *mbi) {
     uint32_t start = rm_layout[RM_L_BASE];
     uint32_t end = rm_layout[RM_L_STACK];
     uint16_t ebda_segment = *(volatile uint16_t *)(uintptr_t)0x040E;
     uint32_t ebda_base = (uint32_t)ebda_segment << 4;
 
-    /*
-     * The firmware's own extended BIOS data area.  The block sits in
-     * conventional memory under the assumption that the EBDA is above it, and
-     * on a machine that puts the EBDA lower (or keeps its scratch there) the
-     * bridge would be writing over state the firmware still needs - which is
-     * a machine that dies part way through a BIOS call with nothing on screen.
-     * The BIOS data area says where it really starts, so ask before writing.
-     */
-    if (ebda_base != 0 && ebda_base < end) {
+    if (ebda_base != 0 && ebda_base < end && start < 0xA0000u) {
         serial_trace_hex_value("WARNING", "VBE: EBDA overlaps the bridge block", ebda_base);
         return false;
     }
-
-    if (mbi == NULL) {
+    if (!realmode_range_is_free(mbi, start, end)) {
         return false;
     }
-    if ((uint32_t)(uintptr_t)mbi + sizeof(MultibootInfo) > start &&
-        (uint32_t)(uintptr_t)mbi < end) {
-        return false;
-    }
-    if ((mbi->flags & (1u << 6)) != 0 && mbi->mmap_addr != 0 && mbi->mmap_length != 0 &&
-        mbi->mmap_addr + mbi->mmap_length > start && mbi->mmap_addr < end) {
-        return false;
-    }
-    if ((mbi->flags & (1u << 3)) != 0 && mbi->mods_addr != 0 && mbi->mods_count != 0 &&
-        mbi->mods_addr + mbi->mods_count * 16u > start && mbi->mods_addr < end) {
-        return false;
-    }
+    realmode_configure_stack(mbi);
     return true;
+}
+
+/*
+ * Does every advertised mode describe the exact surface the kernel is already
+ * drawing into?  The SeaVGABIOS coreboot backend - the one the CSM compatibility layer uses
+ * with CONFIG_VGA_COREBOOT=y - advertises the generic SVGA table for NTLDR
+ * compatibility, but cbvga_set_mode() only clears the screen.  Every 4F01
+ * block therefore reports the current CBlinelength and CB framebuffer base,
+ * and 4F02 returns success without moving the display.
+ *
+ * A real video BIOS gives different sizes different pitches, and often
+ * different bases.  Requiring every listed record to share one pitch and one
+ * base, and requiring that pair to be the live framebuffer, is deliberately
+ * strict; it catches the fixed-surface firmware without disabling a real VBE
+ * whose list happens to contain a single size.
+ */
+static bool vbe_modes_use_one_surface(void) {
+    const VbeModeRecord *records[3];
+    uint16_t modes[3];
+    uint32_t base = 0;
+    uint16_t pitch = 0;
+    int count = 0;
+
+    if (vbe_size_count < 2 || fb.address == NULL || fb.pitch == 0 ||
+        fb.pitch > 0xFFFFu) {
+        return false;
+    }
+
+    for (int i = 0; i < vbe_size_count; ++i) {
+        const VbeSize *size = &vbe_sizes[i];
+
+        modes[0] = size->mode_8;
+        modes[1] = size->mode_16;
+        modes[2] = size->mode_32;
+        records[0] = &size->record_8;
+        records[1] = &size->record_16;
+        records[2] = &size->record_32;
+        for (int j = 0; j < 3; ++j) {
+            if (modes[j] == 0) {
+                continue;
+            }
+            if (count == 0) {
+                base = records[j]->linear_base;
+                pitch = records[j]->pitch;
+            } else if (records[j]->linear_base != base ||
+                       records[j]->pitch != pitch) {
+                return false;
+            }
+            ++count;
+        }
+    }
+
+    return count >= 2 && base != 0 &&
+           base == (uint32_t)(uintptr_t)fb.address &&
+           pitch == (uint16_t)fb.pitch;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -823,7 +986,7 @@ static void vbe_note_boot_info(const MultibootInfo *mbi) {
 static bool vbe_probe(void) {
     const MultibootInfo *mbi = vbe_boot_info;
     uint8_t *info = vbe_info_block();
-    const uint16_t *modes;
+    const uint8_t *modes;
     uint32_t mode_list;
     int index;
 
@@ -843,6 +1006,7 @@ static bool vbe_probe(void) {
 
     vbe_probed = true;
     vbe_usable = false;
+    vbe_fixed_surface = false;
     vbe_size_count = 0;
     vbe_list_entries = 0;
     vbe_list_call_failed = 0;
@@ -865,6 +1029,7 @@ static bool vbe_probe(void) {
      * called from real mode. */
     realmode_install_gdt();
 
+
     /* VBE 3.0 only fills in the extended controller block when the caller
      * pre-seeds the signature, so ask with it in place. */
     info[0] = 'V';
@@ -882,27 +1047,40 @@ static bool vbe_probe(void) {
         serial_trace("INFO", "VBE: no VBE signature, runtime mode setting disabled");
         return false;
     }
-
-    /* VideoModePtr is a real-mode far pointer: offset first, then segment. */
-    mode_list = (uint32_t)(vbe_read16(info + VBE_INFO_MODE_PTR) |
-                           ((uint32_t)vbe_read16(info + VBE_INFO_MODE_PTR + 2) << 4));
+    vbe_version = vbe_read16(info + 0x04);
 
     /*
-     * The list has to be somewhere a real-mode pointer can address (low
-     * memory), and non-null.  A firmware that answers with a pointer into its
-     * own ROM window or with nothing at all is not one to read 1024 entries
-     * from - that is a walk through whatever happens to be mapped there, one
-     * video BIOS call per entry.
+     * VideoModePtr is a real-mode far pointer: offset in the low word,
+     * segment in the high word.  Adding the two is what a far pointer means;
+     * OR-ing them is only the same when the segment leaves the low bits
+     * clear.
+     *
+     * The list may live in the video BIOS ROM, and a real-mode pointer to
+     * C000:xxxx is normal - the ROM packs the list byte-exactly, so the
+     * linear address is often odd.  Neither the ROM range nor an odd address
+     * is a reason to refuse it: word loads from an odd address are legal on
+     * x86, and the list is read a byte at a time below for that reason.
+     * Only a null pointer, or one outside the real-mode address window where
+     * this kernel has RAM and ROM mapped, is unusable.
      */
-    if (mode_list == 0 || mode_list >= 0x00100000u || (mode_list & 1u) != 0) {
+    {
+        uint16_t mode_offset = vbe_read16(info + VBE_INFO_MODE_PTR);
+        uint16_t mode_segment = vbe_read16(info + VBE_INFO_MODE_PTR + 2);
+
+        mode_list = ((uint32_t)mode_segment << 4) + mode_offset;
+        serial_trace_hex_value("INFO", "VBE: mode list far pointer",
+                               ((uint32_t)mode_segment << 16) | mode_offset);
+    }
+
+    if (mode_list == 0 || mode_list >= 0x00100000u) {
         vbe_status = VBE_STATUS_BAD_LIST;
         serial_trace_hex_value("WARNING", "VBE: unusable mode list pointer", mode_list);
         return false;
     }
-    modes = (const uint16_t *)(uintptr_t)mode_list;
+    modes = (const uint8_t *)(uintptr_t)mode_list;
 
     for (index = 0; index < VBE_MAX_MODE_LIST; ++index) {
-        uint16_t mode = modes[index];
+        uint16_t mode = vbe_read16(modes + (uint32_t)index * 2u);
 
         if (mode == VBE_NO_MODE) {
             break;
@@ -919,6 +1097,23 @@ static bool vbe_probe(void) {
     vbe_list_kept = (uint16_t)vbe_size_count;
     vbe_usable = vbe_size_count > 0;
     vbe_status = vbe_usable ? VBE_STATUS_READY : VBE_STATUS_NO_MODES;
+
+    /*
+     * Detect the fixed-framebuffer VGA BIOS before Settings offers any of
+     * its modes.  This is the CSM compatibility-layer/SeaVGABIOS case: 4F02 succeeds, but the
+     * display controller and the surface never move.  Reporting the real
+     * state here is better than accepting a request and rolling it back.  The
+     * list stays in the trace for diagnosis, but it is no longer offered as
+     * programmable resolutions.
+     */
+    if (vbe_usable && vbe_modes_use_one_surface()) {
+        vbe_fixed_surface = true;
+        vbe_usable = false;
+        vbe_status = VBE_STATUS_FIXED;
+        serial_trace("WARNING", "VBE: every advertised mode uses the current surface");
+        serial_trace("WARNING", "VBE: firmware cannot change the physical display mode");
+    }
+    vbe_log_sizes();
 
     /*
      * Learn which mode the machine is in while the firmware is being talked to
@@ -942,6 +1137,8 @@ static bool vbe_probe(void) {
 
     if (vbe_usable) {
         serial_trace("INFO", "VBE: runtime mode setting available");
+    } else if (vbe_fixed_surface) {
+        serial_trace("WARNING", "VBE: fixed framebuffer; runtime mode setting unavailable");
     } else {
         serial_trace("INFO", "VBE: no usable linear framebuffer modes");
     }
@@ -968,16 +1165,17 @@ static bool vbe_mode_available(void) {
  */
 static const char *vbe_status_text(void) {
     switch (vbe_status) {
-        case VBE_STATUS_READY: return "list";
-        case VBE_STATUS_IDLE: return "not checked";
-        case VBE_STATUS_DISABLED: return "off in this build";
-        case VBE_STATUS_BLOCK_BUSY: return "memory in use";
-        case VBE_STATUS_NO_CONTROLLER: return "no controller";
-        case VBE_STATUS_NO_SIGNATURE: return "no VESA";
-        case VBE_STATUS_BAD_LIST: return "bad mode list";
-        case VBE_STATUS_NO_MODES: return "no linear modes";
-        case VBE_STATUS_FAULTED: return "firmware fault";
-        default: return "none";
+        case VBE_STATUS_READY: return "List";
+        case VBE_STATUS_FIXED: return "FIRMWARE AUTO-DETECTED!!";
+        case VBE_STATUS_IDLE: return "NOT CHECKED!!";
+        case VBE_STATUS_DISABLED: return "OFF in this build..";
+        case VBE_STATUS_BLOCK_BUSY: return "Memory in Use";
+        case VBE_STATUS_NO_CONTROLLER: return "No Controller Detected!";
+        case VBE_STATUS_NO_SIGNATURE: return "No VESA Detected!";
+        case VBE_STATUS_BAD_LIST: return "INVALID MODE LIST!!";
+        case VBE_STATUS_NO_MODES: return "No Linear Modes Detected!";
+        case VBE_STATUS_FAULTED: return "FIRMWARE FAULT!!";
+        default: return "Auto Failed!";
     }
 }
 
@@ -1207,8 +1405,14 @@ static bool vbe_set_mode(uint16_t width, uint16_t height, uint8_t bpp) {
     bool described = false;
     uint8_t crtc_before[VBE_CRTC_REGS];
     uint8_t crtc_after[VBE_CRTC_REGS];
+    uint32_t crtc_hash_before = 0;
+    uint32_t crtc_hash_after = 0;
     bool timing_must_change;
 
+    if (vbe_fixed_surface) {
+        serial_trace("WARNING", "VBE: fixed framebuffer; mode set skipped");
+        return false;
+    }
     if (!vbe_usable || vbe_call_faulted) {
         return false;
     }
@@ -1252,6 +1456,7 @@ static bool vbe_set_mode(uint16_t width, uint16_t height, uint8_t bpp) {
     timing_must_change = (width != saved.width || height != saved.height ||
                           record->pitch != saved.pitch);
     vbe_crtc_fingerprint(crtc_before);
+    crtc_hash_before = vbe_crtc_hash(crtc_before);
 
     if (!vbe_bios_call(VBE_FUNC_SET_MODE, (uint16_t)(mode | VBE_MODE_LINEAR), 0, 0)) {
         serial_trace("WARNING", "VBE: the video BIOS refused the mode");
@@ -1343,8 +1548,44 @@ static bool vbe_set_mode(uint16_t width, uint16_t height, uint8_t bpp) {
      */
     if (timing_must_change) {
         vbe_crtc_fingerprint(crtc_after);
+        crtc_hash_after = vbe_crtc_hash(crtc_after);
         if (vbe_crtc_unchanged(crtc_before, crtc_after)) {
             serial_trace("WARNING", "VBE: the display timing never moved - putting the old mode back");
+            serial_trace_uint_value("INFO", "VBE: requested width", width);
+            serial_trace_uint_value("INFO", "VBE: requested height", height);
+            serial_trace_uint_value("INFO", "VBE: requested bpp", bpp);
+            serial_trace_hex_value("INFO", "VBE: requested mode", mode);
+            serial_trace_hex_value("INFO", "VBE: reported mode", actual);
+            serial_trace_hex_value("INFO", "VBE: previous mode", previous_mode);
+            serial_trace_hex_value("INFO", "VBE: CRTC hash before", crtc_hash_before);
+            serial_trace_hex_value("INFO", "VBE: CRTC hash after", crtc_hash_after);
+            serial_trace_hex_value("INFO", "VBE: record framebuffer base",
+                                   record->linear_base);
+            serial_trace_uint_value("INFO", "VBE: record pitch", record->pitch);
+            serial_trace_hex_value("INFO", "VBE: current framebuffer base",
+                                   (uint32_t)(uintptr_t)saved.address);
+            serial_trace_uint_value("INFO", "VBE: current pitch", saved.pitch);
+            if (described) {
+                serial_trace_uint_value("INFO", "VBE: live width", fresh.width);
+                serial_trace_uint_value("INFO", "VBE: live height", fresh.height);
+                serial_trace_uint_value("INFO", "VBE: live bpp", fresh.bpp);
+                serial_trace_uint_value("INFO", "VBE: live pitch", fresh.pitch);
+                serial_trace_hex_value("INFO", "VBE: live framebuffer base",
+                                       fresh.linear_base);
+            }
+            /*
+             * A mode whose timing had to move, and did not, is the fixed
+             * Surface signature even if the probe could not see it from the
+             * mode-info blocks.  Stop offering firmware modes for the rest
+             * of this boot instead of repeating the same no-op on every
+             * Apply; the Settings row falls back to the fixed-framebuffer
+             * rule and only the current output stays selectable.
+             */
+            vbe_fixed_surface = true;
+            vbe_usable = false;
+            vbe_status = VBE_STATUS_FIXED;
+            serial_trace("WARNING",
+                         "VBE: runtime mode setting disabled; display is fixed by firmware");
             vbe_rollback(&saved, previous_mode, actual);
             return false;
         }
@@ -1376,12 +1617,10 @@ static bool vbe_set_mode(uint16_t width, uint16_t height, uint8_t bpp) {
  *
  * The two columns belong to the built-in table, where the same index has to
  * name a 4:3 size and a 16:9 one.  A firmware list has no such structure: its
- * entries are the modes the card can really program, and the split only hid
- * them from each other - the smallest mode a machine offers is usually a
- * low-resolution one (320x200, 640x400) and those are wider than 4:3, so with
- * the 4:3 column selected the arrow had nowhere to go below the boot size and
- * the row looked stuck.  One run means either arrow reaches every size the
- * machine has, smallest to largest, which is what a resolution list is for.
+ * entries are the modes the card can really program, so the split only hid
+ * them from each other.  One run means either arrow reaches every size the
+ * machine has above the 480p floor (see vbe_record_mode), smallest to
+ * largest, which is what a resolution list is for.
  */
 static int vbe_size_list_length(bool widescreen) {
     (void)widescreen;

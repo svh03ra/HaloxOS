@@ -516,7 +516,6 @@ W_CacheLumpName
 //
 // W_Profile
 //
-int		info[2500][10];
 int		profilecount;
 
 void W_Profile (void)
@@ -528,8 +527,16 @@ void W_Profile (void)
     FILE*	f;
     int		j;
     char	name[9];
-	
-	
+    /* The lump x profile matrix is only needed while a profile dump runs,
+     * and nothing in this port calls W_Profile.  As a file-scope array it
+     * still cost 2500 x 10 ints = 100 KB of .bss on every boot, which is
+     * exactly the kind of low-memory footprint the auto-fit boot floor is
+     * measured against; allocate it on first use instead. */
+    static int	(*info)[10];
+
+    if (!info)
+	info = (int (*)[10])Z_Malloc (2500 * 10 * sizeof(int), PU_STATIC, 0);
+
     for (i=0 ; i<numlumps ; i++)
     {	
 	ptr = lumpcache[i];

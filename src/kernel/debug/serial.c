@@ -3,10 +3,80 @@
 
 // This repository is licensed under the GNU General Public License.
 
+#if HALOXOS_CONFIG_DEBUG
+/*
+ * RAM mirror of the COM1 trace (debug builds only).
+ *
+ * Modern machines have no serial port for the QEMU-style host capture, so
+ * the trace is also recorded in RAM and flushed onto the boot medium at
+ * shutdown/restart/halt and from the crash handler (bootlog.c): that
+ * flushed copy is the real-hardware bios-serial.log.
+ *
+ * Overflow keeps the FIRST 64 KiB: early-boot lines are what a failed
+ * boot on real hardware is diagnosed from, and the tail is still on the
+ * wire for anyone with a capture box.
+ */
+#define SERIAL_LOG_BUFFER_BYTES 65536u
+
+static char serial_log_buffer[SERIAL_LOG_BUFFER_BYTES];
+static uint32_t serial_log_used;
+
+static void serial_log_append(char ch) {
+    if (!debug || serial_log_used >= sizeof(serial_log_buffer)) {
+        return;
+    }
+    serial_log_buffer[serial_log_used++] = ch;
+}
+
+static const char *serial_log_data(void) {
+    return serial_log_buffer;
+}
+
+static uint32_t serial_log_length(void) {
+    return serial_log_used;
+}
+
+/*
+ * The zstd loader runs before the kernel decompresses, so its [LDR]
+ * lines can only survive inside the loader's own RAM mirror (which
+ * lives below the kernel and outlives the handoff). This copies that
+ * range in as the prefix of the kernel mirror, so a flushed log starts
+ * with the pre-compression boot story exactly like the QEMU capture.
+ * Called once, right after serial_init(), before any kernel trace line.
+ */
+static void serial_log_load_prefix(const volatile char *src, uint32_t len) {
+    if (serial_log_used != 0 || src == NULL || len == 0 ||
+        len > SERIAL_LOG_BUFFER_BYTES) {
+        return;
+    }
+    while (len-- > 0) {
+        char ch = *src++;
+        if (!debug) {
+            return;
+        }
+        if (serial_log_used < sizeof(serial_log_buffer)) {
+            serial_log_buffer[serial_log_used++] = ch;
+        }
+    }
+}
+#else
+/* Release builds keep no mirror and no prefix. */
+static void serial_log_load_prefix(const volatile char *src, uint32_t len) {
+    (void)src;
+    (void)len;
+}
+#endif
+
+/* 115200 8N1, the same speed the zstd loader opens COM1 with (divisor 1).
+ * One fixed baud for the whole boot is what makes a single physical
+ * capture work: a terminal or `make capture` box recording the COM1
+ * cable gets the loader's [LDR] lines and the kernel traces without
+ * reconfiguring mid-boot. QEMU ignores the divisor, so emulator runs
+ * are unaffected. */
 static void serial_init(void) {
     outb(0x3F8 + 1, 0x00);
     outb(0x3F8 + 3, 0x80);
-    outb(0x3F8 + 0, 0x03);
+    outb(0x3F8 + 0, 0x01);
     outb(0x3F8 + 1, 0x00);
     outb(0x3F8 + 3, 0x03);
     outb(0x3F8 + 2, 0xC7);
@@ -21,6 +91,9 @@ static void serial_write_char(char ch) {
     for (int i = 0; i < 100000 && !serial_ready(); ++i) {
     }
     outb(0x3F8, (uint8_t)ch);
+#if HALOXOS_CONFIG_DEBUG
+    serial_log_append(ch);
+#endif
 }
 
 static void serial_write_string(const char *text) {

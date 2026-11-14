@@ -5,6 +5,9 @@
 
 static bool start_menu_row_app(int row, AppId *app_out) {
     switch (row) {
+#if HALOXOS_CONFIG_DEBUG
+        case START_MENU_TEST_ROW: *app_out = APP_STRESS_TEST; return true;
+#endif
         case 0: *app_out = APP_NOTEPAD; return true;
         case 1: *app_out = APP_CMD; return true;
         case 2: *app_out = APP_PAINT; return true;
@@ -20,13 +23,13 @@ static bool start_menu_row_app(int row, AppId *app_out) {
 
 static void handle_start_menu_click(void) {
     int x = 0;
-    int y = OS_HEIGHT - TASKBAR_H - 232;
+    int y = start_menu_y();
 
     if (!menu_open || ((!mouse.left || mouse.prev_left) && (!mouse.right || mouse.prev_right))) {
         return;
     }
 
-    if (!point_in_rect(mouse.x, mouse.y, x, y, 180, 232)) {
+    if (!point_in_rect(mouse.x, mouse.y, x, y, START_MENU_W, START_MENU_H)) {
         menu_open = false;
         return;
     }
@@ -40,7 +43,7 @@ static void handle_start_menu_click(void) {
          * at the cursor the submenu covered the very item that opened it
          * (and its hover highlight), so it was easy to lose the row you
          * were on. */
-        start_app_menu_x = clampi(180 + 2, 0, OS_WIDTH - start_app_menu_width());
+        start_app_menu_x = clampi(START_MENU_W + 2, 0, OS_WIDTH - start_app_menu_width());
         start_app_menu_y = clampi(mouse.y - 6, 0, OS_HEIGHT - TASKBAR_H - START_APP_MENU_H);
         return;
     }

@@ -41,8 +41,7 @@ int doom_quit_requested = 0;
 static int doom_time_base = -1;
 static int doom_time_frozen = 0;
 static bool doom_clock_is_paused = false;
-#define DOOM_LOW_POOL_BYTES (320u * 200u * 4u)
-static uint8_t doom_low_pool[DOOM_LOW_POOL_BYTES];
+static uint8_t *doom_low_pool = NULL;
 static size_t doom_low_used = 0;
 
 /* The DOOM zone is carved from free RAM above the kernel, not a static .bss
@@ -68,11 +67,22 @@ static size_t doom_low_used = 0;
 static uint32_t doom_zone_base = DOOM_ZONE_DEFAULT_BASE;
 static int doom_zone_size = 0;
 
+/* End of the live DOOM zone, or 0 when the zone has not been carved yet.
+ * The desktop's shadow-plane allocator uses this as its ceiling so a
+ * later canvas resize can never grow the plane into the engine's heap. */
+static uint32_t doom_zone_limit(void) {
+    if (doom_zone_size == 0) {
+        return 0;
+    }
+    return doom_zone_base + (uint32_t)doom_zone_size;
+}
+
 static bool doom_zone_available(void) {
     extern uint32_t ram_total_bytes;
     extern uint32_t doom_wad_module_addr;
     extern uint32_t doom_wad_module_bytes;
     uint32_t avail;
+    uint32_t zone_end;
 
     if (doom_zone_size != 0) {
         return true;
@@ -82,31 +92,26 @@ static bool doom_zone_available(void) {
     }
 
     doom_zone_base = DOOM_ZONE_DEFAULT_BASE;
+    /* The desktop shadow plane is allocated at the top of usable RAM and
+     * grows downward.  It is the real ceiling of this zone: ending below
+     * it would let the engine's heap overwrite the compositor's pixels. */
+    zone_end = shadow_plane_base != 0 ? shadow_plane_base : ram_total_bytes;
 #ifndef DOOM_WAD_EMBED_BUILD
     /* A WAD loaded by GRUB may be parked in the upper part of a 16 MB-class
      * machine.  Keep the DOOM heap strictly below that module so the heap
      * can never overwrite the WAD while the engine is reading lumps from RAM. */
-    if (doom_wad_module_addr != 0 && doom_wad_module_bytes != 0) {
-        uint32_t zone_end = doom_wad_module_addr;
-        if (zone_end > ram_total_bytes) {
-            zone_end = ram_total_bytes;
-        }
-        if (zone_end <= DOOM_ZONE_DEFAULT_BASE) {
-            return false;
-        }
-        avail = zone_end - DOOM_ZONE_DEFAULT_BASE;
-    } else {
-        if (ram_total_bytes <= DOOM_ZONE_DEFAULT_BASE) {
-            return false;
-        }
-        avail = ram_total_bytes - DOOM_ZONE_DEFAULT_BASE;
+    if (doom_wad_module_addr != 0 && doom_wad_module_bytes != 0 &&
+        doom_wad_module_addr < zone_end) {
+        zone_end = doom_wad_module_addr;
     }
-#else
-    if (ram_total_bytes <= DOOM_ZONE_DEFAULT_BASE) {
+#endif
+    if (zone_end > ram_total_bytes) {
+        zone_end = ram_total_bytes;
+    }
+    if (zone_end <= DOOM_ZONE_DEFAULT_BASE) {
         return false;
     }
-    avail = ram_total_bytes - DOOM_ZONE_DEFAULT_BASE;
-#endif
+    avail = zone_end - DOOM_ZONE_DEFAULT_BASE;
 
     if (avail > DOOM_ZONE_MAX_BYTES) {
         avail = DOOM_ZONE_MAX_BYTES;
@@ -119,6 +124,50 @@ static bool doom_zone_available(void) {
     doom_zone_size = (int)avail;
     serial_trace_hex_value("DOOM", "DOOM zone base", doom_zone_base);
     serial_trace_uint_value("DOOM", "DOOM zone bytes", (uint32_t)doom_zone_size);
+    return true;
+}
+
+/* Carve a fixed-size runtime pool from the bottom of the DOOM zone.
+ * doom_pools_init() runs before V_Init/Z_Init, so the engine's heap
+ * starts above the pools and Z_Init only ever sees the remainder. */
+static uint8_t *doom_zone_carve(uint32_t bytes) {
+    uint8_t *p;
+
+    bytes = (bytes + 15u) & ~15u;
+    if (!doom_zone_available() || bytes > (uint32_t)doom_zone_size) {
+        return NULL;
+    }
+    p = (uint8_t *)(uintptr_t)doom_zone_base;
+    doom_zone_base += bytes;
+    doom_zone_size -= (int)bytes;
+    return p;
+}
+
+bool doom_pools_init(void) {
+    static bool ready = false;
+    uint8_t *low;
+    uint8_t *malloc_pool;
+    uint8_t *alloca_pool;
+
+    if (ready) {
+        return true;
+    }
+    low = doom_zone_carve(DOOM_LOW_POOL_BYTES);
+    malloc_pool = doom_zone_carve(DOOM_MALLOC_ARENA_BYTES);
+    alloca_pool = doom_zone_carve(DOOM_ALLOCA_POOL_BYTES);
+    if (low == NULL || malloc_pool == NULL || alloca_pool == NULL) {
+        return false;
+    }
+
+    doom_low_pool = low;
+    doom_malloc_set_pool(malloc_pool, DOOM_MALLOC_ARENA_BYTES);
+    doom_alloca_set_pool(alloca_pool, DOOM_ALLOCA_POOL_BYTES);
+    ready = true;
+    serial_trace_hex_value("DOOM", "DOOM pool low base", (uint32_t)(uintptr_t)low);
+    serial_trace_hex_value("DOOM", "DOOM pool malloc base", (uint32_t)(uintptr_t)malloc_pool);
+    serial_trace_hex_value("DOOM", "DOOM pool alloca base", (uint32_t)(uintptr_t)alloca_pool);
+    serial_trace_hex_value("DOOM", "DOOM zone heap base", doom_zone_base);
+    serial_trace_uint_value("DOOM", "DOOM zone heap bytes", (uint32_t)doom_zone_size);
     return true;
 }
 
@@ -156,6 +205,16 @@ int I_GetTime(void) {
         return doom_time_frozen;
     }
     return now - doom_time_base;
+}
+
+/* Fraction of the current 35 Hz tic that has elapsed, in 1/1000 units.
+ * TICRATE and TIMER_HZ are 35 and 60, so the phase repeats every 12
+ * 60 Hz ticks (12/60 s = 7/35 s); the modulo keeps the multiply in 32-bit
+ * range instead of overflowing after a few weeks of uptime. */
+int I_GetFrameAlpha(void) {
+    uint32_t phase = ((timer_ticks % 12u) * 35u) % 60u;
+
+    return (int)((phase * 1000u) / 60u);
 }
 
 /* Do not make TryRunTics replay minutes of elapsed time when a DOOM window
@@ -205,12 +264,16 @@ void I_EndRead(void) {}
 byte *I_AllocLow(int length) {
     size_t bytes;
 
+    if (doom_low_pool == NULL) {
+        I_Error("Not enough RAM for DOOM\n(need 10 MB, machine has less)");
+        return NULL;
+    }
     if (length < 0) {
         I_Error("I_AllocLow: low memory exhausted");
         return doom_low_pool;
     }
     bytes = ((size_t)length + 15u) & ~(size_t)15u;
-    if (bytes > sizeof(doom_low_pool) - doom_low_used) {
+    if (bytes > DOOM_LOW_POOL_BYTES - doom_low_used) {
         I_Error("I_AllocLow: low memory exhausted");
         return doom_low_pool;
     }

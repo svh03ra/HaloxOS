@@ -3,6 +3,7 @@
 
 // This repository is licensed under the GNU General Public License.
 
+static void stress_handle_key(KeyEvent event);
 static void desktop_paste_from_clipboard(int px, int py);
 static void desktop_copy_selected(int primary, bool cut);
 static void desktop_delete_selected(int primary);
@@ -128,10 +129,14 @@ static void handle_text_target(KeyEvent event) {
         if (event.code == KEY_ENTER && (mines_lost || mines_won)) {
             mines_place();
         }
+    } else if (active_window == APP_COIN_RUN) {
+        coin_run_handle_key(event);
     } else if (active_window == APP_DOOM) {
         doom_app_handle_key(event);
     } else if (active_window == APP_3D_BOX) {
         box3d_handle_key(event);
+    } else if (active_window == APP_STRESS_TEST) {
+        stress_handle_key(event);
     } else if (active_window == APP_PAINT) {
         if (keyboard_ctrl && (event.ch == 'c' || event.ch == 'C')) {
             memcpy_local(paint_clipboard, paint_canvas, sizeof(paint_canvas));

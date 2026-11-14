@@ -25,14 +25,18 @@ static void hover_widget_add(int x, int y, int w, int h) {
     ++hover_rect_count;
 }
 
-static bool hover_widget_hit(int x, int y) {
+/* Index of the widget under a point, or -1. The redraw gate compares the
+ * index at the old and the new pointer position: the same widget means the
+ * hover fill on screen is still correct, so a pointer-only frame is safe;
+ * a different one means a full repaint has to show the new hover state. */
+static int hover_widget_index_at(int x, int y) {
     for (int i = 0; i < hover_rect_count; ++i) {
         if (point_in_rect(x, y, hover_rect_x[i], hover_rect_y[i],
                           hover_rect_w[i], hover_rect_h[i])) {
-            return true;
+            return i;
         }
     }
-    return false;
+    return -1;
 }
 
 static void draw_button(int x, int y, int w, int h, const char *label, uint8_t fill, uint8_t border, uint8_t text) {
@@ -71,6 +75,25 @@ static void draw_button(int x, int y, int w, int h, const char *label, uint8_t f
     draw_text_center(x + w / 2 + (pressed ? 1 : 0), y + (h - 8) / 2 + (pressed ? 1 : 0), label, text, draw_fill, true);
 }
 
+/* 2x2 ordered-dither cell used by every UI fade.  The diagonal
+ * ((x + y) & 3) pattern this replaces read as stripes; this is a true
+ * checkerboard at 50% and keeps the 25/50/75% steps through the same
+ * 2x2 cell. */
+static const uint8_t ui_checker2[2][2] = {
+    {0, 2},
+    {3, 1}
+};
+
+static bool ui_checker_dot(int x, int y, int level) {
+    if (level <= 0) {
+        return false;
+    }
+    if (level >= 4) {
+        return true;
+    }
+    return ui_checker2[y & 1][x & 1] < level;
+}
+
 static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8_t dark, uint32_t hover_tick) {
     uint32_t age = timer_ticks - hover_tick;
     int density = (int)(age / 3u) + 1;
@@ -89,7 +112,7 @@ static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8
     fill_rect(x, y, w, h, base);
     for (int py = y; py < y + h; ++py) {
         for (int px = x; px < x + w; ++px) {
-            if (((px + py) & 3) < density) {
+            if (ui_checker_dot(px, py, density)) {
                 draw_pixel(px, py, dark);
             }
         }

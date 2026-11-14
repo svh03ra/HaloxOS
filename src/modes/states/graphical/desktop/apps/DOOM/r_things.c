@@ -453,6 +453,17 @@ void R_ProjectSprite (mobj_t* thing)
 {
     fixed_t		tr_x;
     fixed_t		tr_y;
+
+    /*
+     * Never draw the display player's own mobj.  Vanilla DOOM relied on
+     * the camera sitting exactly on that mobj, so tz < MINZ rejected it.
+     * The hosted renderer interpolates the camera between tics, which can
+     * leave it up to a full tic behind the player's current position.
+     * That made the player's own marine sprite project at point-blank
+     * range and fill the view with giant green texel blocks.
+     */
+    if (viewplayer && thing == viewplayer->mo)
+	return;
     
     fixed_t		gxt;
     fixed_t		gyt;

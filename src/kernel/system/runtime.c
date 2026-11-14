@@ -47,6 +47,16 @@ static void *memset_local(void *dest, int value, size_t len) {
     return dest;
 }
 
+/*
+ * Compiler-generated bulk zeroing.  Clang lowers a zero-initialised local
+ * array (`char buf[N] = {0}`) to a memset call even in a freestanding build;
+ * GCC happens to inline the stores.  The kernel has no libc, so provide the
+ * one symbol both compilers can use, backed by the existing fast fill.
+ */
+void *memset(void *dest, int value, size_t len) {
+    return memset_local(dest, value, len);
+}
+
 static void *memcpy_local(void *dest, const void *src, size_t len) {
     uint8_t *d = (uint8_t *)dest;
     const uint8_t *s = (const uint8_t *)src;

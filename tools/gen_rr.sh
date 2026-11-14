@@ -2,12 +2,19 @@
 # Auto-fit boot-requirement generator (see Makefile's ram_requirement rule).
 # Usage: gen_rr.sh <kernel.bin> <output.h> <embed_state: 0|1>
 #
-# gate_bytes = info_addr + one 64 KiB guard: the loader handoff block plus
-# the deepest allocation the loader makes above its own image (the 64 KiB-
-# aligned compressed-kernel staging window, which it places just below the
-# info block). The gate is purely the real footprint - no hardcoded floor -
-# so a 5.34 MB kernel boots a 6 MB machine and the requirement always
-# follows the kernel size.
+# gate_bytes = info_addr + one 64 KiB guard.  The info block sits just
+# above the kernel's real span; the 256 KiB decompressor scratch does not
+# need a slot of its own because the loader parks it at run time in the gap
+# between the decompressed image / compressed module and that info block
+# (inside the kernel's future .bss range, which is free while zstd runs).
+# The gate is the real footprint - no guessed floor - so a 4.4 MB kernel
+# boots a 5 MB machine and the requirement always follows the kernel size.
+#
+# The nominal requirement is the gate rounded up to a whole MB, so the
+# figure shown on the boot-error screen is the smallest advertised RAM size
+# that can hold the real footprint: the current 4.5 MB gate reports a 5 MB
+# minimum.  The loader additionally checks the highest E820 type-1 address
+# against the gate, so firmware reservations cannot slip through unnoticed.
 set -eu
 
 KERNEL=$1

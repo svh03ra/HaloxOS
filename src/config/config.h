@@ -18,12 +18,19 @@
  *   1 = enable to show development build for during work in progress
  *
  * HALOXOS_CONFIG_SCREEN_WIDTH / HALOXOS_CONFIG_SCREEN_HEIGHT:
- *   Supported 4:3 modes: 1024x768, 960x720, 800x600, 640x480, 480x360,
- *                       320x240, 192x144
- *   Supported wide modes: 1366x768, 1280x800, 1280x720, 854x480, 640x360,
- *                        426x240, 256x144
- *   The mode the Settings resolution arrows offer; the desktop can then be
- *   re-sized inside it (its canvas follows the mode).
+ *   Standard modes: 1600x1200, 1400x1050, 1280x1024, 1152x864,
+ *                   1024x768, 960x720, 800x600, 640x480
+ *   Wide modes:     1920x1200, 1920x1080, 1680x1050, 1600x900,
+ *                   1440x900, 1366x768, 1280x800, 1280x720, 854x480
+ *   The resolution lists start at 480p; 1xx-3xx modes are not offered.
+ *   On a machine with a video BIOS the runtime resolution list is the
+ *   firmware's own mode list; this table is the fallback used by the
+ *   programmable-register backends and by VBE-less machines.  The desktop
+ *   canvas follows the selected mode, up to 1920x1200, and shrinks to fit
+ *   when the machine does not have the RAM for that canvas.
+ *   A bootloader framebuffer with no VBE list cannot change the output mode;
+ *   Screen Resolution then re-sizes the desktop inside the mode the loader
+ *   set, and the Settings window keeps showing the real "Current Output".
  *
  * HALOXOS_CONFIG_SCREEN_BPP:
  *   4  = true 16-color VGA mode (classic VGA backend only)

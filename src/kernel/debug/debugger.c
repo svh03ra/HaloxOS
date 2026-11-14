@@ -10,6 +10,7 @@ static void debug_enter(void) {
     debug_overlay_open = true;
     debug_memory_view_open = false;
     debug_memory_edit_nibble = -1;
+    debug_memory_scroll_drag = false;
     debug_log_scroll_x = 0;
     terminal_reset(&debug_term);
     terminal_add_line(&debug_term, "Welcome to HaloxOS Debugger!");
@@ -231,11 +232,173 @@ static int debug_memory_hex_rows(void) {
     return 30;
 }
 
+/* Geometry shared by the memory renderer and the scrollbar hit test, so
+ * the drawn track and the clickable track can never disagree. */
+static int debug_memory_view_x(void) {
+    return 16;
+}
+
+static int debug_memory_view_y(void) {
+    return 26;
+}
+
+static int debug_memory_view_w(void) {
+    return OS_WIDTH - 32;
+}
+
+static int debug_memory_view_h(void) {
+    return OS_HEIGHT - 54;
+}
+
+/*
+ * Live bitmap geometry, one memory byte per pixel.  These used to be the
+ * fixed 430x240 macros; the Width/Height boxes in the viewer now change
+ * them at run time so the bitmap can use the rest of the screen.
+ */
+static int debug_memory_visual_w(void) {
+    return (int)debug_memory_visual_width;
+}
+
+static int debug_memory_visual_h(void) {
+    return (int)debug_memory_visual_height;
+}
+
+#define DEBUG_MEMORY_VISUAL_MIN 16
+#define DEBUG_MEMORY_VISUAL_TOP 54
+#define DEBUG_MEMORY_SIZE_ROW_H 48
+#define DEBUG_MEMORY_SIZE_BOX_W 52
+#define DEBUG_MEMORY_SIZE_BOX_H 14
+
+/* Largest bitmap that still leaves room for the scrollbar on the right and
+ * the Width/Height row plus the footer below it.  This is the extra space a
+ * bigger screen unlocks for the bitmap. */
+static int debug_memory_visual_max_w(void) {
+    int max = debug_memory_view_w() - 64;
+
+    return max < DEBUG_MEMORY_VISUAL_MIN ? DEBUG_MEMORY_VISUAL_MIN : max;
+}
+
+static int debug_memory_visual_max_h(void) {
+    int max = debug_memory_view_h() - DEBUG_MEMORY_VISUAL_TOP - DEBUG_MEMORY_SIZE_ROW_H - 10;
+
+    return max < DEBUG_MEMORY_VISUAL_MIN ? DEBUG_MEMORY_VISUAL_MIN : max;
+}
+
+static int debug_memory_visual_x(void) {
+    return debug_memory_view_x() + (debug_memory_view_w() - debug_memory_visual_w()) / 2;
+}
+
+static int debug_memory_visual_y(void) {
+    return debug_memory_view_y() + DEBUG_MEMORY_VISUAL_TOP;
+}
+
+static int debug_memory_scroll_x(void) {
+    return debug_memory_visual_x() + debug_memory_visual_w() + 10;
+}
+
+/* The Width/Height row sits just above the Memory Bytes footer, clear of
+ * the header and of the tallest bitmap. */
+static int debug_memory_size_row_y(void) {
+    return debug_memory_view_y() + debug_memory_view_h() - DEBUG_MEMORY_SIZE_ROW_H;
+}
+
+static int debug_memory_size_box_x(int which) {
+    return debug_memory_view_x() + (which == 0 ? 58 : 180);
+}
+
+static int debug_memory_size_field_at(int x, int y) {
+    for (int which = 0; which < 2; ++which) {
+        if (point_in_rect(x, y, debug_memory_size_box_x(which) - 2,
+                          debug_memory_size_row_y() - 2,
+                          DEBUG_MEMORY_SIZE_BOX_W + 4,
+                          DEBUG_MEMORY_SIZE_BOX_H + 4)) {
+            return which;
+        }
+    }
+    return -1;
+}
+
+/* The pointer is drawn only over the bitmap memory viewer's box: that is
+ * the one debugger screen with pointer-reactive controls (the scrollbar and
+ * the Width/Height boxes).  The hex screen is keyboard-only, so F1 hides
+ * the pointer and F2 brings it back; the terminal overlay hides it as well.
+ * Outside the box the overlay is the only thing on screen, and a stamp in
+ * the wallpaper strip around it just left a frozen arrow that nothing
+ * repainted. */
+static bool debug_memory_pointer_visible(void) {
+    if (!debug_overlay_open || !debug_memory_view_open ||
+        debug_memory_mode != DEBUG_MEMORY_MODE_VISUAL) {
+        return false;
+    }
+    return point_in_rect(mouse.x, mouse.y, debug_memory_view_x(),
+                         debug_memory_view_y(), debug_memory_view_w(),
+                         debug_memory_view_h());
+}
+
+/* Bytes visible in one screen of the current mode. */
+static uint32_t debug_memory_visible_bytes(void) {
+    if (debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL) {
+        return (uint32_t)debug_memory_visual_w() * (uint32_t)debug_memory_visual_h();
+    }
+    return (uint32_t)debug_memory_hex_rows() * DEBUG_MEMORY_BYTES_PER_ROW;
+}
+
+/* Byte distance of one scroll step (one hex row or one bitmap row). */
+static uint32_t debug_memory_row_bytes(void) {
+    return debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL
+        ? (uint32_t)debug_memory_visual_w()
+        : (uint32_t)DEBUG_MEMORY_BYTES_PER_ROW;
+}
+
+/* Furthest row-aligned base that still reaches the final byte. Rounding
+ * up (instead of down) keeps the last partial row reachable; the unused
+ * tail of that row renders as black, the same way the Task Manager's
+ * palette grid shows its honest tail row. */
+static uint32_t debug_memory_max_base(void) {
+    uint32_t limit = debug_memory_limit();
+    uint32_t visible = debug_memory_visible_bytes();
+    uint32_t row = debug_memory_row_bytes();
+    uint32_t need;
+    uint32_t rem;
+
+    if (limit <= visible || row == 0) {
+        return 0;
+    }
+    need = limit - visible;
+    rem = need % row;
+    if (rem != 0) {
+        uint32_t pad = row - rem;
+
+        if (need > 0xFFFFFFFFu - pad) {
+            return need;
+        }
+        need += pad;
+    }
+    return need;
+}
+
+static void debug_memory_clamp_cursor_to_view(void) {
+    uint32_t visible = debug_memory_visible_bytes();
+    uint32_t limit = debug_memory_limit();
+    uint32_t end = debug_range_end(debug_memory_base, visible);
+
+    if (debug_memory_cursor < debug_memory_base) {
+        debug_memory_cursor = debug_memory_base;
+    } else if (debug_memory_cursor >= end) {
+        debug_memory_cursor = end > debug_memory_base ? end - 1u : debug_memory_base;
+    }
+    if (limit != 0 && debug_memory_cursor >= limit) {
+        debug_memory_cursor = limit - 1u;
+    }
+}
+
 static void debug_align_memory_view(void) {
     uint32_t limit = debug_memory_limit();
-    uint32_t visible_bytes = (uint32_t)debug_memory_hex_rows() * DEBUG_MEMORY_BYTES_PER_ROW;
+    uint32_t visible_bytes = debug_memory_visible_bytes();
+    uint32_t row = debug_memory_row_bytes();
+    uint32_t max_base = debug_memory_max_base();
 
-    if (limit == 0) {
+    if (limit == 0 || row == 0) {
         debug_memory_base = 0;
         debug_memory_cursor = 0;
         return;
@@ -245,11 +408,117 @@ static void debug_align_memory_view(void) {
     }
 
     if (debug_memory_cursor < debug_memory_base) {
-        debug_memory_base = debug_memory_cursor & ~(uint32_t)(DEBUG_MEMORY_BYTES_PER_ROW - 1);
+        debug_memory_base = debug_memory_cursor - (debug_memory_cursor % row);
     } else if (debug_memory_cursor >= debug_range_end(debug_memory_base, visible_bytes)) {
-        debug_memory_base = (debug_memory_cursor - visible_bytes + DEBUG_MEMORY_BYTES_PER_ROW) &
-                            ~(uint32_t)(DEBUG_MEMORY_BYTES_PER_ROW - 1);
+        uint32_t want = debug_memory_cursor >= visible_bytes
+            ? debug_memory_cursor - visible_bytes + 1u
+            : 0u;
+
+        debug_memory_base = want - (want % row);
     }
+    if (debug_memory_base > max_base) {
+        debug_memory_base = max_base;
+    }
+    debug_memory_clamp_cursor_to_view();
+}
+
+/*
+ * Bitmap Width/Height boxes.
+ *
+ * The buffer always holds what the box shows; it is seeded from the
+ * applied size when a box takes focus and written back after a clamp, so
+ * typing can never leave the box disagreeing with the bitmap on screen.
+ */
+static void debug_memory_size_set_text(int which, uint32_t value) {
+    size_t len = 0;
+
+    debug_memory_size_text[which][0] = '\0';
+    append_uint(debug_memory_size_text[which], &len,
+                sizeof(debug_memory_size_text[which]), value);
+    debug_memory_size_len[which] = (int)len;
+}
+
+static uint32_t debug_memory_size_parse(int which) {
+    uint32_t value = 0;
+
+    for (int i = 0; i < debug_memory_size_len[which]; ++i) {
+        value = value * 10u + (uint32_t)(debug_memory_size_text[which][i] - '0');
+        /* Nothing above the largest screen matters; stop before overflow. */
+        if (value > 4096u) {
+            return 4096u;
+        }
+    }
+    return value;
+}
+
+/* Clamp both boxes to what this screen can show, then resize the bitmap.
+ * Applying is explicit (Enter, Tab or a click elsewhere) so a half-typed
+ * number never redraws the view at a nonsense size. */
+static void debug_memory_apply_visual_size(void) {
+    uint32_t width = debug_memory_size_parse(0);
+    uint32_t height = debug_memory_size_parse(1);
+    uint32_t max_w = (uint32_t)debug_memory_visual_max_w();
+    uint32_t max_h = (uint32_t)debug_memory_visual_max_h();
+
+    if (width < DEBUG_MEMORY_VISUAL_MIN) {
+        width = DEBUG_MEMORY_VISUAL_MIN;
+    }
+    if (height < DEBUG_MEMORY_VISUAL_MIN) {
+        height = DEBUG_MEMORY_VISUAL_MIN;
+    }
+    if (width > max_w) {
+        width = max_w;
+    }
+    if (height > max_h) {
+        height = max_h;
+    }
+
+    debug_memory_visual_width = width;
+    debug_memory_visual_height = height;
+    debug_memory_size_set_text(0, width);
+    debug_memory_size_set_text(1, height);
+    debug_memory_size_fresh = false;
+    if (debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL) {
+        debug_memory_base -= debug_memory_base % width;
+    }
+    debug_align_memory_view();
+}
+
+static void debug_memory_size_focus_field(int which) {
+    if (which == debug_memory_size_focus) {
+        return;
+    }
+    debug_memory_size_focus = which;
+    debug_memory_size_fresh = which >= 0;
+    if (which >= 0) {
+        debug_memory_size_set_text(which, which == 0
+            ? debug_memory_visual_width
+            : debug_memory_visual_height);
+    }
+}
+
+/* Seed the boxes from the live size, shrinking a size that no longer fits
+ * the current screen (a resolution change while the viewer was closed). */
+static void debug_memory_size_reset_text(void) {
+    uint32_t max_w = (uint32_t)debug_memory_visual_max_w();
+    uint32_t max_h = (uint32_t)debug_memory_visual_max_h();
+
+    if (debug_memory_visual_width < DEBUG_MEMORY_VISUAL_MIN) {
+        debug_memory_visual_width = DEBUG_MEMORY_VISUAL_MIN;
+    }
+    if (debug_memory_visual_height < DEBUG_MEMORY_VISUAL_MIN) {
+        debug_memory_visual_height = DEBUG_MEMORY_VISUAL_MIN;
+    }
+    if (debug_memory_visual_width > max_w) {
+        debug_memory_visual_width = max_w;
+    }
+    if (debug_memory_visual_height > max_h) {
+        debug_memory_visual_height = max_h;
+    }
+    debug_memory_size_set_text(0, debug_memory_visual_width);
+    debug_memory_size_set_text(1, debug_memory_visual_height);
+    debug_memory_size_focus = -1;
+    debug_memory_size_fresh = false;
 }
 
 static void debug_move_memory_cursor(int delta) {
@@ -276,6 +545,77 @@ static void debug_move_memory_cursor(int delta) {
     debug_align_memory_view();
 }
 
+/* Scroll the viewport by whole rows without moving the selection away
+ * from the visible window. Used by the scrollbar and Ctrl+Up/Down. */
+static void debug_memory_scroll_rows(int rows) {
+    uint32_t row = debug_memory_row_bytes();
+    uint32_t max_base = debug_memory_max_base();
+    uint32_t base = debug_memory_base;
+
+    if (row == 0 || rows == 0) {
+        return;
+    }
+    if (base > max_base) {
+        base = max_base;
+    }
+    if (rows < 0) {
+        uint32_t step = (uint32_t)(-rows) * row;
+
+        base = step > base ? 0u : base - step;
+    } else {
+        uint32_t step = (uint32_t)rows * row;
+
+        if (step >= max_base - base) {
+            base = max_base;
+        } else {
+            base += step;
+        }
+    }
+    debug_memory_base = base - (base % row);
+    debug_memory_edit_nibble = -1;
+    debug_memory_clamp_cursor_to_view();
+}
+
+/* Scrollbar thumb math without a 64-bit divide (the freestanding kernel
+ * has no libgcc __udivdi3). unit = floor(max_base / track), so
+ * offset * unit can never exceed max_base and the whole mapping stays
+ * in 32-bit arithmetic. The error is at most one thumb pixel. */
+static int debug_memory_thumb_offset(uint32_t base, uint32_t max_base, int track) {
+    uint32_t unit;
+    uint32_t offset;
+
+    if (max_base == 0 || track <= 0) {
+        return 0;
+    }
+    unit = max_base / (uint32_t)track;
+    if (unit == 0) {
+        /* max_base < track, so base * track cannot overflow 32 bits. */
+        return (int)((base * (uint32_t)track) / max_base);
+    }
+    offset = base / unit;
+    if (offset > (uint32_t)track) {
+        offset = (uint32_t)track;
+    }
+    return (int)offset;
+}
+
+static uint32_t debug_memory_thumb_to_base(int offset, uint32_t max_base, int track) {
+    uint32_t unit;
+
+    if (max_base == 0 || track <= 0) {
+        return 0;
+    }
+    if (offset >= track) {
+        return max_base;
+    }
+    unit = max_base / (uint32_t)track;
+    if (unit == 0) {
+        /* max_base < track, so offset * max_base cannot overflow. */
+        return ((uint32_t)offset * max_base) / (uint32_t)track;
+    }
+    return (uint32_t)offset * unit;
+}
+
 static void debug_open_memory_view(uint32_t address) {
     if (!debug_memory_address_available(address)) {
         address = 0;
@@ -285,6 +625,8 @@ static void debug_open_memory_view(uint32_t address) {
     debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
     debug_memory_view_open = true;
     debug_memory_edit_nibble = -1;
+    debug_memory_scroll_drag = false;
+    debug_memory_size_reset_text();
     debug_align_memory_view();
     serial_trace("INFO", "Debugger memory view opened");
 }
@@ -293,18 +635,74 @@ static void debug_memory_handle_key(KeyEvent event) {
     if (event.code == KEY_ESC) {
         debug_memory_view_open = false;
         debug_memory_edit_nibble = -1;
+        debug_memory_scroll_drag = false;
         terminal_add_line(&debug_term, "Memory viewer closed.");
         return;
     }
     if (event.code == KEY_F1) {
         debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
+        debug_memory_base -= debug_memory_base % DEBUG_MEMORY_BYTES_PER_ROW;
         debug_memory_edit_nibble = -1;
+        debug_memory_scroll_drag = false;
+        debug_align_memory_view();
         return;
     }
     if (event.code == KEY_F2) {
         debug_memory_mode = DEBUG_MEMORY_MODE_VISUAL;
+        debug_memory_base -= debug_memory_base % (uint32_t)debug_memory_visual_w();
         debug_memory_edit_nibble = -1;
+        debug_memory_scroll_drag = false;
+        debug_memory_size_reset_text();
+        debug_align_memory_view();
         return;
+    }
+
+    /* Width/Height boxes: Tab switches, digits type, Enter applies.  The
+     * bitmap keys below stay untouched while no box has focus. */
+    if (debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL) {
+        int which = debug_memory_size_focus;
+
+        if (event.code == KEY_TAB) {
+            if (which < 0) {
+                debug_memory_size_focus_field(0);
+            } else {
+                debug_memory_apply_visual_size();
+                debug_memory_size_focus_field(which == 0 ? 1 : 0);
+            }
+            return;
+        }
+        if (event.code == KEY_ENTER && which >= 0) {
+            debug_memory_apply_visual_size();
+            debug_memory_size_focus = -1;
+            return;
+        }
+        if (event.ch >= '0' && event.ch <= '9' && which < 0) {
+            /* A digit with no box focused starts a fresh Width entry. */
+            debug_memory_size_focus_field(0);
+            which = debug_memory_size_focus;
+        }
+        if (which >= 0) {
+            if (event.code == KEY_BACKSPACE) {
+                debug_memory_size_fresh = false;
+                if (debug_memory_size_len[which] > 0) {
+                    --debug_memory_size_len[which];
+                    debug_memory_size_text[which][debug_memory_size_len[which]] = '\0';
+                }
+                return;
+            }
+            if (event.ch >= '0' && event.ch <= '9') {
+                if (debug_memory_size_fresh) {
+                    debug_memory_size_len[which] = 0;
+                    debug_memory_size_text[which][0] = '\0';
+                    debug_memory_size_fresh = false;
+                }
+                if (debug_memory_size_len[which] < 4) {
+                    debug_memory_size_text[which][debug_memory_size_len[which]++] = event.ch;
+                    debug_memory_size_text[which][debug_memory_size_len[which]] = '\0';
+                }
+                return;
+            }
+        }
     }
 
     if (event.code == KEY_LEFT) {
@@ -316,11 +714,27 @@ static void debug_memory_handle_key(KeyEvent event) {
         return;
     }
     if (event.code == KEY_UP) {
-        debug_move_memory_cursor(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL ? -DEBUG_MEMORY_VISUAL_W : -DEBUG_MEMORY_BYTES_PER_ROW);
+        if (keyboard_ctrl) {
+            debug_memory_scroll_rows(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL
+                ? -debug_memory_visual_h()
+                : -debug_memory_hex_rows());
+        } else {
+            debug_move_memory_cursor(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL
+                ? -debug_memory_visual_w()
+                : -DEBUG_MEMORY_BYTES_PER_ROW);
+        }
         return;
     }
     if (event.code == KEY_DOWN) {
-        debug_move_memory_cursor(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL ? DEBUG_MEMORY_VISUAL_W : DEBUG_MEMORY_BYTES_PER_ROW);
+        if (keyboard_ctrl) {
+            debug_memory_scroll_rows(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL
+                ? debug_memory_visual_h()
+                : debug_memory_hex_rows());
+        } else {
+            debug_move_memory_cursor(debug_memory_mode == DEBUG_MEMORY_MODE_VISUAL
+                ? debug_memory_visual_w()
+                : DEBUG_MEMORY_BYTES_PER_ROW);
+        }
         return;
     }
 
@@ -345,17 +759,113 @@ static void debug_memory_handle_key(KeyEvent event) {
     }
 }
 
+/* Memory-view scrollbar and size-box mouse handling. Called from
+ * handle_desktop_mouse while the debug overlay owns the screen.  The
+ * pointer is visible in both memory modes; only the bitmap screen has
+ * interactive controls (the Task-Manager-style arrows, track and thumb,
+ * plus the Width/Height boxes), so the hex screen returns without
+ * consuming any click. */
+static void debug_memory_handle_mouse(void) {
+    int scroll_x;
+    int bitmap_y;
+    int track_y;
+    int track_h;
+    int thumb_h = 20;
+    int thumb_track;
+    int thumb_min;
+    int thumb_y;
+    int field;
+    uint32_t max_base;
+    bool clicked;
+
+    if (!debug_memory_view_open || debug_memory_mode != DEBUG_MEMORY_MODE_VISUAL) {
+        debug_memory_scroll_drag = false;
+        return;
+    }
+
+    clicked = mouse.left && !mouse.prev_left;
+
+    /* Clicking a box focuses it and commits whatever the previous box was
+     * being edited to; clicking anywhere else drops focus the same way. */
+    field = debug_memory_size_field_at(mouse.x, mouse.y);
+    if (field >= 0) {
+        cursor_hand_hint = true;
+    }
+    if (clicked) {
+        if (field >= 0) {
+            if (field != debug_memory_size_focus) {
+                debug_memory_apply_visual_size();
+                debug_memory_size_focus_field(field);
+            }
+            debug_memory_scroll_drag = false;
+            return;
+        }
+        if (debug_memory_size_focus >= 0) {
+            debug_memory_apply_visual_size();
+            debug_memory_size_focus = -1;
+        }
+    }
+
+    scroll_x = debug_memory_scroll_x();
+    bitmap_y = debug_memory_visual_y();
+    track_y = bitmap_y + 16;
+    track_h = debug_memory_visual_h() - 32;
+    thumb_track = track_h - thumb_h;
+    thumb_min = track_y + 1;
+    max_base = debug_memory_max_base();
+    if (debug_memory_base > max_base) {
+        debug_memory_base = max_base;
+    }
+    thumb_y = thumb_min + debug_memory_thumb_offset(debug_memory_base, max_base, thumb_track);
+
+    if (clicked &&
+        point_in_rect(mouse.x, mouse.y, scroll_x, bitmap_y - 2, 16, 16)) {
+        debug_memory_scroll_rows(-1);
+    } else if (clicked &&
+               point_in_rect(mouse.x, mouse.y, scroll_x,
+                             bitmap_y + debug_memory_visual_h() - 16, 16, 16)) {
+        debug_memory_scroll_rows(1);
+    } else if (clicked &&
+               point_in_rect(mouse.x, mouse.y, scroll_x + 2, thumb_y, 12, thumb_h)) {
+        debug_memory_scroll_drag = true;
+        debug_memory_scroll_drag_offset = mouse.y - thumb_y;
+    } else if (clicked &&
+               point_in_rect(mouse.x, mouse.y, scroll_x, track_y, 16, track_h)) {
+        if (mouse.y < thumb_y) {
+            debug_memory_scroll_rows(-debug_memory_visual_h());
+        } else if (mouse.y > thumb_y + thumb_h) {
+            debug_memory_scroll_rows(debug_memory_visual_h());
+        }
+    }
+
+    if (!mouse.left) {
+        debug_memory_scroll_drag = false;
+    } else if (debug_memory_scroll_drag && max_base != 0 && thumb_track > 0) {
+        int desired_y = clampi(mouse.y - debug_memory_scroll_drag_offset,
+                               thumb_min, thumb_min + thumb_track);
+        uint32_t raw = debug_memory_thumb_to_base(desired_y - thumb_min, max_base, thumb_track);
+
+        raw -= raw % (uint32_t)debug_memory_visual_w();
+        if (raw > max_base) {
+            raw = max_base;
+        }
+        debug_memory_base = raw;
+        debug_memory_edit_nibble = -1;
+        debug_memory_clamp_cursor_to_view();
+    }
+}
+
 /* Breakpoint target lookup: name token -> AppId bit. */
-static AppId app_index_from_bit(uint16_t bit) {
+static AppId app_index_from_bit(uint32_t bit) {
     for (int app = 0; app < APP_COUNT; ++app) {
-        if (bit == (uint16_t)(1u << app)) {
+        if (bit == (uint32_t)(1u << app)) {
             return (AppId)app;
         }
     }
     return APP_NOTEPAD;
 }
 
-static uint16_t debug_bp_target_bit(const char *token) {
+static uint32_t debug_bp_target_bit(const char *token) {
     struct { const char *names; AppId app; } targets[] = {
         { "n|notepad|text|not",          APP_NOTEPAD },
         { "c|cmd|prompt|terminal|p|t",    APP_CMD },
@@ -368,10 +878,11 @@ static uint16_t debug_bp_target_bit(const char *token) {
         { "pow|power|power menu",         APP_POWER },
         { "set|settings|config|conf",    APP_SETTINGS },
         { "tm|taskmgr|task|taskmanager|tasks", APP_TASK_MANAGER },
+        { "doom|dm|d",                   APP_DOOM },
     };
 
     if (token_is(token, "all", "everything", "every", "*")) {
-        return 0x8000u;
+        return 0x80000000u;
     }
     for (int i = 0; i < (int)(sizeof(targets) / sizeof(targets[0])); ++i) {
         const char *rest = targets[i].names;
@@ -392,7 +903,7 @@ static uint16_t debug_bp_target_bit(const char *token) {
                     }
                 }
                 if (match) {
-                    return (uint16_t)(1u << targets[i].app);
+                    return (uint32_t)(1u << targets[i].app);
                 }
             }
             if (*bar == '\0') {
@@ -405,14 +916,12 @@ static uint16_t debug_bp_target_bit(const char *token) {
 }
 
 /*
- * Breakpoint trace: symbol of the caller + decoded instructions at the
- * crash-symbols entry, rendered in the same "[0xADDR] name at
- * HaloxOS/src/...; line N" style as the graphical crash handler
- * backtrace, with the leading opcodes as real instruction text
- * (MOV EBP,ESP; PUSH EBX; ...) instead of raw hex bytes.
+ * Breakpoint trace: symbol of the caller, rendered in the same
+ * "[0xADDR] name at src/...; line N" style as the graphical crash
+ * handler backtrace.  The decoded-instruction tail is deliberately not
+ * appended: it pushed these lines past the debugger panel's right edge,
+ * where the scroll indicator clipped them mid-token ("PUS").
  */
-static int debug_bp_decode_instruction(uint32_t addr, char *out, size_t out_max);
-
 static void debug_bp_append_trace_line(char *line, size_t *len, size_t max_len, uint32_t addr) {
     const char *name = "unknown";
     const char *file = "?";
@@ -468,313 +977,37 @@ static void debug_bp_append_trace_line(char *line, size_t *len, size_t max_len, 
         line[*len] = '\0';
     }
 
-    /* decoded instruction at the symbol entry instead of raw hex:
-     * decodes up to 3 consecutive instructions (MOV EBP,ESP style) */
-    append_string(line, len, max_len, " (");
-    {
-        uint32_t ip = symbol_addr;
-        int decoded = 0;
-
-        while (decoded < 3 && *len + 2 < max_len) {
-            char ins[24];
-            int inst_len;
-
-            if (decoded > 0) {
-                if (*len + 1 < max_len) {
-                    line[(*len)++] = ';';
-                }
-            }
-            inst_len = debug_bp_decode_instruction(ip, ins, sizeof(ins));
-            append_string(line, len, max_len, ins);
-            if (inst_len <= 0) {
-                break;
-            }
-            ip += (uint32_t)inst_len;
-            ++decoded;
-        }
-    }
-    if (*len + 1 < max_len) {
-        line[(*len)++] = ')';
-    }
     line[*len] = '\0';
 }
 
 /*
- * Minimal 32-bit x86 instruction decoder: decodes ONE instruction at
- * addr into text like "MOV EAX,[EBX+8]" and returns its length in
- * bytes. Covers the common kernel opcodes (moves, arithmetic, stack,
- * jumps, calls); anything else renders as "DB 0xNN" with length 1 so
- * the trace always advances.
+ * A real desktop input opens the next breakpoint frame. The latch is
+ * only cleared here (and by 'continue'/'breakpoint'), never by the
+ * debugger's own terminal-blink repaints, so an idle app cannot keep
+ * catching the same frame forever.
  */
-static int debug_bp_decode_instruction(uint32_t addr, char *out, size_t out_max) {
-    uint8_t op;
-    uint8_t modrm;
-    uint8_t mod;
-    uint8_t reg;
-    uint8_t rm;
-    int length = 1;
-    bool has_modrm = false;
-    char *p;
-
-    if (addr >= debug_memory_limit()) {
-        copy_string(out, "??", out_max);
-        return 1;
+static void debug_bp_note_input(void) {
+    if (debug_bp_armed) {
+        debug_bp_caught = false;
     }
-    op = *(volatile uint8_t *)(uintptr_t)addr;
-    p = out;
-
-    static const char *const regs32[8] = { "EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI" };
-    static const char *const regs8[8] = { "AL", "CL", "DL", "BL", "AH", "CH", "DH", "BH" };
-
-#define PUTS(s) do { for (const char *q_ = (s); *q_ != '\0'; ++q_) { if ((size_t)(p - out) + 1 < out_max) *p++ = *q_; } } while (0)
-#define PUT_HEX8(v) do { static const char dg_[] = "0123456789ABCDEF"; \
-    if ((size_t)(p - out) + 2 < out_max) { *p++ = dg_[((v) >> 4) & 0x0Fu]; *p++ = dg_[(v) & 0x0Fu]; } } while (0)
-
-    /* skip common prefixes so the decode still lands on the real op */
-    while (op == 0x2E || op == 0x36 || op == 0x3E || op == 0x26 ||
-           op == 0x64 || op == 0x65 || op == 0x66 || op == 0x67 || op == 0xF0) {
-        ++length;
-        if (addr + (uint32_t)length >= debug_memory_limit()) {
-            copy_string(out, "prefix?", out_max);
-            return length;
-        }
-        op = *(volatile uint8_t *)(uintptr_t)(addr + (uint32_t)length);
-    }
-
-    modrm = 0;
-    mod = 0;
-    reg = 0;
-    rm = 0;
-    if (op <= 0x3F || (op >= 0x80 && op <= 0xBF) ||
-        op == 0x8D || op == 0xC6 || op == 0xC7 || op == 0xF6 || op == 0xF7) {
-        uint32_t modrm_addr = addr + (uint32_t)length;
-
-        if (modrm_addr < debug_memory_limit()) {
-            modrm = *(volatile uint8_t *)(uintptr_t)modrm_addr;
-            mod = modrm >> 6;
-            reg = (modrm >> 3) & 7u;
-            rm = modrm & 7u;
-            has_modrm = true;
-        }
-    }
-
-    switch (op) {
-        /* ALU r/m,r and r,r/m groups */
-        case 0x00: case 0x01: case 0x02: case 0x03:
-        case 0x08: case 0x09: case 0x0A: case 0x0B:
-        case 0x10: case 0x11: case 0x12: case 0x13:
-        case 0x18: case 0x19: case 0x1A: case 0x1B:
-        case 0x20: case 0x21: case 0x22: case 0x23:
-        case 0x28: case 0x29: case 0x2A: case 0x2B:
-        case 0x30: case 0x31: case 0x32: case 0x33:
-        case 0x38: case 0x39: case 0x3A: case 0x3B: {
-            static const char *const mnemonics[8] = {
-                "ADD", "OR", "ADC", "SBB", "AND", "SUB", "XOR", "CMP"
-            };
-            bool dir = (op & 0x02u) != 0;
-            bool wide = (op & 0x01u) != 0;
-
-            length += 1;
-            PUTS(mnemonics[op >> 3]);
-            PUTS(" ");
-            if (!has_modrm) {
-                PUTS("?");
-                break;
-            }
-            /* mod=11 -> register operand; otherwise memory (approximate) */
-            if (mod == 3) {
-                if (dir) {
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                    PUTS(",");
-                    PUTS(wide ? regs32[rm] : regs8[rm]);
-                } else {
-                    PUTS(wide ? regs32[rm] : regs8[rm]);
-                    PUTS(",");
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                }
-            } else {
-                /* memory form: show [reg] + disp approximations */
-                if (dir) {
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                    PUTS(",[");
-                    PUTS(regs32[rm]);
-                    PUTS("]");
-                } else {
-                    PUTS("[");
-                    PUTS(regs32[rm]);
-                    PUTS("],");
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                }
-                length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
-                if (mod == 0 && rm == 5) {
-                    length += 4;   /* disp32 only */
-                }
-            }
-            break;
-        }
-        /* push/pop registers */
-        case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
-            PUTS("PUSH ");
-            PUTS(regs32[op & 7u]);
-            break;
-        case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F:
-            PUTS("POP ");
-            PUTS(regs32[op & 7u]);
-            break;
-        /* MOV group */
-        case 0x88: case 0x89: case 0x8A: case 0x8B: {
-            bool dir = (op & 0x02u) != 0;
-            bool wide = (op & 0x01u) != 0;
-
-            length += 1;
-            PUTS("MOV ");
-            if (!has_modrm) {
-                PUTS("?");
-                break;
-            }
-            if (mod == 3) {
-                if (dir) {
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                    PUTS(",");
-                    PUTS(wide ? regs32[rm] : regs8[rm]);
-                } else {
-                    PUTS(wide ? regs32[rm] : regs8[rm]);
-                    PUTS(",");
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                }
-            } else {
-                if (dir) {
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                    PUTS(",[");
-                    PUTS(regs32[rm]);
-                    PUTS("]");
-                } else {
-                    PUTS("[");
-                    PUTS(regs32[rm]);
-                    PUTS("],");
-                    PUTS(wide ? regs32[reg] : regs8[reg]);
-                }
-                length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
-                if (mod == 0 && rm == 5) {
-                    length += 4;
-                }
-            }
-            break;
-        }
-        /* MOV r32, imm32 */
-        case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-            PUTS("MOV ");
-            PUTS(regs32[op & 7u]);
-            PUTS(",0x");
-            {
-                uint8_t ib[4];
-                bool readable = true;
-
-                for (int i = 0; i < 4; ++i) {
-                    uint32_t imm_addr = addr + (uint32_t)length + (uint32_t)i;
-
-                    if (imm_addr >= debug_memory_limit()) {
-                        readable = false;
-                        break;
-                    }
-                    ib[i] = *(volatile uint8_t *)(uintptr_t)imm_addr;
-                }
-                if (readable) {
-                    for (int i = 3; i >= 0; --i) {
-                        PUT_HEX8(ib[i]);
-                    }
-                } else {
-                    PUTS("????");
-                }
-                length += 4;
-            }
-            break;
-        /* LEA */
-        case 0x8D:
-            length += 1;
-            PUTS("LEA ");
-            if (has_modrm && mod != 3) {
-                PUTS(regs32[reg]);
-                PUTS(",[");
-                PUTS(regs32[rm]);
-                PUTS("]");
-                length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
-            } else {
-                PUTS("?");
-            }
-            break;
-        /* group 80/81/83: ALU r/m, imm */
-        case 0x80: case 0x81: case 0x83: {
-            static const char *const mnemonics[8] = {
-                "ADD", "OR", "ADC", "SBB", "AND", "SUB", "XOR", "CMP"
-            };
-
-            length += 1;
-            PUTS(mnemonics[reg]);
-            PUTS(" ");
-            if (has_modrm) {
-                if (mod == 3) {
-                    PUTS(op == 0x81 ? regs32[rm] : regs8[rm]);
-                } else {
-                    PUTS("[");
-                    PUTS(regs32[rm]);
-                    PUTS("]");
-                    length += (mod == 1) ? 1 : (mod == 2) ? 4 : 0;
-                }
-                PUTS(",0xIMM");
-                length += (op == 0x81) ? 4 : 1;
-            } else {
-                PUTS("?");
-            }
-            break;
-        }
-        /* test/jmp/call/ret/etc: single-byte forms */
-        case 0xE9: PUTS("JMP rel32"); length = 5; break;
-        case 0xEB: PUTS("JMP rel8"); length = 2; break;
-        case 0xE8: PUTS("CALL rel32"); length = 5; break;
-        case 0xC3: PUTS("RET"); break;
-        case 0xC2: PUTS("RET imm16"); length = 3; break;
-        case 0x90: PUTS("NOP"); break;
-        case 0xCC: PUTS("INT3"); break;
-        case 0xCD: PUTS("INT imm8"); length = 2; break;
-        case 0xF4: PUTS("HLT"); break;
-        case 0xFA: PUTS("CLI"); break;
-        case 0xFB: PUTS("STI"); break;
-        case 0x85: PUTS("TEST rm,r"); length += 1; break;
-        default:
-            PUTS("DB 0x");
-            PUT_HEX8(op);
-            break;
-    }
-#undef PUT_HEX8
-#undef PUTS
-
-    if (p == out) {
-        copy_string(out, "DB", out_max);
-    } else if ((size_t)(p - out) < out_max) {
-        *p = '\0';
-    }
-    return length;
 }
 
 /*
  * Breakpoint hit: called from render_app_window when a targeted app is
- * being drawn, once per rendered frame per target. AUTO-CONTINUE: the
- * catch appends its trace to the terminal log but does NOT hold the
- * system - the run keeps going, and the next frame that touches a
- * targeted app appends the next catch, so the terminal becomes a live
- * per-frame trace. Frame numbers are relative to the FIRST catch
- * (rebased there), so the log counts #1, #2, #3... from the first hit
- * instead of from the 'continue' that armed the breakpoint.
+ * being drawn. AUTO-CONTINUE: the catch appends its trace to the
+ * terminal log but does NOT hold the system. debug_bp_caught then
+ * blocks every other render until a real input clears it, so each
+ * user-visible frame logs exactly one catch; the next input frame logs
+ * the next number.
  */
-static void debug_bp_catch(AppId app, uint32_t frame_no) {
+static void debug_bp_catch(AppId app) {
     uint32_t ebp;
+    uint32_t frame_no = ++debug_bp_catch_count;
 
     /* AUTO-CONTINUE: log the catch, keep the run alive. The overlay
      * pops open (notification) but the system never waits for input
-     * here - the next targeted frame fires the next catch. */
-    ++debug_bp_catch_count;
-    debug_bp_last_catch_tick = timer_ticks;
+     * here - the next input frame fires the next catch. */
+    debug_bp_caught = true;
     if (!debug_overlay_open) {
         debug_overlay_open = true;
         debug_memory_view_open = false;
@@ -786,9 +1019,7 @@ static void debug_bp_catch(AppId app, uint32_t frame_no) {
 
         append_string(head, &len, sizeof(head), "** BP frame #");
         append_uint(head, &len, sizeof(head), frame_no);
-        append_string(head, &len, sizeof(head), " (#");
-        append_uint(head, &len, sizeof(head), debug_bp_catch_count);
-        append_string(head, &len, sizeof(head), " hit):");
+        append_string(head, &len, sizeof(head), " hit:");
         terminal_add_line(&debug_term, head);
     }
     {
@@ -849,20 +1080,15 @@ static void debug_bp_catch(AppId app, uint32_t frame_no) {
  */
 static void debug_bp_catch_power(const char *action) {
     uint32_t ebp;
+    uint32_t frame_no;
 
-    if (!debug_bp_armed || debug_bp_mask == 0 ||
-        ((debug_bp_mask & 0x8000u) == 0 && (debug_bp_mask & (uint16_t)(1u << APP_POWER)) == 0)) {
+    if (!debug_bp_armed || debug_bp_caught || debug_bp_mask == 0 ||
+        ((debug_bp_mask & 0x80000000u) == 0 && (debug_bp_mask & (uint32_t)(1u << APP_POWER)) == 0)) {
         return;
     }
-    if (debug_bp_last_catch_tick == timer_ticks) {
-        return;   /* one catch per timer frame, like app catches */
-    }
-    if (debug_bp_frame_base == 0) {
-        debug_bp_frame_base = fps_frames_total - 1;   /* first catch = #1 */
-    }
 
-    ++debug_bp_catch_count;
-    debug_bp_last_catch_tick = timer_ticks;
+    frame_no = ++debug_bp_catch_count;
+    debug_bp_caught = true;
     if (!debug_overlay_open) {
         debug_overlay_open = true;
         debug_memory_view_open = false;
@@ -873,10 +1099,8 @@ static void debug_bp_catch_power(const char *action) {
         size_t len = 0;
 
         append_string(head, &len, sizeof(head), "** BP frame #");
-        append_uint(head, &len, sizeof(head), fps_frames_total - debug_bp_frame_base);
-        append_string(head, &len, sizeof(head), " (#");
-        append_uint(head, &len, sizeof(head), debug_bp_catch_count);
-        append_string(head, &len, sizeof(head), " hit):");
+        append_uint(head, &len, sizeof(head), frame_no);
+        append_string(head, &len, sizeof(head), " hit:");
         terminal_add_line(&debug_term, head);
     }
     {
@@ -1333,11 +1557,11 @@ static void debug_help_command(const char *command) {
     if (token[0] == '\0') {
         terminal_add_line(&debug_term, "There are many more commands that you can use freely:");
         terminal_add_line(&debug_term, "help edit | help exception | help fault | help power");
-        terminal_add_line(&debug_term, "help breakpoint | help fps");
+        terminal_add_line(&debug_term, "help breakpoint | help fps | help clear");
         terminal_add_line(&debug_term, "");
         terminal_add_line(&debug_term, "== ALL COMMANDS: ==");
         terminal_add_line(&debug_term, "edit view change continue test");
-        terminal_add_line(&debug_term, "show hide grid breakpoint");
+        terminal_add_line(&debug_term, "show hide grid breakpoint cls clear");
     } else if (token_is(token, "e", "edit", NULL, NULL)) {
         terminal_add_line(&debug_term, "edit mem 0xADDR ff 0x100");
         terminal_add_line(&debug_term, "view mem [0xADDR] | view vid | view disk");
@@ -1366,26 +1590,31 @@ static void debug_help_command(const char *command) {
     } else if (token_is(token, "view", "v", NULL, NULL)) {
         terminal_add_line(&debug_term, "view mem [0xADDR] opens hex/visual memory viewer.");
         terminal_add_line(&debug_term, "F1 hex, F2 visual, arrows move, ESC exits viewer.");
+        terminal_add_line(&debug_term, "Visual mode: click/drag the right scrollbar, or");
+        terminal_add_line(&debug_term, "Ctrl+Up/Down pages the bitmap.");
         terminal_add_line(&debug_term, "In the log: Ctrl+Left/Right scrolls long lines.");
         terminal_add_line(&debug_term, "<< and >> mark hidden text sides. Home/End jump.");
+    } else if (token_is(token, "clear", "cls", "clr", NULL)) {
+        terminal_add_line(&debug_term, "cls | clr | clear: wipe all previous debugger text.");
     } else if (token_is(token, "change", "ch", NULL, NULL)) {
         terminal_add_line(&debug_term, "change vid 800x600 | change vid bpp 4|8|16");
         terminal_add_line(&debug_term, "change bg 1 | change bg 2");
     } else if (token_is(token, "bp", "br", "breakpoint", NULL)) {
         terminal_add_line(&debug_term, "breakpoint all: catch every app on next frame.");
         terminal_add_line(&debug_term, "breakpoint <app>: catch one app when it updates.");
+        terminal_add_line(&debug_term, "One catch per frame; a new click/key opens the next.");
         terminal_add_line(&debug_term, "Auto-continues: each new catch re-opens this log.");
-        terminal_add_line(&debug_term, "Frame #1 is the FIRST catch after continue.");
+        terminal_add_line(&debug_term, "Frame #1 is the first catch after breakpoint.");
         terminal_add_line(&debug_term, "breakpoint stop | s | off | o: stop all.");
         terminal_add_line(&debug_term, "power: shutdown/restart/halt triggers log");
         terminal_add_line(&debug_term, "a trace before the action runs.");
         terminal_add_line(&debug_term, "apps: notepad prompt paint explorer snake guess");
-        terminal_add_line(&debug_term, "mines games power settings taskmgr all");
+        terminal_add_line(&debug_term, "mines games power settings taskmgr doom all");
     } else if (token_is(token, "fps", "show", "hide", NULL)) {
         terminal_add_line(&debug_term, "show fps | s fps: toggle FPS overlay top-right.");
         terminal_add_line(&debug_term, "hide fps | h fps: hide it. Red = frame lag blink.");
         terminal_add_line(&debug_term, "show grid | s grid (ag/dg/app grid/desktop grid):");
-        terminal_add_line(&debug_term, "4x4 icon snap grid overlay while dragging icons.");
+        terminal_add_line(&debug_term, "16x16 icon snap grid overlay while dragging icons.");
         terminal_add_line(&debug_term, "hide grid | h grid: hide it. Snap follows Auto-Grid.");
     } else if (token_is(token, "continue", "con", "c", NULL)) {
         terminal_add_line(&debug_term, "continue: close debugger and resume desktop.");
@@ -1431,19 +1660,24 @@ static void debug_execute_command(void) {
 
     if (streq(command, "help") || starts_with(command, "help ")) {
         debug_help_command(command);
+    } else if (streq(command, "cls") || streq(command, "clr") || streq(command, "clear")) {
+        terminal_reset(&debug_term);
+        debug_log_scroll_x = 0;
+        terminal_add_line(&debug_term, "Debugger terminal cleared.");
     } else if (streq(command, "c") || streq(command, "con") || streq(command, "continue")) {
         debug_overlay_open = false;
         debug_memory_view_open = false;
-        /* Arm the breakpoint now: frame counting does NOT start here.
-         * The base is captured at the FIRST catch, so the first hit
-         * logs as frame #1 no matter how long the target app stayed
-         * closed or unfocused after 'continue'. */
+        debug_memory_scroll_drag = false;
+        /* Arm the breakpoint now. The catch counter is deliberately NOT
+         * reset here, and neither is the one-catch latch: 'continue'
+         * only dismisses this log. The first continue after 'breakpoint'
+         * still catches the next rendered frame (the latch was cleared
+         * when the breakpoint was set); after that, continuing leaves
+         * the latch set so the app is interactive again and the NEXT
+         * real click/key logs the next frame (#2, #3, ...) instead of
+         * re-catching the same idle frame. */
         if (debug_bp_mask != 0) {
             debug_bp_armed = true;
-            debug_bp_caught = false;
-            debug_bp_frame_base = 0;
-            debug_bp_catch_count = 0;
-            debug_bp_last_catch_tick = 0;
         }
         serial_trace("INFO", "Debugger continued");
         debug_execute_pending();
@@ -1557,7 +1791,10 @@ static void debug_execute_command(void) {
     } else if (streq(command, "edit ") || starts_with(command, "edit ")) {
         debug_edit_command(command);
     } else if (starts_with(command, "show ") || starts_with(command, "s ")) {
-        const char *arg = command[0] == 's' ? skip_spaces(command + 2) : skip_spaces(command + 5);
+        /* "show " also starts with 's'; testing command[0] sent the
+         * parser to the two-letter alias and read "ow fps" as the
+         * argument, so the documented "show fps" printed its usage line. */
+        const char *arg = starts_with(command, "show ") ? skip_spaces(command + 5) : skip_spaces(command + 2);
         if (token_is(arg, "fps", "frames", "frame", NULL)) {
             fps_overlay_on = true;
             terminal_add_line(&debug_term, "FPS overlay shown (top-right).");
@@ -1565,13 +1802,13 @@ static void debug_execute_command(void) {
                    token_is(arg, "desktopgrid", "deskgrid", "app grid", "desktop grid") ||
                    token_is(arg, "desk grid", "app g", "desk g", NULL)) {
             desktop_grid_overlay_on = true;
-            terminal_add_line(&debug_term, "4x4 pixel snap grid overlay shown.");
+            terminal_add_line(&debug_term, "16x16 pixel snap grid overlay shown.");
             terminal_add_line(&debug_term, "Auto-Grid snaps icon drags with it off too.");
         } else {
             terminal_add_line(&debug_term, "Usage: show fps | show grid");
         }
     } else if (starts_with(command, "hide ") || starts_with(command, "h ")) {
-        const char *arg = command[0] == 'h' ? skip_spaces(command + 2) : skip_spaces(command + 5);
+        const char *arg = starts_with(command, "hide ") ? skip_spaces(command + 5) : skip_spaces(command + 2);
         if (token_is(arg, "fps", "frames", "frame", NULL)) {
             fps_overlay_on = false;
             terminal_add_line(&debug_term, "FPS overlay hidden.");
@@ -1586,7 +1823,7 @@ static void debug_execute_command(void) {
     } else if (streq(command, "grid") || streq(command, "ag") || streq(command, "dg")) {
         desktop_grid_overlay_on = !desktop_grid_overlay_on;
         terminal_add_line(&debug_term, desktop_grid_overlay_on
-            ? "4x4 icon snap grid overlay shown."
+            ? "16x16 icon snap grid overlay shown."
             : "Grid overlay hidden.");
     } else if (streq(command, "bp") || streq(command, "br") || streq(command, "breakpoint") ||
                starts_with(command, "bp ") || starts_with(command, "br ") || starts_with(command, "breakpoint ")) {
@@ -1598,7 +1835,7 @@ static void debug_execute_command(void) {
         if (token[0] == '\0') {
             terminal_add_line(&debug_term, "Usage: breakpoint all|<app> | breakpoint stop");
             terminal_add_line(&debug_term, "apps: notepad prompt paint explorer snake");
-            terminal_add_line(&debug_term, "guess mines games power settings taskmgr");
+            terminal_add_line(&debug_term, "guess mines games power settings taskmgr doom");
             return;
         }
         if (token_is(token, "stop", "s", "off", "o")) {
@@ -1609,19 +1846,19 @@ static void debug_execute_command(void) {
             return;
         }
         {
-            uint16_t bit = debug_bp_target_bit(token);
+            uint32_t bit = debug_bp_target_bit(token);
 
             if (bit == 0) {
                 terminal_add_line(&debug_term, "Unknown breakpoint target.");
                 terminal_add_line(&debug_term, "apps: notepad prompt paint explorer snake");
-                terminal_add_line(&debug_term, "guess mines games power settings taskmgr all");
+                terminal_add_line(&debug_term, "guess mines games power settings taskmgr doom all");
                 return;
             }
             debug_bp_mask |= bit;
             debug_bp_caught = false;
             debug_bp_catch_count = 0;
             debug_bp_armed = false;   /* counts start after 'continue' */
-            if (bit == 0x8000u) {
+            if (bit == 0x80000000u) {
                 terminal_add_line(&debug_term, "Breakpoint set on ALL apps. Type continue.");
             } else {
                 char msg[TERM_LINE_LEN];

@@ -17,15 +17,14 @@
  *   0x100000  loader itself (ELF loaded by GRUB)
  *   ~0x12E000 kernel.bin.zst module (placed by GRUB, page aligned)
  *   0x200000  kernel decompression target
- *   0x500000  zstd DCtx scratch (256K; sits inside the kernel's future
- *             .bss range - free RAM during decompression, reclaimed when
- *             the kernel zeroes .bss at entry) - valid while the kernel
- *             image stays under 0x500000, true without the embedded WAD
- *             (data ends ~0x416000)
- *   0x780000  loader info struct handed to the kernel (debug trace data;
- *             above the kernel bss end at ~0x733000, below the DOOM zone
- *             which starts at 0x800000) - also only valid WITHOUT the
- *             embedded WAD
+ *   ~0x311000 zstd DCtx scratch (256K, chosen at run time: first 4 KiB
+ *             boundary above the decompressed image and the compressed
+ *             module; sits inside the kernel's future .bss range - free
+ *             RAM during decompression, reclaimed when the kernel zeroes
+ *             .bss at entry)
+ *   ~0x470000 loader info struct handed to the kernel (debug trace data;
+ *             generated per build just above the kernel's real bss end,
+ *             below the DOOM zone) - only valid WITHOUT the embedded WAD
  *   0xE00000  relocated WAD multiboot module on larger RAM machines; on
  *              16 MB-class machines the loader parks it at the top of RAM
  *              and the kernel puts the DOOM heap below it.
@@ -42,6 +41,10 @@
 
 #include "ram_requirement.h"
 
+/* Freestanding bool for the optional backtrace table (stdbool.h is one of
+ * the headers a freestanding gcc provides). */
+#include <stdbool.h>
+
 /* Test build hook (make noram): pretend the machine has too little RAM so
  * the BOOT ERROR screen is forced at boot, even on real hardware with
  * plenty of memory. Lets the error screen be verified on any PC. */
@@ -52,15 +55,22 @@
 #define SERIAL_PORT 0x3F8
 
 #define KERNEL_LOAD_ADDR   0x200000u
-/* zstd DCtx scratch: inside the kernel's future .bss range - that RAM is
- * free while decompressing (the kernel image without the embedded WAD
- * only reaches ~0x416000 and .bss zeroing happens at kernel entry, after
- * the scratch is dead) - so it costs no extra memory on any machine.
- * With the embedded WAD the scratch moves above the whole image span. */
+/* zstd DCtx scratch (256 KiB).
+ *
+ * Inside the kernel's future .bss range that RAM is free while
+ * decompressing - the kernel zeroes .bss only at entry, after the scratch
+ * is dead - so the block costs no extra memory on any machine.  Without
+ * the embedded WAD the address is chosen at RUN TIME: the first 4 KiB
+ * boundary above both the compressed module and the decompression target.
+ * A fixed window cannot work there: it has to sit above the kernel image,
+ * and once the image span grew past 4.5 MB the old 0x500000 block meant a
+ * 5 MB machine (which does not even have 0x500000) had to be refused.
+ * The start of .bss is always far above the decompressed image, so that
+ * gap is ample for the block on every machine the gate admits.
+ * With the embedded WAD the kernel image owns everything below 0x1500000,
+ * so that build keeps the fixed span address. */
 #ifdef HALOXOS_KERNEL_IMAGE_SPAN
 #define KERNEL_SCRATCH     KERNEL_SCRATCH_SPAN
-#else
-#define KERNEL_SCRATCH     0x500000u
 #endif
 #define KERNEL_SCRATCH_SIZE 0x40000u
 /* Above the kernel's real bss end and below the DOOM zone floor: the
@@ -113,15 +123,16 @@
 #define MB_FLAG_MODS       (1u << 3)
 #define MB_FLAG_MMAP       (1u << 6)
 #define MB_FLAG_MEM        (1u << 0)
+#define MB_FLAG_CMDLINE    (1u << 2)
 #define MB_FLAG_FB         (1u << 12)
 
 #define HALOXOS_MODULE_MAGIC 0x484C585Au
 
 /* Minimum RAM is generated from the linked kernel image (auto-fit): the
  * handoff-block address plus one 64 KiB guard, rounded up to whole MB for
- * the nominal figure. With the current 5.34 MB span that is a 6 MB boot
- * floor; the Makefile never lets the gate fall below the legacy 7.5625 MiB
- * 8 MB-PC tolerance, so nothing that booted before stops booting.
+ * the nominal figure. The scratch block is placed dynamically below that
+ * handoff block, so it adds nothing to the gate; the current kernel span
+ * yields a 5 MB boot floor.
  * Embedded-WAD span builds keep the existing 22 MB floor. */
 #define MIN_RAM_BYTES HALOXOS_KERNEL_RAM_GATE_BYTES
 
@@ -224,7 +235,36 @@ typedef struct {
     uint32_t dctx_size;         /* ZSTD_estimateDCtxSize() value */
     uint32_t kernel_entry;
     uint32_t loader_flags;
+    uint32_t trace_addr;        /* loader COM1 mirror: linear address */
+    uint32_t trace_len;         /* loader COM1 mirror: bytes buffered */
 } LoaderInfo;
+
+/*
+ * Debug-build backtrace for the boot-error screens.
+ *
+ * The loader has no kernel symbol table, so a small text-symbol table is
+ * generated from build/loader.elf and linked here (see
+ * LOADER_SYMBOLS_* in the Makefile). The walk is the crash handler's EBP
+ * chain, started from loader_hang()/show_ram_error_screen(), and the
+ * rendered form is the crash screen's default Backtrace page:
+ *   [0xADDR] name at file; line N
+ * Only debug builds (-DHALOXOS_LOADER_TRACE) carry the table and frames;
+ * release builds keep the empty function bodies so call sites stay simple.
+ */
+#ifndef HALOXOS_LOADER_TRACE
+#define HALOXOS_LOADER_TRACE 0
+#endif
+
+#define LOADER_TRACE_MAX 24
+
+typedef struct {
+    uint32_t frames[LOADER_TRACE_MAX];
+    int count;
+} LoaderTrace;
+
+#if HALOXOS_LOADER_TRACE
+#include "crash_symbols.h"
+#endif
 
 extern uint32_t saved_magic;
 extern uint32_t saved_mbi;
@@ -251,6 +291,55 @@ static void text_force_mode3(void);
 static void text_load_font(void);
 static void err_begin(const MbInfo *mbi);
 static void err_write(int row, int col, const char *text);
+static void err_write_centered(int row, uint32_t y, const char *text);
+static uint32_t err_write_memory_map(int *row, uint32_t y);
+static void loader_capture_trace(LoaderTrace *trace);
+static void loader_render_trace(int row, uint32_t y, const LoaderTrace *trace);
+
+/*
+ * Capture the boot path's return addresses. __builtin_frame_address(0) is
+ * the frame of this function's caller (loader_hang/show_ram_error_screen);
+ * its saved EBP leads to the caller's caller. Return addresses are validated
+ * against the loader's link window so a corrupt chain stops instead of
+ * walking into the kernel's future image at 2 MB.
+ */
+/* Keep the capture call a real frame: at -O2 an inlined capture reports its
+ * CALLER's return address, which silently drops the first frame of the very
+ * function that is about to halt (the RAM/zstd screen). */
+__attribute__((noinline))
+static void loader_capture_trace(LoaderTrace *trace) {
+    trace->count = 0;
+#if HALOXOS_LOADER_TRACE
+    {
+        uint32_t ebp = (uint32_t)__builtin_frame_address(0);
+        uint32_t caller_ebp;
+        int count = 0;
+
+        trace->frames[count++] = (uint32_t)__builtin_return_address(0);
+        caller_ebp = *(volatile uint32_t *)ebp;
+        for (int i = 0; i < LOADER_TRACE_MAX - 1; ++i) {
+            uint32_t next_ebp;
+            uint32_t ret;
+
+            if (caller_ebp < 0x10000u || caller_ebp > 0x7F000000u ||
+                (caller_ebp & 3u) != 0) {
+                break;
+            }
+            next_ebp = *(volatile uint32_t *)caller_ebp;
+            ret = *(volatile uint32_t *)(caller_ebp + 4u);
+            if (next_ebp <= caller_ebp || next_ebp > caller_ebp + 0x4000u) {
+                break;
+            }
+            if (ret < 0x100000u || ret >= 0x200000u) {
+                break;
+            }
+            trace->frames[count++] = ret;
+            caller_ebp = next_ebp;
+        }
+        trace->count = count;
+    }
+#endif
+}
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -266,7 +355,11 @@ static uint8_t inb(uint16_t port) {
     return value;
 }
 
+__attribute__((noinline))
 static void loader_hang(const char *reason, const MbInfo *mbi) {
+    LoaderTrace trace;
+
+    loader_capture_trace(&trace);
     serial_puts("[LDR]: FATAL ");
     serial_puts(reason);
     serial_puts("\n");
@@ -276,11 +369,31 @@ static void loader_hang(const char *reason, const MbInfo *mbi) {
      * framebuffer when GRUB provided one (modern GPUs), else classic
      * VGA text mode. */
     err_begin(mbi);
-    err_write(1, 8, "***** BOOT ERROR!!! *****");
-    err_write(3, 4, "The HaloxOS boot loader could not continue:");
-    err_write(5, 8, reason);
-    err_write(8, 4, "Check the serial port (COM1) trace for full details.");
-    err_write(10, 4, "Power off, fix the issue above, and try again.");
+
+    /* Same layout as the graphical RAM-requirement screen: a centered
+     * header at y=20, then centered lines on the 12px text step with one
+     * blank line between sections. The old fixed cell columns (8, 4, ...)
+     * are not screen positions on a linear framebuffer - an 80x25 cell is
+     * 8x19 pixels at 640x480, so every line sat in the left quarter.
+     * `row` is only the 80-column fallback for a machine without a usable
+     * direct-RGB framebuffer. */
+    err_write_centered(1, 20u, "***** BOOT ERROR!!! *****");
+    err_write_centered(3, 56u, "The HaloxOS boot loader could not continue:");
+    err_write_centered(4, 68u, reason);
+    err_write_centered(7, 104u, "Check the serial port (COM1) trace for full details.");
+    err_write_centered(9, 116u, "Power off, fix the issue above, and try again.");
+
+    /* Same E820 dump the insufficient-RAM screen shows below its message:
+     * a zstd failure is usually a load-layout/memory problem, so the map is
+     * the detail worth having on screen when there is no serial connection. */
+    {
+        int trace_row = 12;
+        uint32_t trace_y = err_write_memory_map(&trace_row, 140u);
+
+        /* The crash handler's trace view sits below its memory map too;
+         * debug builds add the same Backtrace page here. */
+        loader_render_trace(trace_row + 1, trace_y + 12u, &trace);
+    }
 
     for (;;) {
         __asm__ volatile("hlt");
@@ -567,8 +680,9 @@ static void fb_text_center_block(const MbInfo *mbi, uint32_t y,
 /*
  * Backend-agnostic error-screen renderer. When GRUB handed over a usable
  * linear framebuffer, draw into it directly (works on every modern GPU);
- * otherwise fall back to the legacy VGA text-mode path. All callers use
- * err_write()/err_fill() so both backends show the identical 80x25 layout.
+ * otherwise fall back to the legacy VGA text-mode path. All callers go
+ * through err_write()/err_write_centered()/err_fill() so both backends show
+ * the identical layout, with the same helpers centering either one.
  */
 static const MbInfo *err_mbi;
 
@@ -577,7 +691,7 @@ static int err_use_framebuffer(const MbInfo *mbi) {
      * Only use the existing bootloader framebuffer for a real direct-RGB
      * pixel mode.  Indexed/planar legacy modes are not linear RGB pixels;
      * treating a 1/4/8-bpp VGA surface as bytes-per-pixel produces exactly
-     * the vertical "barcode" corruption seen on IBM VGA/PCBox.
+     * the vertical "barcode" corruption seen on IBM VGA and emulated VGA adapters.
      *
      * EGA text (type 2) is explicitly non-pixel data and must stay on the
      * classic DOS-compatible text path.  Unknown framebuffer types are also
@@ -652,6 +766,23 @@ static void err_write(int row, int col, const char *text) {
         fb_text(err_mbi, row, col, text, fb_white(err_mbi), fb_red(err_mbi));
     } else {
         text_screen_write(row, col, text, 0x4F);
+    }
+}
+
+/*
+ * Centered fatal-screen line.
+ *
+ * The graphical backend centers in PIXELS like the RAM-requirement screen
+ * (fb_text_center), so the line stays in the middle whatever the GRUB mode
+ * is - 640x480, 1024x768 or a widescreen panel. The text-mode backend centers
+ * in its 80 columns. `row` is the DOS text row, `y` the framebuffer pixel
+ * row; only the active backend's coordinate is used.
+ */
+static void err_write_centered(int row, uint32_t y, const char *text) {
+    if (err_mbi != 0 && err_use_framebuffer(err_mbi)) {
+        fb_text_center(err_mbi, y, text, fb_white(err_mbi), fb_red(err_mbi));
+    } else {
+        text_screen_write_center(row, text, 0x4F);
     }
 }
 
@@ -756,7 +887,7 @@ static void text_force_mode3(void) {
     static const uint8_t gc[9]     = {0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E,
                                       0x00, 0xFF};
 
-    /* ---- SVGA extension reset (86Box / real 486-era hardware) ----
+    /* ---- SVGA extension reset (emulated / real 486-era hardware) ----
      * GRUB's VESA mode set leaves vendor extension registers in
      * graphics state. On real SVGA cards the standard mode-3 registers
      * alone cannot re-map 0xB8000, so every text write vanishes into a
@@ -912,10 +1043,11 @@ static void text_append_hex32(char *buffer, int *len, int max_len, uint32_t valu
  * The E820 map is still consulted and can raise the result for machines
  * where the basic memory fields are missing or capped.  The value is
  * saturated at 0xFFFFFFFF, which the display already treats as 4 GiB+. */
+static uint32_t detected_usable_top;
+
 static uint32_t detect_total_ram(const MbInfo *mbi) {
     uint64_t reported = 0;
     uint64_t e820_top = 0;
-
     if ((mbi->flags & MB_FLAG_MEM) != 0) {
         reported = ((uint64_t)mbi->mem_lower + (uint64_t)mbi->mem_upper) * 1024ull;
     }
@@ -954,6 +1086,8 @@ static uint32_t detect_total_ram(const MbInfo *mbi) {
     if (e820_top > reported) {
         reported = e820_top;
     }
+
+    detected_usable_top = e820_top > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)e820_top;
 
     if (reported == 0) {
         return 0;
@@ -996,6 +1130,263 @@ static void capture_regs(LoaderRegs *regs) {
 
 
 /*
+ * E820 map dump shared by the insufficient-RAM and fatal-error screens.
+ *
+ * Title plus the low 32 bits of every entry's base address, four entries to
+ * a row, exactly the block the RAM screen has always shown. The framebuffer
+ * version steps 12px per row and indents 32px like the centered text above
+ * it; the 80x25 fallback uses one cell row per line at column 4. `row`/`y`
+ * is the title position, so a caller can park the block below its own text.
+ */
+static uint32_t fb_draw_memory_map(const MbInfo *mbi, uint32_t y, uint32_t fg, uint32_t bg) {
+    char line[VGA_TEXT_COLS + 1];
+    uint32_t cursor;
+    uint32_t end;
+    uint32_t column = 0;
+    int len = 0;
+
+    fb_text_left(mbi, y, 32u, "Memory Map:", fg, bg);
+    y += 12u;
+
+    if ((mbi->flags & MB_FLAG_MMAP) == 0 || mbi->mmap_addr == 0 || mbi->mmap_length == 0) {
+        fb_text_left(mbi, y, 32u, "unavailable", fg, bg);
+        return y + 12u;
+    }
+
+    cursor = mbi->mmap_addr;
+    end = mbi->mmap_addr + mbi->mmap_length;
+    line[0] = '\0';
+
+    while (cursor + 4u <= end && y < mbi->framebuffer_height - 8u) {
+        const uint32_t *entry_size = (const uint32_t *)(size_t_)cursor;
+        const uint32_t *fields;
+        uint32_t base_lo;
+
+        if (*entry_size < 20u || cursor + *entry_size + 4u > end) {
+            break;
+        }
+        fields = (const uint32_t *)(size_t_)(cursor + 4u);
+        base_lo = fields[0];
+
+        text_append_hex32(line, &len, sizeof(line), base_lo);
+        ++column;
+        if (column == 4u) {
+            fb_text_left(mbi, y, 32u, line, fg, bg);
+            y += 12u;
+            column = 0;
+            line[0] = '\0';
+            len = 0;
+        } else if (len + 1 < (int)sizeof(line)) {
+            line[len++] = ' ';
+            line[len] = '\0';
+        }
+
+        cursor += *entry_size + 4u;
+    }
+    if (column != 0u && y < mbi->framebuffer_height - 8u) {
+        fb_text_left(mbi, y, 32u, line, fg, bg);
+        y += 12u;
+    }
+    return y;
+}
+
+static int text_draw_memory_map(const MbInfo *mbi, int row) {
+    char line[VGA_TEXT_COLS + 1];
+    uint32_t cursor;
+    uint32_t end;
+    int column = 0;
+    int len = 0;
+
+    if (row < VGA_TEXT_ROWS) {
+        err_write(row, 4, "Memory Map:");
+        ++row;
+    }
+
+    if ((mbi->flags & MB_FLAG_MMAP) == 0 || mbi->mmap_addr == 0 || mbi->mmap_length == 0) {
+        if (row < VGA_TEXT_ROWS) {
+            err_write(row, 4, "unavailable");
+            ++row;
+        }
+        return row;
+    }
+
+    cursor = mbi->mmap_addr;
+    end = mbi->mmap_addr + mbi->mmap_length;
+
+    while (cursor + 4u <= end && row < VGA_TEXT_ROWS) {
+        const uint32_t *entry_size = (const uint32_t *)(size_t_)cursor;
+        const uint32_t *fields;
+        uint32_t base_lo;
+
+        if (*entry_size < 20u || cursor + *entry_size + 4u > end) {
+            break;
+        }
+        fields = (const uint32_t *)(size_t_)(cursor + 4u);
+        base_lo = fields[0];
+
+        if (column == 0) {
+            line[0] = '\0';
+            len = 0;
+        }
+        text_append_hex32(line, &len, sizeof(line), base_lo);
+        ++column;
+        if (column == 4) {
+            err_write(row, 4, line);
+            ++row;
+            column = 0;
+        } else if (len + 12 < (int)sizeof(line)) {
+            line[len++] = ' ';
+            line[len] = '\0';
+        }
+
+        cursor += *entry_size + 4u;
+    }
+    if (column > 0 && row < VGA_TEXT_ROWS) {
+        err_write(row, 4, line);
+        ++row;
+    }
+    return row;
+}
+
+/* Pick the active backend's map renderer for a fatal screen. Returns the
+ * framebuffer's next row and updates *row for the text fallback, so the
+ * Backtrace block can always sit directly below the map. */
+static uint32_t err_write_memory_map(int *row, uint32_t y) {
+    if (err_mbi == 0) {
+        return y;
+    }
+    if (err_use_framebuffer(err_mbi)) {
+        return fb_draw_memory_map(err_mbi, y, fb_white(err_mbi), fb_red(err_mbi));
+    }
+    *row = text_draw_memory_map(err_mbi, *row);
+    return y;
+}
+
+#if HALOXOS_LOADER_TRACE
+static bool loader_symbol_lookup(uint32_t addr, const char **name,
+                                 const char **file, int *line_no,
+                                 uint32_t *offset) {
+    int best = -1;
+
+    for (int i = 0; i < CRASH_SYMBOL_MAX; ++i) {
+        unsigned long entry = crash_symbol_table_data[i].addr;
+
+        if (entry == 0 || entry > addr) {
+            continue;
+        }
+        if (best < 0 || entry > crash_symbol_table_data[best].addr) {
+            best = i;
+        }
+    }
+    if (best < 0) {
+        return false;
+    }
+    *name = crash_symbol_table_data[best].name;
+    *file = crash_symbol_table_data[best].file;
+    *line_no = crash_symbol_table_data[best].line;
+    *offset = addr - (uint32_t)crash_symbol_table_data[best].addr;
+    return true;
+}
+
+static void trace_append(char *buffer, int *len, int max_len, const char *text) {
+    while (*text != '\0' && *len < max_len - 1) {
+        buffer[(*len)++] = *text++;
+    }
+    buffer[*len] = '\0';
+}
+
+/* One line in the crash handler's default Backtrace format. */
+static void loader_trace_line(char *buffer, int max_len, uint32_t addr) {
+    const char *name;
+    const char *file;
+    int line_no;
+    uint32_t offset;
+    int len = 0;
+
+    buffer[0] = '\0';
+    trace_append(buffer, &len, max_len, "[0x");
+    text_append_hex32(buffer, &len, max_len, addr);
+    trace_append(buffer, &len, max_len, "] ");
+    if (loader_symbol_lookup(addr, &name, &file, &line_no, &offset)) {
+        trace_append(buffer, &len, max_len, name);
+        trace_append(buffer, &len, max_len, " at ");
+        trace_append(buffer, &len, max_len, file);
+        trace_append(buffer, &len, max_len, "; line ");
+        text_append_uint(buffer, &len, max_len, (uint32_t)line_no);
+    } else {
+        trace_append(buffer, &len, max_len, "unknown");
+    }
+}
+#endif
+
+/*
+ * Draw the Backtrace block on whichever backend the error screen selected.
+ * `row` is the title's 80-column cell row, `y` the title's pixel row; only
+ * the active backend's coordinate is used. Frames stop at the screen edge,
+ * exactly like the crash view's visible page.
+ */
+static void loader_render_trace(int row, uint32_t y, const LoaderTrace *trace) {
+    if (trace == 0 || trace->count <= 0) {
+        return;
+    }
+#if HALOXOS_LOADER_TRACE
+    /* Same header rule as the crash handler's view (exceptions.c):
+     * "Backtrace:" then a full-width rule, then one frame per line. */
+    static const char trace_rule[] =
+        "----------------------------------------------------------------------------";
+
+    if (err_mbi == 0) {
+        return;
+    }
+    if (err_use_framebuffer(err_mbi)) {
+        char line[160];
+        uint32_t fg = fb_white(err_mbi);
+        uint32_t bg = fb_red(err_mbi);
+
+        fb_text_left(err_mbi, y, 32u, "Backtrace:", fg, bg);
+        y += 12u;
+        fb_text_left(err_mbi, y, 32u, trace_rule, fg, bg);
+        y += 12u;
+        for (int i = 0; i < trace->count && y < err_mbi->framebuffer_height - 8u; ++i) {
+            loader_trace_line(line, sizeof(line), trace->frames[i]);
+            fb_text_left(err_mbi, y, 32u, line, fg, bg);
+            y += 12u;
+        }
+    } else {
+        char line[VGA_TEXT_COLS + 1];
+
+        err_write(row, 4, "Backtrace:");
+        ++row;
+        if (row < VGA_TEXT_ROWS) {
+            err_write(row, 4, trace_rule);
+            ++row;
+        }
+        for (int i = 0; i < trace->count && row < VGA_TEXT_ROWS; ++i) {
+            loader_trace_line(line, sizeof(line), trace->frames[i]);
+            err_write(row, 4, line);
+            ++row;
+        }
+    }
+
+    /* Mirror the frames into the COM1 boot trace: the screen note points the
+     * user at the serial log, so the same list must exist there untruncated. */
+    {
+        char line[160];
+
+        serial_line("Call/Backtrace:");
+        for (int i = 0; i < trace->count; ++i) {
+            loader_trace_line(line, sizeof(line), trace->frames[i]);
+            serial_line(line);
+        }
+    }
+#else
+    (void)row;
+    (void)y;
+    (void)trace;
+#endif
+}
+
+/*
  * Graphical RAM-error layout.
  *
  * Keep this separate from the VGA text-mode layout.  The graphical screen
@@ -1003,7 +1394,9 @@ static void capture_regs(LoaderRegs *regs) {
  * old 80x25 cell coordinates made the long warning look cramped and left
  * the diagnostic block with inconsistent vertical spacing.
  */
-static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
+__attribute__((noinline))
+static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total,
+                                            const LoaderTrace *trace) {
     char line[VGA_TEXT_COLS + 1];
     char ram_line[VGA_TEXT_COLS + 1];
     uint32_t fg = fb_white(mbi);
@@ -1163,44 +1556,10 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
         }
         fb_text_left(mbi, 192u, 32u, line, fg, bg);
 
-        fb_text_left(mbi, 208u, 32u, "Memory Map:", fg, bg);
+        {
+            uint32_t map_y = fb_draw_memory_map(mbi, 208u, fg, bg);
 
-        if ((mbi->flags & MB_FLAG_MMAP) != 0 && mbi->mmap_addr != 0 && mbi->mmap_length != 0) {
-            uint32_t cursor = mbi->mmap_addr;
-            uint32_t end = mbi->mmap_addr + mbi->mmap_length;
-            uint32_t y = 220u;
-            uint32_t column = 0;
-            line[0] = '\0'; len = 0;
-
-            while (cursor + 4u <= end && y < mbi->framebuffer_height - 8u) {
-                const uint32_t *entry_size = (const uint32_t *)(size_t_)cursor;
-                const uint32_t *fields;
-                uint32_t base_lo;
-
-                if (*entry_size < 20u || cursor + *entry_size + 4u > end) break;
-                fields = (const uint32_t *)(size_t_)(cursor + 4u);
-                base_lo = fields[0];
-
-                text_append_hex32(line, &len, sizeof(line), base_lo);
-                ++column;
-                if (column == 4u) {
-                    fb_text_left(mbi, y, 32u, line, fg, bg);
-                    y += 12u;
-                    column = 0;
-                    line[0] = '\0';
-                    len = 0;
-                } else if (len + 1 < (int)sizeof(line)) {
-                    line[len++] = ' ';
-                    line[len] = '\0';
-                }
-
-                cursor += *entry_size + 4u;
-            }
-            if (column != 0u && y < mbi->framebuffer_height - 8u) {
-                fb_text_left(mbi, y, 32u, line, fg, bg);
-            }
-        } else {
-            fb_text_left(mbi, 220u, 32u, "unavailable", fg, bg);
+            loader_render_trace(0, map_y + 12u, trace);
         }
     }
 #endif
@@ -1214,15 +1573,18 @@ static void show_ram_error_screen_graphical(const MbInfo *mbi, uint32_t total) {
  * linear framebuffer when GRUB provided one (modern GPUs), else classic
  * VGA text mode.
  */
+__attribute__((noinline))
 static void show_ram_error_screen(const MbInfo *mbi) {
     char line[VGA_TEXT_COLS + 1];
     int len;
     uint32_t total = detect_total_ram(mbi);
+    LoaderTrace trace;
 
+    loader_capture_trace(&trace);
     serial_line("NOT ENOUGH RAM: showing the error screen");
 
     if (err_use_framebuffer(mbi)) {
-        show_ram_error_screen_graphical(mbi, total);
+        show_ram_error_screen_graphical(mbi, total, &trace);
     }
 
     err_begin(mbi);
@@ -1343,53 +1705,10 @@ static void show_ram_error_screen(const MbInfo *mbi) {
             }
         }
 
-        /* Leave a blank row between the register block and flags/map. */
+        /* Leave a blank row between the register block and the map. */
         row += 1;
-        if (row < VGA_TEXT_ROWS) {
-            err_write(row, 4, "Memory Map:");
-            ++row;
-        }
-        if ((mbi->flags & MB_FLAG_MMAP) != 0 && mbi->mmap_addr != 0 && mbi->mmap_length != 0) {
-            uint32_t cursor = mbi->mmap_addr;
-            uint32_t end = mbi->mmap_addr + mbi->mmap_length;
-            int column = 0;
-
-            while (cursor + 4 <= end && row < VGA_TEXT_ROWS) {
-                const uint32_t *entry_size = (const uint32_t *)(size_t_)cursor;
-                const uint32_t *fields;
-                uint32_t base_lo;
-
-                if (cursor + *entry_size + 4 > end) {
-                    break;
-                }
-                fields = (const uint32_t *)(size_t_)(cursor + 4);
-                base_lo = fields[0];
-
-                if (column == 0) {
-                    line[0] = '\0';
-                    len = 0;
-                }
-                text_append_hex32(line, &len, sizeof(line), base_lo);
-                ++column;
-                if (column == 4) {
-                    err_write(row, 4, line);
-                    ++row;
-                    column = 0;
-                } else if (len + 12 < (int)sizeof(line)) {
-                    line[len++] = ' ';
-                    line[len] = '\0';
-                }
-
-                cursor += *entry_size + 4;
-            }
-            if (column > 0 && row < VGA_TEXT_ROWS) {
-                err_write(row, 4, line);
-            }
-        } else {
-            if (row < VGA_TEXT_ROWS) {
-                err_write(row, 4, "unavailable");
-            }
-        }
+        row = text_draw_memory_map(mbi, row);
+        loader_render_trace(row + 1, 0u, &trace);
     }
 #endif
 
@@ -1408,6 +1727,19 @@ static void serial_init(void) {
     outb(SERIAL_PORT + 4, 0x0B);
 }
 
+/*
+ * COM1 trace mirror for the on-medium boot log: the loader runs before
+ * the kernel decompresses, so its [LDR] lines can only be preserved by
+ * buffering them here. The kernel copies this range out through the
+ * loader info block (trace_addr/trace_len) as the prefix of its own RAM
+ * mirror (kernel serial.c), which the debug flush then writes to the
+ * boot medium - the loader's memory sits below the kernel load base and
+ * survives the handoff.
+ */
+#define LOADER_TRACE_BYTES 16384u
+static char loader_trace_buffer[LOADER_TRACE_BYTES];
+static uint32_t loader_trace_used;
+
 static void serial_tx(char ch) {
     int i;
     for (i = 0; i < 100000; ++i) {
@@ -1416,6 +1748,9 @@ static void serial_tx(char ch) {
         }
     }
     outb(SERIAL_PORT, (uint8_t)ch);
+    if (loader_trace_used < sizeof(loader_trace_buffer)) {
+        loader_trace_buffer[loader_trace_used++] = ch;
+    }
 }
 
 static void serial_puts(const char *text) {
@@ -1481,6 +1816,61 @@ static void loader_memset(void *dest, uint8_t value, size_t_ n) {
     }
 }
 
+#if HALOXOS_BOOT_GRAPHICS_EXPECTED
+/*
+ * A bootloader linear framebuffer is optional on a real legacy VGA card.
+ * Such a card has no VBE BIOS, so GRUB cannot program a linear mode and
+ * leaves flag 12 clear - but the kernel's IBM VGA backend can program mode
+ * 12h/13h from its own register tables.  Take that path only when the VGA
+ * really answers AND no VBE option ROM is mapped: a modern GPU that failed
+ * to give GRUB a mode must still stop here, because falling through to the
+ * kernel's VGA probing on that hardware is the "jailbar garbage" case.
+ */
+static bool loader_vga_registers_present(void) {
+    uint8_t misc = inb(0x3CC);
+    uint8_t status = inb(0x3DA);
+    uint8_t saved;
+    uint8_t test;
+
+    if (misc == 0xFFu && status == 0xFFu) {
+        return false;
+    }
+
+    /* CRTC readback: the same presence test the kernel's VGA backend uses.
+     * A floating bus does not return the inverted value. */
+    outb(0x3D4, 0x0A);
+    saved = inb(0x3D5);
+    test = (uint8_t)(saved ^ 0x08u);
+    outb(0x3D5, test);
+    if (inb(0x3D5) != test) {
+        outb(0x3D5, saved);
+        return false;
+    }
+    outb(0x3D5, saved);
+    return true;
+}
+
+static bool loader_vbe_option_rom_present(void) {
+    const uint8_t *rom = (const uint8_t *)(size_t_)0x000C0000u;
+    uint32_t offset;
+
+    /* VBE 2.0+ option ROMs carry the "VBE2" signature; older VESA ones
+     * carry "VESA".  A legacy IBM VGA BIOS has neither. */
+    for (offset = 0; offset + 4u <= 0x00020000u; ++offset) {
+        if (rom[offset] == 'V' && rom[offset + 1u] == 'B' &&
+            rom[offset + 2u] == 'E' &&
+            (rom[offset + 3u] == '2' || rom[offset + 3u] == '3')) {
+            return true;
+        }
+        if (rom[offset] == 'V' && rom[offset + 1u] == 'E' &&
+            rom[offset + 2u] == 'S' && rom[offset + 3u] == 'A') {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 #define ZSTD_STATIC_LINKING_ONLY
 #include "../third_party/zstd-1.5.7/lib/zstd.h"
 
@@ -1499,6 +1889,11 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
      * is moved out of its own decompression target (see below). */
     uint32_t kernel_mod_start = 0;
     uint32_t kernel_mod_end = 0;
+#ifdef HALOXOS_KERNEL_IMAGE_SPAN
+    uint32_t kernel_scratch = KERNEL_SCRATCH;
+#else
+    uint32_t kernel_scratch = 0;
+#endif
     LoaderInfo *info = (LoaderInfo *)LOADER_INFO_ADDR;
     ZSTD_DCtx *dctx;
     size_t result;
@@ -1519,6 +1914,22 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     }
 
     serial_line_hex("multiboot flags", mbi->flags);
+    /* Boot-medium identity: the kernel uses this (or the halox.boot token
+     * in the command line) to write the on-medium boot log to the drive
+     * the machine actually booted from, not an internal disk that happens
+     * to carry another copy of the log template. */
+    serial_line_hex("multiboot boot_device", mbi->boot_device);
+    if ((mbi->flags & MB_FLAG_CMDLINE) != 0 && mbi->cmdline != 0) {
+        const char *cmdline = (const char *)(size_t_)mbi->cmdline;
+        uint32_t i;
+        serial_puts("[LDR]: multiboot cmdline: ");
+        for (i = 0; i < 192u && cmdline[i] != '\0'; ++i) {
+            serial_tx(cmdline[i]);
+        }
+        serial_puts("\n");
+    } else {
+        serial_line("multiboot cmdline: none");
+    }
 
     /* Log the raw Multiboot memory fields before the RAM gate so a failing
      * machine can be diagnosed from COM1 even when the loader halts here. */
@@ -1540,12 +1951,20 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
         serial_line_uint("required RAM nominal bytes", HALOXOS_KERNEL_RAM_REQUIRED_BYTES);
         serial_line_uint("required RAM gate bytes", MIN_RAM_BYTES);
         serial_line_uint("detected/advertised RAM bytes", total_ram);
+        serial_line_uint("usable RAM top bytes", detected_usable_top);
 #if HALOXOS_FORCE_RAM_ERROR
         serial_line("TEST BUILD: forcing the not-enough-RAM error screen");
         (void)total_ram;
         show_ram_error_screen(mbi);
 #else
-        if (total_ram < MIN_RAM_BYTES) {
+        /* The kernel places its loader-info block, guard and shadow plane
+         * at the top of USABLE RAM.  Advertised memory can be larger than
+         * the highest E820 type-1 range (firmware reserves the top of the
+         * address space), so a machine can pass the nominal gate while the
+         * block would land beyond usable RAM.  Require the highest usable
+         * address to cover the gate as well. */
+        if (total_ram < MIN_RAM_BYTES ||
+            (detected_usable_top != 0 && detected_usable_top < MIN_RAM_BYTES)) {
             show_ram_error_screen(mbi);
         }
 #endif
@@ -1555,20 +1974,36 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
      * Video handoff check: with a graphics-mode request in the loader's
      * multiboot header, GRUB programs the VBE mode and reports it via the
      * framebuffer fields. If GRUB could NOT set a graphics mode (bit 12
-     * clear) on a graphics build, the kernel would fall through to its
-     * classic VGA register probing, which corrupts real graphics cards
-     * (jailbar garbage). Refuse to boot instead.
+     * clear), a bootloader-framebuffer machine would be left to the
+     * kernel's classic VGA probing. That is wrong on a real graphics card
+     * (jailbar garbage), but it is exactly right on a VGA-only card with
+     * no VBE BIOS - IBM VGA in an emulator, or an ISA VGA card. So only
+     * continue when the VGA answers and no VBE option ROM is present;
+     * otherwise refuse to boot as before.
      */
 #if HALOXOS_BOOT_GRAPHICS_EXPECTED
     if ((mbi->flags & (1u << 12)) == 0) {
         serial_line("GRUB reported no framebuffer info");
-        loader_hang("graphics mode was not set by the bootloader", mbi);
+        if (loader_vga_registers_present() && !loader_vbe_option_rom_present()) {
+            /*
+             * A VGA-only card (an emulated "IBM VGA" adapter, or a real
+             * ISA VGA card): GRUB has no VBE mode to hand over, but the
+             * kernel can switch mode 12h/13h itself.  Continue without a
+             * multiboot framebuffer instead of stopping at the red screen.
+             */
+            serial_line("legacy VGA fallback: no VBE option ROM; kernel will set the mode");
+        } else {
+            serial_line("no usable legacy VGA fallback");
+            loader_hang("graphics mode was not set by the bootloader", mbi);
+        }
     }
-    serial_line_hex("framebuffer addr", (uint32_t)(size_t_)mbi_fb_addr(mbi));
-    serial_line_uint("framebuffer width", mbi_fb_width(mbi));
-    serial_line_uint("framebuffer height", mbi_fb_height(mbi));
-    serial_line_uint("framebuffer bpp", mbi_fb_bpp(mbi));
-    serial_line_uint("framebuffer pitch", mbi_fb_pitch(mbi));
+    if ((mbi->flags & (1u << 12)) != 0) {
+        serial_line_hex("framebuffer addr", (uint32_t)(size_t_)mbi_fb_addr(mbi));
+        serial_line_uint("framebuffer width", mbi_fb_width(mbi));
+        serial_line_uint("framebuffer height", mbi_fb_height(mbi));
+        serial_line_uint("framebuffer bpp", mbi_fb_bpp(mbi));
+        serial_line_uint("framebuffer pitch", mbi_fb_pitch(mbi));
+    }
 #endif
 
     if ((mbi->flags & MB_FLAG_MODS) == 0 || mbi->mods_count == 0) {
@@ -1751,13 +2186,38 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
         loader_hang("module header frame size does not match module bounds", mbi);
     }
 
+#ifndef HALOXOS_KERNEL_IMAGE_SPAN
+    /*
+     * Park the DCtx scratch above everything that is already live:
+     * the decompressed image (written from KERNEL_LOAD_ADDR upward) and
+     * the compressed module zstd reads from.  Both are below .bss, and
+     * .bss is zeroed only at kernel entry, so the block never collides
+     * with the running kernel.  It must also stay entirely below the
+     * loader handoff block, whose address the build generated from the
+     * kernel's real span.
+     */
+    if (header->image_size != 0) {
+        uint32_t image_end = KERNEL_LOAD_ADDR + header->image_size;
+        uint32_t scratch_floor = image_end;
+
+        if (kernel_mod_end > scratch_floor) {
+            scratch_floor = kernel_mod_end;
+        }
+        kernel_scratch = (scratch_floor + 0xFFFu) & ~0xFFFu;
+        if (kernel_scratch < image_end ||
+            kernel_scratch + KERNEL_SCRATCH_SIZE > (uint32_t)LOADER_INFO_ADDR) {
+            loader_hang("no room for the zstd scratch below the loader handoff block", mbi);
+        }
+    }
+#endif
+
     if (header->image_size == 0 ||
-        KERNEL_LOAD_ADDR + header->image_size > KERNEL_SCRATCH) {
+        KERNEL_LOAD_ADDR + header->image_size > kernel_scratch) {
         loader_hang("decompressed kernel would overlap the zstd scratch area", mbi);
     }
 
     serial_line_hex("decompress target", KERNEL_LOAD_ADDR);
-    serial_line_hex("dctx scratch", KERNEL_SCRATCH);
+    serial_line_hex("dctx scratch", kernel_scratch);
     serial_line_uint("dctx scratch bytes", KERNEL_SCRATCH_SIZE);
 
     serial_line_hex("zstd version number", ZSTD_versionNumber());
@@ -1766,7 +2226,7 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     serial_puts("\n");
     serial_line_uint("zstd estimateDCtxSize", (uint32_t)ZSTD_estimateDCtxSize());
 
-    dctx = ZSTD_initStaticDCtx((void *)KERNEL_SCRATCH, KERNEL_SCRATCH_SIZE);
+    dctx = ZSTD_initStaticDCtx((void *)(size_t_)kernel_scratch, KERNEL_SCRATCH_SIZE);
     if (dctx == 0) {
         loader_hang("ZSTD_initStaticDCtx rejected the scratch block", mbi);
     }
@@ -1853,7 +2313,10 @@ void loader_main(uint32_t magic, const MbInfo *mbi) {
     }
     info->dctx_size = (uint32_t)ZSTD_estimateDCtxSize();
     info->kernel_entry = header->kernel_entry;
+    info->trace_addr = (uint32_t)(size_t_)loader_trace_buffer;
+    info->trace_len = loader_trace_used;
     serial_line_hex("loader info block", LOADER_INFO_ADDR);
+    serial_line_uint("loader trace bytes", info->trace_len);
 
     serial_line("jumping to kernel");
     serial_puts("[LDR]: loader done\n");

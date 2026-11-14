@@ -90,41 +90,187 @@ static void render_debug_memory_hex(int x, int y, int w, int h) {
     }
 }
 
-static void render_debug_memory_visual(int x, int y, int w, int h) {
-    uint32_t limit = debug_memory_limit();
-    int vx = x + (w - DEBUG_MEMORY_VISUAL_W) / 2;
-    int vy = y + 54;
-    uint32_t visible = (uint32_t)DEBUG_MEMORY_VISUAL_W * DEBUG_MEMORY_VISUAL_H;
-    (void)h;
+static void render_debug_memory_scrollbar(void) {
+    int scroll_x = debug_memory_scroll_x();
+    int bitmap_y = debug_memory_visual_y();
+    int track_y = bitmap_y + 16;
+    int track_h = debug_memory_visual_h() - 32;
+    int thumb_h = 20;
+    int thumb_track = track_h - thumb_h;
+    uint32_t max_base = debug_memory_max_base();
+    int thumb_y = track_y + 1;
+    bool thumb_hover;
+    bool track_hover;
 
-    if (debug_memory_cursor < debug_memory_base) {
-        debug_memory_base = debug_memory_cursor;
-    } else if (debug_memory_cursor >= debug_range_end(debug_memory_base, visible)) {
-        debug_memory_base = debug_memory_cursor - visible + 1;
+    if (debug_memory_base > max_base) {
+        debug_memory_base = max_base;
+    }
+    thumb_y += debug_memory_thumb_offset(debug_memory_base, max_base, thumb_track);
+
+    draw_button(scroll_x, bitmap_y - 2, 16, 16, "^",
+                debug_memory_base > 0 ? color_gray_light : color_gray,
+                color_black, color_black);
+    fill_rect(scroll_x, track_y, 16, track_h, color_gray_light);
+    draw_rect(scroll_x, track_y, 16, track_h, color_gray_dark);
+
+    thumb_hover = point_in_rect(mouse.x, mouse.y, scroll_x + 2, thumb_y, 12, thumb_h);
+    track_hover = point_in_rect(mouse.x, mouse.y, scroll_x, track_y, 16, track_h);
+    if (thumb_hover || track_hover) {
+        cursor_hand_hint = true;
+    }
+    hover_widget_add(scroll_x + 2, thumb_y, 12, thumb_h);
+    hover_widget_add(scroll_x, track_y, 16, track_h);
+
+    if (max_base != 0) {
+        fill_rect(scroll_x + 2, thumb_y, 12, thumb_h, thumb_hover ? color_blue_dark : color_blue);
+        draw_rect(scroll_x + 2, thumb_y, 12, thumb_h, color_black);
+    } else {
+        fill_rect(scroll_x + 2, track_y + 2, 12, thumb_h, color_gray);
+        draw_rect(scroll_x + 2, track_y + 2, 12, thumb_h, color_black);
     }
 
-    fill_rect(vx - 1, vy - 1, DEBUG_MEMORY_VISUAL_W + 2, DEBUG_MEMORY_VISUAL_H + 2, color_black);
-    for (int py = 0; py < DEBUG_MEMORY_VISUAL_H; ++py) {
-        for (int px = 0; px < DEBUG_MEMORY_VISUAL_W; ++px) {
-            uint32_t address = debug_memory_base + (uint32_t)py * DEBUG_MEMORY_VISUAL_W + (uint32_t)px;
-            draw_pixel(vx + px, vy + py, address < limit ? debug_memory_read_byte(address) : color_black);
+    draw_button(scroll_x, bitmap_y + debug_memory_visual_h() - 16, 16, 16, "v",
+                debug_memory_base < max_base ? color_gray_light : color_gray,
+                color_black, color_black);
+}
+
+static void render_debug_memory_visual(int x, int y, int w, int h) {
+    uint32_t limit = debug_memory_limit();
+    int vx = debug_memory_visual_x();
+    int vy = debug_memory_visual_y();
+    int vw = debug_memory_visual_w();
+    int vh = debug_memory_visual_h();
+    uint32_t visible = (uint32_t)vw * (uint32_t)vh;
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+
+    fill_rect(vx - 1, vy - 1, vw + 2, vh + 2, color_black);
+
+    /*
+     * Bulk bitmap blit.
+     *
+     * The old loop called draw_pixel() for every visible byte: bounds
+     * test, clip test, plane election and a function call per pixel, then
+     * one byte read from physical memory.  At the default 430x240 that is
+     * 103,200 calls per repaint, and scrolling repaints the whole bitmap
+     * every key repeat.  Resolve the plane election and the 256-entry
+     * palette mapping once per frame, then walk rows straight into the
+     * live shadow plane.  The indexed plane is a raw byte copy; the RGB565
+     * plane expands four bytes per iteration through the LUT.
+     */
+    {
+        bool want_index = present_need_index_plane();
+        bool want_rgb = present_need_rgb_plane();
+        uint16_t lut[256];
+        uint32_t base = debug_memory_base;
+
+        if (want_rgb) {
+            for (int i = 0; i < 256; ++i) {
+                lut[i] = pixel_rgb565_fast((uint8_t)i);
+            }
+        }
+
+        for (int py = 0; py < vh; ++py) {
+            uint32_t address = base + (uint32_t)py * (uint32_t)vw;
+            uint32_t count = 0;
+            uint8_t *dst_index = &backbuffer[(size_t)(vy + py) * OS_WIDTH + vx];
+            uint16_t *dst_rgb = &backbuffer_rgb565[(size_t)(vy + py) * OS_WIDTH + vx];
+
+            if (address < limit) {
+                count = limit - address;
+                if (count > (uint32_t)vw) {
+                    count = (uint32_t)vw;
+                }
+            }
+
+            if (want_index && count > 0) {
+                memcpy_local(dst_index, (const void *)(uintptr_t)address, (size_t)count);
+            } else if (want_rgb && count > 0) {
+                const uint8_t *src = (const uint8_t *)(uintptr_t)address;
+                uint32_t px = 0;
+
+                for (; px + 4u <= count; px += 4u) {
+                    uint32_t word;
+
+                    __builtin_memcpy(&word, src + px, sizeof(word));
+                    dst_rgb[px + 0] = lut[word & 0xFFu];
+                    dst_rgb[px + 1] = lut[(word >> 8) & 0xFFu];
+                    dst_rgb[px + 2] = lut[(word >> 16) & 0xFFu];
+                    dst_rgb[px + 3] = lut[(word >> 24) & 0xFFu];
+                }
+                for (; px < count; ++px) {
+                    dst_rgb[px] = lut[src[px]];
+                }
+            }
+
+            if (count < (uint32_t)vw) {
+                uint32_t tail = (uint32_t)vw - count;
+
+                if (want_index) {
+                    memset_local(dst_index + count, color_black, (size_t)tail);
+                }
+                if (want_rgb) {
+                    memset16_local(dst_rgb + count, lut[color_black], (size_t)tail);
+                }
+            }
         }
     }
 
     if (debug_memory_cursor >= debug_memory_base && debug_memory_cursor < debug_memory_base + visible) {
         uint32_t offset = debug_memory_cursor - debug_memory_base;
-        int cx = vx + (int)(offset % DEBUG_MEMORY_VISUAL_W);
-        int cy = vy + (int)(offset / DEBUG_MEMORY_VISUAL_W);
+        int cx = vx + (int)(offset % (uint32_t)vw);
+        int cy = vy + (int)(offset / (uint32_t)vw);
         draw_rect(cx - 2, cy - 2, 5, 5, color_blue);
         draw_pixel(cx, cy, debug_memory_address_edited(debug_memory_cursor) ? color_red : color_white);
     }
+
+    render_debug_memory_scrollbar();
+}
+
+/*
+ * Width/Height boxes for the bitmap resolution, on their own row between
+ * the bitmap and the Memory Bytes footer.  The row is placed from the
+ * bottom of the view, so it stays clear of the header and of a bitmap
+ * grown to its maximum height.  "max" names the largest size this screen
+ * can show, because anything above it is clamped to that.
+ */
+static void render_debug_memory_size_fields(void) {
+    int row_y = debug_memory_size_row_y();
+    int x = debug_memory_view_x();
+    char hint[40] = {0};
+    size_t len = 0;
+
+    draw_text(x + 10, row_y + 3, "Width:", color_black, color_white, true);
+    draw_text(x + 120, row_y + 3, "Height:", color_black, color_white, true);
+
+    for (int which = 0; which < 2; ++which) {
+        int bx = debug_memory_size_box_x(which);
+        bool focused = debug_memory_size_focus == which;
+
+        fill_rect(bx, row_y, DEBUG_MEMORY_SIZE_BOX_W, DEBUG_MEMORY_SIZE_BOX_H, color_white);
+        draw_rect(bx, row_y, DEBUG_MEMORY_SIZE_BOX_W, DEBUG_MEMORY_SIZE_BOX_H,
+                  focused ? color_blue_dark : color_gray_dark);
+        draw_text(bx + 4, row_y + 3, debug_memory_size_text[which],
+                  color_black, color_white, true);
+        if (focused && ((timer_ticks / TERMINAL_CURSOR_BLINK_TICKS) & 1u) == 0) {
+            fill_rect(bx + 4 + debug_memory_size_len[which] * 8, row_y + 3, 1, 8, color_blue_dark);
+        }
+    }
+
+    append_string(hint, &len, sizeof(hint), "max ");
+    append_uint(hint, &len, sizeof(hint), (uint32_t)debug_memory_visual_max_w());
+    append_char(hint, &len, sizeof(hint), 'x');
+    append_uint(hint, &len, sizeof(hint), (uint32_t)debug_memory_visual_max_h());
+    draw_text(x + 244, row_y + 3, hint, color_gray_dark, color_white, true);
 }
 
 static void render_debug_memory_view(void) {
-    int x = 16;
-    int y = 26;
-    int w = OS_WIDTH - 32;
-    int h = OS_HEIGHT - 54;
+    int x = debug_memory_view_x();
+    int y = debug_memory_view_y();
+    int w = debug_memory_view_w();
+    int h = debug_memory_view_h();
     char memory_text[64] = {0};
     char footer[TERM_LINE_LEN] = {0};
     size_t len = 0;
@@ -146,6 +292,7 @@ static void render_debug_memory_view(void) {
         render_debug_memory_hex(x, y, w, h);
     } else {
         render_debug_memory_visual(x, y, w, h);
+        render_debug_memory_size_fields();
     }
 
     format_single_memory_amount(memory_text, sizeof(memory_text), debug_memory_limit());
@@ -188,6 +335,48 @@ static void render_debug_memory_view(void) {
     draw_text_clipped(x + 10, y + h - 18, w - 20, footer, color_gray_dark, color_white, true);
 }
 
+/*
+ * FPS overlay: one fixed-size box in the top-right corner.  A fixed box
+ * matters for more than looks: the box is the only rectangle the partial
+ * scan-out has to refresh, so changing the width with the digits would
+ * leave stale pixels beside a shrinking number and force a wider present.
+ * The widest reading, "FPS 100.0" at 9 characters, still fits.
+ */
+#define DEBUG_FPS_BOX_X (OS_WIDTH - 102)
+#define DEBUG_FPS_BOX_Y 6
+#define DEBUG_FPS_BOX_W 84
+#define DEBUG_FPS_BOX_H 14
+
+static void debug_fps_overlay_rect(int *x, int *y, int *w, int *h) {
+    *x = DEBUG_FPS_BOX_X - 2;
+    *y = DEBUG_FPS_BOX_Y - 2;
+    *w = DEBUG_FPS_BOX_W + 4;
+    *h = DEBUG_FPS_BOX_H + 4;
+}
+
+static void render_fps_overlay(void) {
+    char text[32] = {0};
+    size_t len = 0;
+    uint32_t whole = fps_current / 10u;
+    uint32_t frac = fps_current % 10u;
+    bool blink_red = fps_lagging && ((timer_ticks / 6u) & 1u) != 0u;
+
+    if (!fps_overlay_on) {
+        return;
+    }
+
+    append_string(text, &len, sizeof(text), "FPS ");
+    append_uint(text, &len, sizeof(text), whole);
+    append_char(text, &len, sizeof(text), '.');
+    append_uint(text, &len, sizeof(text), frac);
+
+    fill_rect(DEBUG_FPS_BOX_X, DEBUG_FPS_BOX_Y, DEBUG_FPS_BOX_W, DEBUG_FPS_BOX_H, color_black);
+    fill_rect(DEBUG_FPS_BOX_X + 1, DEBUG_FPS_BOX_Y + 1, DEBUG_FPS_BOX_W - 2, DEBUG_FPS_BOX_H - 2,
+              blink_red ? color_red : color_white);
+    draw_text(DEBUG_FPS_BOX_X + 6, DEBUG_FPS_BOX_Y + 4, text, color_black,
+              blink_red ? color_red : color_white, true);
+}
+
 static void render_debug_overlay(void) {
     int x = 42;
     int y = 46;
@@ -197,27 +386,7 @@ static void render_debug_overlay(void) {
     int start = debug_term.line_count > max_lines ? debug_term.line_count - max_lines : 0;
     int line_y = y + 32;
 
-    /* FPS overlay: white rect top-right, black text, red blink when a
-     * frame took clearly longer than the rolling average (lag/drop). */
-    if (fps_overlay_on) {
-        char text[32] = {0};
-        size_t len = 0;
-        uint32_t whole = fps_current / 10u;
-        uint32_t frac = fps_current % 10u;
-        int width;
-        bool blink_red = fps_lagging && ((timer_ticks / 6u) & 1u) != 0u;
-
-        append_string(text, &len, sizeof(text), "FPS ");
-        append_uint(text, &len, sizeof(text), whole);
-        append_char(text, &len, sizeof(text), '.');
-        append_uint(text, &len, sizeof(text), frac);
-        width = (int)strlen_local(text) * 8;
-
-        fill_rect(OS_WIDTH - width - 18, 6, width + 12, 14, color_black);
-        fill_rect(OS_WIDTH - width - 17, 7, width + 10, 12, blink_red ? color_red : color_white);
-        draw_text(OS_WIDTH - width - 12, 10, text, color_black,
-                  blink_red ? color_red : color_white, true);
-    }
+    render_fps_overlay();
 
     if (!debug_overlay_open) {
         return;

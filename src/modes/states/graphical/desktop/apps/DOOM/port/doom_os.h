@@ -54,12 +54,27 @@ int doom_printf(const char *fmt, ...);
 void *doom_malloc(size_t size);
 void doom_free(void *ptr);
 
+/* Runtime pools.  The low/malloc/alloca arenas used to be static .bss
+ * arrays, which charged every machine ~608 KB even when DOOM never ran.
+ * They are now carved from the DOOM zone when the engine boots, so the
+ * kernel image (and therefore the boot floor) stays small. */
+#define DOOM_LOW_POOL_BYTES      (320u * 200u * 4u)
+#define DOOM_MALLOC_ARENA_BYTES  (256u * 1024u)
+#define DOOM_ALLOCA_POOL_BYTES   (96u * 1024u)
+void doom_malloc_set_pool(void *pool, size_t bytes);
+void doom_alloca_set_pool(void *pool, size_t bytes);
+bool doom_pools_init(void);
+
 /* ---- HaloxOS glue API (implemented in doom_glue.c) ------------- */
 
-/* One engine frame: TryRunTics + D_Display. Called ~35+ tics/s while
- * the DOOM window is the active app. Returns 0 while the engine runs,
- * nonzero when it quit or errored. */
+/* One engine frame: TryRunTics + D_Display. Called every 60 Hz desktop
+ * frame while the DOOM window is active. Returns 0 while the engine
+ * runs, nonzero when it quit or errored. */
 int doom_frame(void);
+
+/* 0..1000 position within the current 35 Hz tic, derived from the 60 Hz
+ * kernel timer.  Used to interpolate the camera between game tics. */
+int I_GetFrameAlpha(void);
 
 /* Push one input event into the engine (key/mouse). */
 void doom_post_key_event(int key_down, int doom_key);

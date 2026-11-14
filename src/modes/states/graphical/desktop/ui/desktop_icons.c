@@ -3,6 +3,62 @@
 
 // This repository is licensed under the GNU General Public License.
 
+/*
+ * Paint order of the icon layer, bottom to top.
+ *
+ * Array order is the initial order, but with Auto-Grid off two icons can be
+ * dropped on top of each other. Painting and hit-testing both walk this
+ * list, and pressing an icon moves it to the top: the face the user can see
+ * is then also the face a click grabs. Before this, icons were painted in
+ * array order while the click test walked that order backwards, so the two
+ * disagreed exactly when it mattered - an icon dropped over a lower-index
+ * one was painted behind it yet could still swallow clicks on it (and a
+ * dragged icon slid under its neighbours, looking like it had gone through
+ * them).
+ */
+static int desktop_icon_order[DESKTOP_ICON_COUNT];
+static bool desktop_icon_order_ready = false;
+
+static void desktop_icon_order_init(void) {
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        desktop_icon_order[i] = i;
+    }
+    desktop_icon_order_ready = true;
+}
+
+/* Icon drawn at a position in the paint order, top of the list last. */
+static int desktop_icon_paint_at(int position) {
+    if (!desktop_icon_order_ready) {
+        desktop_icon_order_init();
+    }
+    return desktop_icon_order[position];
+}
+
+/* Move an icon to the top of the paint order (pressing it raises it). */
+static void desktop_icon_raise(int index) {
+    int at = -1;
+
+    if (index < 0 || index >= DESKTOP_ICON_COUNT) {
+        return;
+    }
+    if (!desktop_icon_order_ready) {
+        desktop_icon_order_init();
+    }
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        if (desktop_icon_order[i] == index) {
+            at = i;
+            break;
+        }
+    }
+    if (at < 0) {
+        return;
+    }
+    for (int i = at; i < DESKTOP_ICON_COUNT - 1; ++i) {
+        desktop_icon_order[i] = desktop_icon_order[i + 1];
+    }
+    desktop_icon_order[DESKTOP_ICON_COUNT - 1] = index;
+}
+
 static const uint8_t *app_icon_image(AppId app) {
     switch (app) {
         case APP_NOTEPAD: return _binary_build_notepad_icon_bin_start;
@@ -19,6 +75,8 @@ static const uint8_t *app_icon_image(AppId app) {
         case APP_3D_BOX: return _binary_build_box3d_icon_bin_start;
         case APP_FIRECRACKER: return _binary_build_firecracker_icon_bin_start;
         case APP_DOOM: return _binary_build_doom_icon_bin_start;
+        case APP_COIN_RUN: return _binary_build_coinrun_icon_bin_start;
+        case APP_STRESS_TEST: return _binary_build_stress_icon_bin_start;
         case APP_DEMO_CENTER: return _binary_build_demo_icon_bin_start;
         default: return _binary_build_program_icon_bin_start;
     }
@@ -63,6 +121,7 @@ static void init_desktop_icon_defaults(void) {
         desktop_icon_visible[i] = i < visible_count;
         copy_string(desktop_icon_names[i], names[i], sizeof(desktop_icon_names[i]));
     }
+    desktop_icon_order_init();
 }
 
 static uint32_t desktop_layout_checksum(const DesktopLayoutSector *layout) {
@@ -388,7 +447,8 @@ static bool desktop_icon_intersects_rect(int idx, int rx, int ry, int rw, int rh
 }
 
 static int desktop_icon_hit_test(int x, int y) {
-    for (int i = DESKTOP_ICON_COUNT - 1; i >= 0; --i) {
+    for (int pos = DESKTOP_ICON_COUNT - 1; pos >= 0; --pos) {
+        int i = desktop_icon_paint_at(pos);
         int icon_x;
         int icon_y;
         int icon_w;
@@ -453,20 +513,38 @@ static bool desktop_icon_group_box(int leader_x, int leader_y,
     return true;
 }
 
+static bool desktop_icon_group_overlaps_icons(int bx, int by, int bw, int bh) {
+    for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
+        if (i == drag_desktop_icon || desktop_icon_multi_selected[i]) {
+            continue;
+        }
+        if (desktop_icon_intersects_rect(i, bx, by, bw, bh)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool desktop_icon_group_free(int leader_x, int leader_y) {
     int bx, by, bw, bh;
 
     if (!desktop_icon_group_box(leader_x, leader_y, &bx, &by, &bw, &bh)) {
         return true;
     }
-    return !desktop_rect_over_window(bx, by, bw, bh);
+    if (desktop_rect_over_window(bx, by, bw, bh)) {
+        return false;
+    }
+    if (!desktop_auto_grid && desktop_icon_group_overlaps_icons(bx, by, bw, bh)) {
+        return false;
+    }
+    return true;
 }
 
 /*
  * Move the grabbed icon (and the rest of the selection) to a new position.
  *
  * Two rules decide where it lands:
- *   - the 4x4 snap grid whenever Auto-Grid is on (or the debugger forced
+ *   - the 16x16 snap grid whenever Auto-Grid is on (or the debugger forced
  *     the grid overlay on, which is what makes that command visible),
  *   - never over an open window. If the wanted position would overlap one,
  *     the icon slides along the window's edge on whichever axis is still
@@ -497,7 +575,8 @@ static void desktop_icon_drag_to(int leader_x, int leader_y) {
     if (!desktop_icon_group_box(leader_x, leader_y, &bx, &by, &bw, &bh)) {
         return;
     }
-    if (desktop_rect_over_window(bx, by, bw, bh)) {
+    if (desktop_rect_over_window(bx, by, bw, bh) ||
+        (!desktop_auto_grid && desktop_icon_group_overlaps_icons(bx, by, bw, bh))) {
         if (desktop_icon_group_free(leader_x, cur_y)) {
             leader_y = cur_y;
         } else if (desktop_icon_group_free(cur_x, leader_y)) {

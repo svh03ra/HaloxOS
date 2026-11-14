@@ -631,6 +631,10 @@ int	frameon;
 int	frameskip[4];
 int	oldnettics;
 static int oldentertics;
+/* Set by the hosted 60 Hz frame pump.  The original loop expects this
+ * function to block until a tic exists; the hosted pump must return so it
+ * can render an interpolated frame in between tics instead. */
+int doom_nonblocking_tics = 0;
 
 extern	boolean	advancedemo;
 
@@ -682,6 +686,9 @@ void TryRunTics (void)
     entertic = I_GetTime ()/ticdup;
     realtics = entertic - oldentertics;
     oldentertics = entertic;
+
+    if (doom_nonblocking_tics && realtics <= 0)
+	return;
     
     // get available tics
     NetUpdate ();
@@ -698,6 +705,9 @@ void TryRunTics (void)
 	}
     }
     availabletics = lowtic - gametic/ticdup;
+
+    if (doom_nonblocking_tics && availabletics < 1)
+	return;
     
     // decide how many tics to run
     if (realtics < availabletics-1)

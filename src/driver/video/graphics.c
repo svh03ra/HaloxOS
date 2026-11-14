@@ -47,6 +47,8 @@ static void init_theme_colors(void) {
     color_yellow = nearest_color(230, 210, 40);
     color_orange = nearest_color(230, 130, 40);
     color_pink = nearest_color(220, 140, 180);
+    color_indigo = nearest_color(75, 0, 130);
+    color_violet = nearest_color(160, 32, 240);
     color_desktop_icon = nearest_color(245, 245, 245);
     paint_color = color_black;
 }
@@ -55,13 +57,30 @@ static bool framebuffer_text_mode_active(void) {
     if (vga_native_text_mode_active()) {
         return false;
     }
-    return boot_text_mode && video_backend == VIDEO_BACKEND_MULTIBOOT && fb.address != NULL;
+    if (!boot_text_mode || fb.address == NULL) {
+        return false;
+    }
+    /*
+     * Bootloader framebuffer (real hardware, VBE-only VMs) and QEMU's Bochs
+     * VBE (BGA) both draw the boot menu as emulated text into the live
+     * linear framebuffer.  BGA joins that list because disabling DISPI to
+     * return to the legacy VGA text mode leaves the scanout reading the
+     * linear framebuffer on current QEMU builds: the text buffer at 0xB8000
+     * held the whole menu while the display stayed black - the boot menu was
+     * invisible on QEMU only.  See enter_boot_text_mode() in video_modes.c.
+     */
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT) {
+        return true;
+    }
+    return video_backend == VIDEO_BACKEND_BGA &&
+           (bga_read(VBE_DISPI_INDEX_ENABLE) & VBE_DISPI_ENABLED) != 0;
 }
 
 static uint8_t text_attr_foreground(uint8_t attr) {
     switch (attr & 0x0Fu) {
         case 0x0: return color_black;
         case 0x1: return color_blue_dark;
+        case 0x2: return color_green;
         case 0x4: return color_red;
         case 0x7: return color_gray_light;
         case 0x9: return color_blue;
@@ -73,6 +92,7 @@ static uint8_t text_attr_foreground(uint8_t attr) {
 static uint8_t text_attr_background(uint8_t attr) {
     switch ((attr >> 4) & 0x07u) {
         case 0x1: return color_blue_dark;
+        case 0x2: return color_green;
         case 0x4: return color_red;
         case 0x7: return color_gray_light;
         default: return color_black;
@@ -758,17 +778,26 @@ static void present(void) {
 /*
  * Whether a partial scan-out can be honoured at all.
  *
- * A scaled output, a backend that owns the whole screen (the VGA planar and
- * VMware SVGA paths) or a framebuffer smaller than the canvas all force the
- * full-frame scan-out instead. Callers that would otherwise spread one
- * change over two rectangles ask this first: on those backends two
- * rectangles are two whole frames painted, not one small one.
+ * A scaled output, the VGA planar backend (which owns the whole screen) or a
+ * framebuffer smaller than the canvas all force the full-frame scan-out
+ * instead. VMware SVGA is supported now that vmware_update_rect() can tell
+ * the host which rectangle changed: the guest writes only those pixels and
+ * the host refresh costs the same rectangle, not the whole 640x480.
  */
 static bool present_partial_supported(void) {
     return present_content_width == OS_WIDTH && present_content_height == OS_HEIGHT &&
            fb.width >= OS_WIDTH && fb.height >= OS_HEIGHT &&
-           video_backend != VIDEO_BACKEND_VGA &&
-           video_backend != VIDEO_BACKEND_VMWARE_SVGA;
+           video_backend != VIDEO_BACKEND_VGA;
+}
+
+/* Is the output a true RGB565 surface that can take the RGB565 shadow
+ * plane verbatim? Mirrors the direct565 test in present(); kept in one
+ * place so a partial scan-out cannot disagree with the full one. */
+static bool present_direct565(void) {
+    return fb.bpp == 16 && fb.red_position == 11 && fb.green_position == 5 &&
+           fb.blue_position == 0 && fb.red_mask_size == 5 &&
+           fb.green_mask_size == 6 && fb.blue_mask_size == 5 &&
+           settings_applied.palette_mode == 2;
 }
 
 /*
@@ -810,12 +839,10 @@ static void present_rect(int x, int y, int w, int h) {
                              (size_t)present_offset_x + (size_t)x,
                          &backbuffer[(size_t)row * OS_WIDTH + x], (size_t)w);
         }
-        return;
-    }
-
-    {
+    } else {
         const uint32_t *lut = present_lut_ready();
         const size_t left_bytes = (size_t)present_offset_x * output_bytes_per_pixel();
+        const bool direct565 = (fb.bpp == 16) && present_direct565();
 
         for (int row = y; row < y + h; ++row) {
             const uint16_t *src = &backbuffer_rgb565[(size_t)row * OS_WIDTH + x];
@@ -823,7 +850,13 @@ static void present_rect(int x, int y, int w, int h) {
                             left_bytes + (size_t)x * output_bytes_per_pixel();
 
             if (fb.bpp == 15 || fb.bpp == 16) {
-                present_row_16(src, (uint16_t *)(void *)dest, (uint32_t)w, lut);
+                if (direct565) {
+                    /* True-color RGB565 output: the shadow plane already
+                     * holds the exact bytes, so skip the LUT loop. */
+                    memcpy_local(dest, src, (size_t)w * 2u);
+                } else {
+                    present_row_16(src, (uint16_t *)(void *)dest, (uint32_t)w, lut);
+                }
             } else if (fb.bpp == 24) {
                 present_row_24(src, dest, (uint32_t)w, lut);
             } else {
@@ -832,6 +865,11 @@ static void present_rect(int x, int y, int w, int h) {
         }
     }
 
+    if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {
+        /* The host only needs to refresh the pixels just written. Screen
+         * coordinates: the desktop rectangle plus its letterbox offset. */
+        vmware_update_rect(x + present_offset_x, y + present_offset_y, w, h);
+    }
 }
 
 static void clear_screen(uint8_t color) {
@@ -1139,17 +1177,85 @@ static void draw_text_scaled(int x, int y, const char *text, uint8_t fg, uint8_t
     }
 }
 
+/*
+ * Centre every line of a (possibly multi-line) string on its own width.
+ *
+ * strlen() over the whole block counted the newline and every later line,
+ * so a two-line message was shifted left by half of ALL its characters and
+ * both lines then started at that same x. That is what pushed DOOM's
+ * "Not enough RAM for DOOM" / "(need 10 MB, machine has less)" notice off
+ * the left edge of its window: the first line was wider than the space the
+ * whole block left it. Per-line centring keeps each line inside the window
+ * and matches the newline-aware draw_text() above (10px line pitch).
+ */
 static void draw_text_center(int center_x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent) {
-    int x = center_x - (int)(strlen_local(text) * 8) / 2;
-    draw_text(x, y, text, fg, bg, transparent);
+    const char *line = text;
+
+    for (;;) {
+        const char *end = line;
+        const char *p;
+        int x;
+
+        while (*end != '\0' && *end != '\n') {
+            ++end;
+        }
+        x = center_x - (int)(end - line) * 8 / 2;
+        for (p = line; p < end; ++p) {
+            draw_char(x, y, *p, fg, bg, transparent);
+            x += 8;
+        }
+        if (*end == '\0') {
+            return;
+        }
+        line = end + 1;
+        y += 10;
+    }
 }
 
 static void draw_text_center_scaled(int center_x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent, int scale) {
     if (scale < 1) {
         scale = 1;
     }
-    int x = center_x - (int)(strlen_local(text) * 8 * scale) / 2;
-    draw_text_scaled(x, y, text, fg, bg, transparent, scale);
+    const char *line = text;
+
+    for (;;) {
+        const char *end = line;
+        const char *p;
+        int x;
+
+        while (*end != '\0' && *end != '\n') {
+            ++end;
+        }
+        x = center_x - (int)(end - line) * 8 * scale / 2;
+        for (p = line; p < end; ++p) {
+            draw_char_scaled(x, y, *p, fg, bg, transparent, scale);
+            x += 8 * scale;
+        }
+        if (*end == '\0') {
+            return;
+        }
+        line = end + 1;
+        y += 10 * scale;
+    }
+}
+
+/*
+ * Emulated text cell height for the framebuffer text screens.  The default
+ * 8x16 cell leaves an 8px gap between boot-screen lines; a screen that asks
+ * for denser text (the xHCI input check) can shrink it to 14px so the white
+ * diagnostic lines sit closer together.  Native VGA text mode is hardware
+ * 8x16 and ignores this value.
+ */
+static int text_mode_cell_height = 16;
+
+static void text_mode_set_cell_height(int height) {
+    if (height < 8) {
+        height = 8;
+    }
+    if (height > 16) {
+        height = 16;
+    }
+    text_mode_cell_height = height;
 }
 
 static void framebuffer_text_write_at(int col, int row, const char *text, uint8_t attr) {
@@ -1168,10 +1274,11 @@ static void framebuffer_text_write_at(int col, int row, const char *text, uint8_
     }
 
     x = col * 8;
-    y = row * 16;
+    y = row * text_mode_cell_height;
     for (int i = 0; text[i] != '\0' && col + i < VGA_TEXT_COLS; ++i) {
-        fill_rect(x + i * 8, y, 8, 16, bg);
-        draw_char(x + i * 8, y + 4, text[i], fg, bg, true);
+        fill_rect(x + i * 8, y, 8, text_mode_cell_height, bg);
+        draw_char(x + i * 8, y + (text_mode_cell_height - 8) / 2,
+                  text[i], fg, bg, true);
     }
 }
 
@@ -1229,7 +1336,8 @@ static void vga_text_enable_cursor(uint8_t cursor_start, uint8_t cursor_end) {
 static void vga_text_set_cursor(int col, int row) {
     uint16_t pos = (uint16_t)(row * VGA_TEXT_COLS + col);
     if (framebuffer_text_mode_active()) {
-        fill_rect(col * 8, row * 16 + 14, 8, 2, color_gray_light);
+        fill_rect(col * 8, row * text_mode_cell_height + text_mode_cell_height - 2,
+                  8, 2, color_gray_light);
         return;
     }
 
@@ -1772,6 +1880,117 @@ static void draw_image_at(const uint8_t *image, int x, int y, bool transparent) 
  * knows: v3 packed4 (what the backgrounds ship as), v2 rgb565 with the index
  * LUT, and v1 with its stored index plane.
  */
+/*
+ * Run starts for the packed4 nearest-neighbour wallpaper path.
+ *
+ * The old stretch loop walked destination pixels and advanced a source
+ * accumulator for every one of them.  At 1024x768+ that is a million
+ * iterations of format tests, palette bounds checks and accumulator
+ * updates for a 640x480 painting.  A 4bpp wallpaper only has one colour
+ * lookup per SOURCE pixel, so build the destination spans once per frame
+ * and paint each span with the already-resolved colour.  The spans are
+ * identical for every row; only the source row changes.
+ */
+static uint16_t packed4_run_start[MAX_OUTPUT_WIDTH + 1];
+
+static void packed4_build_run_starts(int src_w, int dst_w) {
+    int sx = 0;
+    int acc = 0;
+
+    for (int i = 0; i <= src_w; ++i) {
+        packed4_run_start[i] = 0;
+    }
+
+    for (int x = 0; x < dst_w; ++x) {
+        acc += src_w;
+        while (acc >= dst_w) {
+            acc -= dst_w;
+            ++sx;
+            if (sx <= src_w) {
+                packed4_run_start[sx] = (uint16_t)(x + 1);
+            }
+        }
+    }
+
+    /* Defensive: a future caller with a degenerate scale must not leave a
+     * trailing span pointing at column 0. */
+    for (int i = sx + 1; i <= src_w; ++i) {
+        packed4_run_start[i] = (uint16_t)dst_w;
+    }
+}
+
+static void draw_packed4_stretched(const uint8_t *image, int src_w, int src_h,
+                                   int dst_w, int dst_h,
+                                   const uint16_t *pal_rgb,
+                                   const uint8_t *pal_index, int pal_count,
+                                   bool want_rgb) {
+    const uint8_t *packed = image_packed4_pixels(image);
+    uint32_t stride = ((uint32_t)src_w + 1u) / 2u;
+    int sy = 0;
+    int acc_y = 0;
+
+    packed4_build_run_starts(src_w, dst_w);
+
+    for (int y = 0; y < dst_h; ++y) {
+        const uint8_t *row = packed + (size_t)sy * stride;
+        uint16_t *dest_r = &backbuffer_rgb565[(size_t)y * (size_t)dst_w];
+        uint8_t *dest_p = &backbuffer[(size_t)y * (size_t)dst_w];
+
+        if (want_rgb) {
+            for (int sx = 0; sx < src_w; ++sx) {
+                int x0 = packed4_run_start[sx];
+                int x1 = packed4_run_start[sx + 1];
+                uint8_t byte;
+                int entry;
+                uint16_t color;
+
+                if (x1 <= x0) {
+                    continue;
+                }
+                byte = row[(uint32_t)sx >> 1];
+                entry = (int)((sx & 1) ? (byte & 0x0Fu) : (byte >> 4));
+                if (entry >= pal_count) {
+                    entry = 0;
+                }
+                color = pal_rgb[entry];
+                for (int x = x0; x < x1; ++x) {
+                    dest_r[x] = color;
+                }
+            }
+        } else {
+            for (int sx = 0; sx < src_w; ++sx) {
+                int x0 = packed4_run_start[sx];
+                int x1 = packed4_run_start[sx + 1];
+                uint8_t byte;
+                int entry;
+                uint8_t color;
+
+                if (x1 <= x0) {
+                    continue;
+                }
+                byte = row[(uint32_t)sx >> 1];
+                entry = (int)((sx & 1) ? (byte & 0x0Fu) : (byte >> 4));
+                if (entry >= pal_count) {
+                    entry = 0;
+                }
+                color = pal_index[entry];
+                for (int x = x0; x < x1; ++x) {
+                    dest_p[x] = color;
+                }
+            }
+        }
+
+        acc_y += src_h;
+        while (acc_y >= dst_h) {
+            acc_y -= dst_h;
+            ++sy;
+        }
+        if (sy >= src_h) {
+            sy = src_h - 1;
+        }
+    }
+}
+
 static void draw_image_stretched(const uint8_t *image) {
     uint16_t src_w = image_width(image);
     uint16_t src_h = image_height(image);
@@ -1815,6 +2034,11 @@ static void draw_image_stretched(const uint8_t *image) {
 
     if (packed4) {
         packed4_palette_resolve(image, pal_rgb, pal_index, &pal_count);
+        if ((int)src_w <= MAX_OUTPUT_WIDTH) {
+            draw_packed4_stretched(image, (int)src_w, (int)src_h, dst_w, dst_h,
+                                   pal_rgb, pal_index, pal_count, want_rgb);
+            return;
+        }
     } else if (!rgb565_index_lut_ready && image_is_v2(image)) {
         rgb565_index_lut_build();
     }

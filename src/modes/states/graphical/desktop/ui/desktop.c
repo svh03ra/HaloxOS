@@ -3,7 +3,60 @@
 
 // This repository is licensed under the GNU General Public License.
 
+/*
+ * The debugger overlay covers nearly the whole screen.  Once it has been
+ * painted over a complete desktop frame, a redraw that only changes the
+ * overlay (a log line, the bitmap scroll, the terminal cursor blink) can
+ * repaint the overlay in place instead of recompositing the wallpaper,
+ * every window and the taskbar underneath it.  The cached backdrop stays
+ * valid until the overlay closes; the first frame after it opens is
+ * always a full render, so the pixels outside the overlay are real.
+ */
+static bool debug_overlay_backdrop_ready = false;
+static bool debug_overlay_was_open = false;
+/* The overlay is not one fixed rectangle: the terminal log covers the top
+ * half, the memory viewer nearly the whole screen.  Repainting only the
+ * new rectangle after a switch left the old bitmap visible below the log
+ * (and left the old FPS box behind when the overlay was hidden).  These
+ * remember the shape the cached backdrop was built for, so a shape change
+ * takes the full-render path once. */
+static bool debug_overlay_was_memory_view = false;
+static bool debug_overlay_was_fps = false;
+/* A video-mode change clears the shadow planes and the scan-out, so the
+ * cached backdrop is gone even though the overlay shape did not change. */
+static int debug_overlay_was_fb_width = 0;
+static int debug_overlay_was_fb_height = 0;
+static int debug_overlay_was_fb_bpp = 0;
+static int debug_overlay_was_canvas_w = 0;
+static int debug_overlay_was_canvas_h = 0;
+
 static void render_desktop(void) {
+    if (debug_overlay_open && debug_overlay_was_open && debug_overlay_backdrop_ready &&
+        debug_overlay_was_memory_view == debug_memory_view_open &&
+        debug_overlay_was_fps == fps_overlay_on &&
+        debug_overlay_was_fb_width == fb.width &&
+        debug_overlay_was_fb_height == fb.height &&
+        debug_overlay_was_fb_bpp == fb.bpp &&
+        debug_overlay_was_canvas_w == OS_WIDTH &&
+        debug_overlay_was_canvas_h == OS_HEIGHT) {
+        cursor_hand_hint = false;
+        /* The overlay does not cover the whole screen, and the pointer is
+         * free to sit outside it.  Put the save-under pixels back FIRST;
+         * the old code discarded the snapshot after repainting the overlay,
+         * so a pointer outside the box left its previous image behind on
+         * every move.  Restoring before the overlay also handles a pointer
+         * that WAS over the box: the overlay repaint covers those pixels
+         * again, and render_cursor() takes a fresh snapshot. */
+        cursor_capture_restore();
+        render_debug_overlay();
+        if (debug_memory_pointer_visible()) {
+            render_cursor();
+        } else {
+            cursor_book_not_painted();
+        }
+        return;
+    }
+
     cursor_hand_hint = false;
     /* Fresh assumption for this frame's widgets; render_app_window narrows
      * it to the window that actually owns the pointer (see widgets.c). */
@@ -54,7 +107,7 @@ static void render_desktop(void) {
                 } else {
                     for (int py = trail_y[i]; py < trail_y[i] + trail_h[i]; ++py) {
                         for (int px = trail_x[i]; px < trail_x[i] + trail_w[i]; ++px) {
-                            if (((px + py) & 3) < density) {
+                            if (ui_checker_dot(px, py, density)) {
                                 draw_pixel(px, py, col);
                             }
                         }
@@ -82,6 +135,7 @@ static void render_desktop(void) {
     }
     if (active_test_window >= 0 && active_test_window < test_window_count && test_windows[active_test_window].open) {
         ui_window_interactive = desktop_window_owns_pointer(&test_windows[active_test_window]);
+        draw_window_drop_shadow(&test_windows[active_test_window]);
         draw_window_chrome(&test_windows[active_test_window]);
         draw_text_center(test_windows[active_test_window].x + test_windows[active_test_window].w / 2, test_windows[active_test_window].y + test_windows[active_test_window].h / 2 - 4, "This is a test!", color_black, color_gray_light, true);
     }
@@ -105,7 +159,7 @@ static void render_desktop(void) {
             int threshold = ((int)age * 3) / 17 + 1;
             for (int py = window_fade_y; py < window_fade_y + window_fade_h; ++py) {
                 for (int px = window_fade_x; px < window_fade_x + window_fade_w; ++px) {
-                    if (((px + py) & 3) < threshold) {
+                    if (ui_checker_dot(px, py, threshold)) {
                         draw_pixel(px, py, color_black);
                     }
                 }
@@ -114,13 +168,26 @@ static void render_desktop(void) {
     }
 
     render_debug_overlay();
-    if (!debug_overlay_open) {
+    if (!debug_overlay_open || debug_memory_pointer_visible()) {
+        /* The pointer is stamped over the memory-viewer box; the terminal
+         * overlay and the wallpaper strip around the box hide it. */
         render_cursor();
     } else {
-        /* No cursor is stamped while the overlay owns the screen, but the
-         * redraw gate still compares the live pointer with the painted
-         * one - book the live position so an idle overlay does not force
-         * full repaints every frame. */
+        /* No cursor is stamped there; the full frame just painted over any
+         * old stamp, so retire the save-under too.  The redraw gate still
+         * compares the live pointer with the painted one - book the live
+         * position so an idle overlay does not force full repaints. */
         cursor_book_not_painted();
+        cursor_invalidate_capture();
     }
+
+    debug_overlay_backdrop_ready = debug_overlay_open;
+    debug_overlay_was_open = debug_overlay_open;
+    debug_overlay_was_memory_view = debug_memory_view_open;
+    debug_overlay_was_fps = fps_overlay_on;
+    debug_overlay_was_fb_width = fb.width;
+    debug_overlay_was_fb_height = fb.height;
+    debug_overlay_was_fb_bpp = fb.bpp;
+    debug_overlay_was_canvas_w = OS_WIDTH;
+    debug_overlay_was_canvas_h = OS_HEIGHT;
 }

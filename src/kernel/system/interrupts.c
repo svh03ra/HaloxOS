@@ -63,9 +63,10 @@ static void init_interrupts(void) {
         set_idt_gate((uint8_t)i, exception_stubs[i], 0x8E);
     }
     set_idt_gate(32, irq0_stub, 0x8E);
+    set_idt_gate(33, irq1_stub, 0x8E);
     set_idt_gate(44, irq12_stub, 0x8E);
     for (int i = 33; i <= 47; ++i) {
-        if (i == 44) {
+        if (i == 33 || i == 44) {
             continue;
         }
         set_idt_gate((uint8_t)i, irq_default_stub, 0x8E);

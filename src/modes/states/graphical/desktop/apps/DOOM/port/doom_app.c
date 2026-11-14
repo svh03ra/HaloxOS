@@ -317,6 +317,15 @@ static void update_doom(void) {
             doom_last_mouse_x = lock_x;
             doom_last_mouse_y = lock_y;
         }
+
+        /* Captured mouse motion is game input, not a desktop edit.  The
+         * input driver raises ui_input_dirty for every packet; leaving it
+         * set forced a complete desktop recomposite on every game frame
+         * the moment the player moved the mouse.  The DOOM-only fast path
+         * repaints the game window itself, which is all this input can
+         * change.  Keyboard edges still leave last_key_input_tick set, so
+         * a real key press gets its full repaint. */
+        ui_input_dirty = false;
     } else {
         /* While the pointer is released, keep the engine ticking but do not
          * translate desktop mouse movement/buttons into game input.  Keep

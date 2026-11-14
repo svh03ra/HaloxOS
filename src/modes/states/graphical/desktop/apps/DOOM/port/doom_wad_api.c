@@ -82,17 +82,24 @@ void doom_exit_stub(int code) {
 
 /* ---- alloca pool (r_data.c texture merge scratch) ---- */
 
-#define DOOM_ALLOCA_POOL (96 * 1024)
-static uint8_t doom_alloca_pool[DOOM_ALLOCA_POOL];
+static uint8_t *doom_alloca_pool = NULL;
+static size_t doom_alloca_pool_bytes = 0;
 static size_t doom_alloca_used = 0;
+
+void doom_alloca_set_pool(void *pool, size_t bytes) {
+    doom_alloca_pool = (uint8_t *)pool;
+    doom_alloca_pool_bytes = bytes;
+    doom_alloca_used = 0;
+}
 
 void *doom_alloca(size_t size) {
     if (size == 0) {
         size = 1;
     }
     size = (size + 15u) & ~(size_t)15u;
-    if (doom_alloca_used + size > DOOM_ALLOCA_POOL) {
+    if (doom_alloca_pool == NULL || doom_alloca_used + size > doom_alloca_pool_bytes) {
         I_Error("alloca pool exhausted");
+        return NULL;
     }
     void *p = &doom_alloca_pool[doom_alloca_used];
     doom_alloca_used += size;

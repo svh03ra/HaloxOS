@@ -4,7 +4,7 @@
 #
 # This repository is licensed under the GNU General Public License.
 #
-# Usage: mkcrashtable.py <kernel.bin> <out-dir> [--max N] [--empty]
+# Usage: mkcrashtable.py <kernel.bin> <out-dir> [--max N] [--empty] [--text]
 #
 # Writes two files into <out-dir>:
 #
@@ -28,6 +28,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 
 DEFAULT_MAX = 400
 
@@ -41,6 +42,7 @@ def parse_args(argv):
     out_dir = argv[2]
     limit = DEFAULT_MAX
     force_empty = False
+    text_only = False
 
     rest = argv[3:]
     i = 0
@@ -53,10 +55,17 @@ def parse_args(argv):
             force_empty = True
             i += 1
             continue
+        if rest[i] == "--text":
+            # Only code symbols: a return address can never land in .data,
+            # so letting data symbols into the table would only shadow a
+            # real frame with the nearest variable's name.
+            text_only = True
+            i += 1
+            continue
         sys.stderr.write("mkcrashtable.py: unknown option %s\n" % rest[i])
         raise SystemExit(2)
 
-    return kernel, out_dir, limit, force_empty
+    return kernel, out_dir, limit, force_empty, text_only
 
 
 def write_if_changed(path, text):
@@ -128,18 +137,51 @@ def c_string(value):
     return "".join(out)
 
 
+def tool(name):
+    """Prefer the binutils that ship beside this Python interpreter.
+
+    A mingw64 Python launching the MSYS nm can spin forever inside the MSYS
+    runtime even when stdout is a regular file.  Both interpreters are used
+    on this tree depending on PATH order, so pick the matching nm/addr2line
+    explicitly and fall back to PATH only when it is not there.
+    """
+    exe = name + ".exe" if os.name == "nt" else name
+    candidate = os.path.join(os.path.dirname(sys.executable), exe)
+    if os.path.isfile(candidate):
+        return candidate
+    return name
+
+
 def run(command):
-    return subprocess.run(command, capture_output=True, text=True, errors="replace").stdout
+    """Run a tool and return its stdout.
+
+    Use a temporary file instead of capture_output/pipe.  The kernel symbol
+    table can outgrow the pipe buffer, and a file also keeps the much larger
+    addr2line output from depending on concurrent pipe draining.
+    """
+    handle, path = tempfile.mkstemp(prefix="mkcrashtable-", suffix=".txt")
+    os.close(handle)
+    try:
+        with open(path, "wb") as out:
+            subprocess.run(command, stdout=out, stderr=subprocess.DEVNULL)
+        with open(path, "r", encoding="utf-8", errors="replace") as inp:
+            return inp.read()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
-def collect_symbols(kernel, limit):
+def collect_symbols(kernel, limit, text_only=False):
     symbols = []
-    for line in run(["nm", "-n", "--defined-only", kernel]).splitlines():
+    allowed_kinds = "tT" if text_only else "tTdDrRbB"
+    for line in run([tool("nm"), "-n", "--defined-only", kernel]).splitlines():
         parts = line.split(None, 2)
         if len(parts) != 3:
             continue
         addr, kind, name = parts
-        if kind not in "tTdDrRbB" or not name:
+        if kind not in allowed_kinds or not name:
             continue
         try:
             value = int(addr, 16)
@@ -155,10 +197,16 @@ def normalize_file(path):
     if not path or path.startswith("?"):
         return "unknown"
 
+    # addr2line reports the path of whatever tree the build ran in.
+    # Keep source locations repository-relative so the crash screen shows
+    # "src/kernel/kernel.c", not "HaloxOS/src/kernel/kernel.c".
+    path = path.replace("\\", "/")
     marker = "/HaloxOS/"
     index = path.rfind(marker)
     if index >= 0:
         path = path[index + len(marker):]
+    elif path.startswith("HaloxOS/"):
+        path = path[len("HaloxOS/"):]
 
     while "/../" in path:
         head, _, tail = path.partition("/../")
@@ -170,7 +218,7 @@ def normalize_file(path):
 
     if path.startswith("?") or "/" not in path:
         return "unknown"
-    return "HaloxOS/" + path
+    return path
 
 
 def split_location(location):
@@ -193,7 +241,7 @@ def resolve_symbols(kernel, symbols):
 
     addresses = ["0x%08x" % addr for addr, _ in symbols]
     # One addr2line process for the whole table: two output lines per address.
-    output = run(["addr2line", "-e", kernel, "-f", "-C"] + addresses).splitlines()
+    output = run([tool("addr2line"), "-e", kernel, "-f", "-C"] + addresses).splitlines()
 
     entries = []
     for index, (addr, name) in enumerate(symbols):
@@ -208,7 +256,7 @@ def resolve_symbols(kernel, symbols):
 
 
 def main():
-    kernel, out_dir, limit, force_empty = parse_args(sys.argv)
+    kernel, out_dir, limit, force_empty, text_only = parse_args(sys.argv)
     os.makedirs(out_dir, exist_ok=True)
 
     header_path = os.path.join(out_dir, "crash_symbols.h")
@@ -220,7 +268,7 @@ def main():
 
     entries = []
     if not force_empty and os.path.isfile(kernel):
-        entries = resolve_symbols(kernel, collect_symbols(kernel, limit))
+        entries = resolve_symbols(kernel, collect_symbols(kernel, limit, text_only))
 
     changed = write_if_changed(data_path, data_text(entries, limit))
     if changed:

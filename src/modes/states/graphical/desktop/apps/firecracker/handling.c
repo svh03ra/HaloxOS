@@ -8,6 +8,12 @@ static void box3d_handle_key(KeyEvent event) {
         box3d_mode = 0;
     } else if (event.code == KEY_RIGHT) {
         box3d_mode = 1;
+    } else if (event.code == KEY_UP) {
+        box3d_shape = 0;
+    } else if (event.code == KEY_DOWN) {
+        box3d_shape = 1;
+    } else if (event.ch >= '0' && event.ch <= '9') {
+        box3d_color_index = (uint8_t)(event.ch - '0');
     }
 }
 

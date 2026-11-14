@@ -1,10 +1,8 @@
 /*
-    HaloxOS - Version 1.0 Release!
+    HaloxOS - Version 1.1 Release!
     Copyright Svh03ra (C) 2026, All rights reserved.
     Source File: kernel.c, main core.
-    Build: 19th June 2026.
-
-    Made in AI used: GPT-5.5 for Visual Code Editor at Codex.
+    Build: 14th November 2026.
 */
 
 /*  This repository is licensed under the GNU General Public License.
@@ -17,7 +15,14 @@
 #include <stdint.h>
 
 #include "build_info.h"
+#include "ram_requirement.h"
 #include "../../config/config.h"
+
+/* Defined later (serial.c / doom_i_system.c) but used by the shadow-plane
+ * allocator, which runs before both includes in this translation unit. */
+static void serial_trace_hex_value(const char *level, const char *label, uint32_t value);
+static void serial_trace_uint_value(const char *level, const char *label, uint32_t value);
+static uint32_t doom_zone_limit(void);
 
 // Backgrounds
 extern const uint8_t _binary_build_login_bin_start[];
@@ -40,6 +45,22 @@ extern const uint8_t _binary_build_power_icon_bin_start[];
 extern const uint8_t _binary_build_box3d_icon_bin_start[];
 extern const uint8_t _binary_build_firecracker_icon_bin_start[];
 extern const uint8_t _binary_build_doom_icon_bin_start[];
+extern const uint8_t _binary_build_coinrun_icon_bin_start[];
+extern const uint8_t _binary_build_stress_icon_bin_start[];
+extern const uint8_t _binary_build_coin_spr_player_bin_start[];
+extern const uint8_t _binary_build_coin_spr_player_flip_bin_start[];
+extern const uint8_t _binary_build_coin_spr_skull_bin_start[];
+extern const uint8_t _binary_build_coin_spr_brick_bin_start[];
+extern const uint8_t _binary_build_coin_spr_coin1_bin_start[];
+extern const uint8_t _binary_build_coin_spr_coin1_flip_bin_start[];
+extern const uint8_t _binary_build_coin_spr_coin2_bin_start[];
+extern const uint8_t _binary_build_coin_spr_coin2_flip_bin_start[];
+extern const uint8_t _binary_build_coin_spr_coin3_bin_start[];
+extern const uint8_t _binary_build_coin_spr_coin3_flip_bin_start[];
+extern const uint8_t _binary_build_coin_spr_coin4_bin_start[];
+extern const uint8_t _binary_build_coin_spr_1up_bin_start[];
+extern const uint8_t _binary_build_coin_spr_hud_lives_bin_start[];
+extern const uint8_t _binary_build_coin_spr_hud_clock_bin_start[];
 
 /*
  * The logical desktop canvas.
@@ -56,15 +77,16 @@ extern const uint8_t _binary_build_doom_icon_bin_start[];
  * the 640x480 base keep the base canvas and get sampled down, which is the
  * historical low-resolution behaviour.
  *
- * The canvas is capped because the two shadow planes are one statically
- * sized buffer: the cap is what holds the kernel's RAM span - and therefore
- * the boot floor - where it is. A mode larger than the cap still works; its
- * canvas is centred 1:1 inside it.
+ * The canvas is capped as a memory/performance guard, not because the shadow
+ * plane is a fixed array: the plane is reserved from free RAM and the canvas
+ * shrinks to fit (see shadow_plane_reserve). A 1920x1200 cap lets the common
+ * 1080p/1200p modes fill the display; on a machine without the RAM for that,
+ * the smaller canvas is still centred 1:1 inside the mode.
  */
 #define OS_BASE_WIDTH 640
 #define OS_BASE_HEIGHT 480
-#define OS_MAX_CANVAS_WIDTH 1440
-#define OS_MAX_CANVAS_HEIGHT 900
+#define OS_MAX_CANVAS_WIDTH 1920
+#define OS_MAX_CANVAS_HEIGHT 1200
 #define MAX_OUTPUT_WIDTH 1920
 #define MAX_OUTPUT_HEIGHT 1200
 
@@ -97,7 +119,16 @@ static int canvas_request_height = OS_BASE_HEIGHT;
       (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
       (HALOXOS_CONFIG_SCREEN_WIDTH == 1024 && HALOXOS_CONFIG_SCREEN_HEIGHT == 768) || \
       (HALOXOS_CONFIG_SCREEN_WIDTH == 1366 && HALOXOS_CONFIG_SCREEN_HEIGHT == 768) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 800))
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 800) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1152 && HALOXOS_CONFIG_SCREEN_HEIGHT == 864) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1024) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1400 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1050) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1440 && HALOXOS_CONFIG_SCREEN_HEIGHT == 900) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1600 && HALOXOS_CONFIG_SCREEN_HEIGHT == 900) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1600 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1200) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1680 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1050) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1920 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1080) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1920 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1200))
 #error "Unsupported HALOXOS_CONFIG_SCREEN_WIDTH/HALOXOS_CONFIG_SCREEN_HEIGHT pair"
 #endif
 
@@ -108,68 +139,82 @@ static int canvas_request_height = OS_BASE_HEIGHT;
 /*
  * The mode table: one entry per click of the resolution arrows, ordered by
  * size inside each column. The widescreen checkbox picks the column, so an
- * index means "that size class" in either one - index 5 is the 960x720
+ * index means "that size class" in either one - index 2 is the 960x720
  * desktop in 4:3 and the 1280x800 one in widescreen.
  *
- * The entries above the 640x480 base are the "gap" modes real hardware and
- * VMs actually offer (800x600, 1024x768, 1280x800, 1366x768) - none of them
- * is a scaled copy of another, each one is rendered natively at 1:1.
+ * The table starts at 480p. The 1xx-3xx entries (192x144, 320x240, 480x360
+ * and the wide 256x144, 426x240, 640x360) only existed as canvases sampled
+ * down into tiny outputs; on the hardware this OS targets they made the
+ * arrows walk through sizes no display wants to land on. Every entry that
+ * remains is rendered natively at 1:1.
  */
 typedef struct {
     uint16_t width;
     uint16_t height;
 } VideoModeOption;
 
-#define VIDEO_MODE_COUNT 7
+#define VIDEO_MODE_COUNT_4_3 8
+#define VIDEO_MODE_COUNT_WIDE 9
 
-static const VideoModeOption video_modes_4_3[VIDEO_MODE_COUNT] = {
-    {192, 144},
-    {320, 240},
-    {480, 360},
+static const VideoModeOption video_modes_4_3[VIDEO_MODE_COUNT_4_3] = {
     {640, 480},
     {800, 600},
     {960, 720},
-    {1024, 768}
+    {1024, 768},
+    {1152, 864},
+    {1280, 1024},
+    {1400, 1050},
+    {1600, 1200}
 };
 
-static const VideoModeOption video_modes_wide[VIDEO_MODE_COUNT] = {
-    {256, 144},
-    {426, 240},
-    {640, 360},
+static const VideoModeOption video_modes_wide[VIDEO_MODE_COUNT_WIDE] = {
     {854, 480},
     {1280, 720},
     {1280, 800},
-    {1366, 768}
+    {1366, 768},
+    {1440, 900},
+    {1600, 900},
+    {1680, 1050},
+    {1920, 1080},
+    {1920, 1200}
 };
 
-#if (HALOXOS_CONFIG_SCREEN_WIDTH == 192 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144) || \
-    (HALOXOS_CONFIG_SCREEN_WIDTH == 256 && HALOXOS_CONFIG_SCREEN_HEIGHT == 144)
+#if (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 854 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 0
-#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 320 && HALOXOS_CONFIG_SCREEN_HEIGHT == 240) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 426 && HALOXOS_CONFIG_SCREEN_HEIGHT == 240)
-#define HALOXOS_CONFIG_RESOLUTION_MODE 1
-#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 480 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360)
-#define HALOXOS_CONFIG_RESOLUTION_MODE 2
-#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
-      (HALOXOS_CONFIG_SCREEN_WIDTH == 854 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480)
-#define HALOXOS_CONFIG_RESOLUTION_MODE 3
 #elif (HALOXOS_CONFIG_SCREEN_WIDTH == 800 && HALOXOS_CONFIG_SCREEN_HEIGHT == 600) || \
       (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720)
-#define HALOXOS_CONFIG_RESOLUTION_MODE 4
+#define HALOXOS_CONFIG_RESOLUTION_MODE 1
 #elif (HALOXOS_CONFIG_SCREEN_WIDTH == 960 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
       (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 800)
+#define HALOXOS_CONFIG_RESOLUTION_MODE 2
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 1152 && HALOXOS_CONFIG_SCREEN_HEIGHT == 864) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1440 && HALOXOS_CONFIG_SCREEN_HEIGHT == 900)
+#define HALOXOS_CONFIG_RESOLUTION_MODE 4
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1024) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1600 && HALOXOS_CONFIG_SCREEN_HEIGHT == 900)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 5
-#else
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 1400 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1050) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1680 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1050)
 #define HALOXOS_CONFIG_RESOLUTION_MODE 6
+#elif (HALOXOS_CONFIG_SCREEN_WIDTH == 1600 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1200) || \
+      (HALOXOS_CONFIG_SCREEN_WIDTH == 1920 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1080)
+#define HALOXOS_CONFIG_RESOLUTION_MODE 7
+#elif HALOXOS_CONFIG_SCREEN_WIDTH == 1920 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1200
+#define HALOXOS_CONFIG_RESOLUTION_MODE 8
+#else
+#define HALOXOS_CONFIG_RESOLUTION_MODE 3
 #endif
 
-#if HALOXOS_CONFIG_SCREEN_WIDTH == 1280 || \
-    HALOXOS_CONFIG_SCREEN_WIDTH == 1366 || \
-    HALOXOS_CONFIG_SCREEN_WIDTH == 854 || \
-    (HALOXOS_CONFIG_SCREEN_WIDTH == 640 && HALOXOS_CONFIG_SCREEN_HEIGHT == 360) || \
-    HALOXOS_CONFIG_SCREEN_WIDTH == 426 || \
-    HALOXOS_CONFIG_SCREEN_WIDTH == 256
+#if (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 720) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 1280 && HALOXOS_CONFIG_SCREEN_HEIGHT == 800) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 1366 && HALOXOS_CONFIG_SCREEN_HEIGHT == 768) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 854 && HALOXOS_CONFIG_SCREEN_HEIGHT == 480) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 1440 && HALOXOS_CONFIG_SCREEN_HEIGHT == 900) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 1600 && HALOXOS_CONFIG_SCREEN_HEIGHT == 900) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 1680 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1050) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 1920 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1080) || \
+    (HALOXOS_CONFIG_SCREEN_WIDTH == 1920 && HALOXOS_CONFIG_SCREEN_HEIGHT == 1200)
 #define HALOXOS_CONFIG_WIDESCREEN 1
 #else
 #define HALOXOS_CONFIG_WIDESCREEN 0
@@ -199,10 +244,13 @@ static const VideoModeOption video_modes_wide[VIDEO_MODE_COUNT] = {
 #define DEBUG_HISTORY_COUNT 8
 #define DEBUG_EDITED_RANGE_COUNT 32
 #define DEBUG_MEMORY_BYTES_PER_ROW 16
-#define DEBUG_MEMORY_VISUAL_W 430
-#define DEBUG_MEMORY_VISUAL_H 240
+/* Default bitmap size; the viewer's Width/Height boxes change it at run
+ * time, so these are only the starting point (see debug_memory_visual_w
+ * in debugger.c). */
+#define DEBUG_MEMORY_VISUAL_DEFAULT_W 430
+#define DEBUG_MEMORY_VISUAL_DEFAULT_H 240
 #define DEBUG_MEMORY_MAX_EDIT_LENGTH 0x10000u
-#define APP_COUNT 15
+#define APP_COUNT 17
 #define SNAKE_MAX_SEGMENTS 128
 #define MINES_SIZE 8
 #define MINES_COUNT 10
@@ -401,7 +449,9 @@ typedef enum {
     APP_DEMO_CENTER,
     APP_3D_BOX,
     APP_FIRECRACKER,
-    APP_DOOM
+    APP_DOOM,
+    APP_COIN_RUN,
+    APP_STRESS_TEST
 } AppId;
 
 typedef struct {
@@ -502,16 +552,18 @@ static const char *app_titles[APP_COUNT] = {
     "Paint",
     "Explorer",
     "Snake",
-    "Guess Num.",
-    "Minesw...",
-    "Games",
+    "Guess Number",
+    "Minesweeper",
+    "Game Center",
     "Power",
     "Settings",
-    "TaskMgr",
-    "Demos",
+    "Task Manager",
+    "Demo Center",
     "3D Box",
-    "Firecr..",
-    "DOOM"
+    "Firecracker",
+    "DOOM",
+    "Coin Run!",
+    "Stress Test"
 };
 
 static const uint8_t font8x8_basic[96][8] = {
@@ -559,20 +611,24 @@ static Window windows[APP_COUNT];
  * reserves the larger plane rather than both. The names below keep every
  * existing reference working unchanged.
  *
- * The storage is sized for the largest canvas the OS can grow to
- * (OS_MAX_CANVAS_*), not for the current mode: the canvas is re-picked on
- * every video mode change (see update_canvas_for_framebuffer below), and
- * that cap is what keeps this buffer - and the boot RAM floor - bounded.
+ * The buffer is NOT a static array.  A 1440x900 RGB565 plane is 2.47 MiB,
+ * and keeping it in .bss made every machine pay for the largest desktop it
+ * could ever ask for even when it booted at 640x480 - that single array was
+ * what held the boot floor at 8 MB.  It is now carved from the free RAM
+ * above the loader handoff block, sized to the canvas actually in use, and
+ * grown only when a bigger desktop is selected.  A 6 MB machine therefore
+ * boots 640x480 with ~0.6 MB of plane instead of ~2.5 MB, and a 5 MB
+ * machine boots the largest canvas that fits in its free RAM.  The
+ * allocation sits below the WAD module and above the DOOM zone (see
+ * doom_zone_limit), so neither can overlap it.
  */
-typedef union {
-    uint8_t index[OS_MAX_CANVAS_WIDTH * OS_MAX_CANVAS_HEIGHT];
-    uint16_t rgb565[OS_MAX_CANVAS_WIDTH * OS_MAX_CANVAS_HEIGHT];
-} ShadowPlaneStorage;
+static uint8_t *shadow_plane_index = NULL;
+static uint16_t *shadow_plane_rgb565 = NULL;
+static uint32_t shadow_plane_base = 0;
+static uint32_t shadow_plane_capacity = 0;
 
-static ShadowPlaneStorage shadow_planes;
-
-#define backbuffer (shadow_planes.index)
-#define backbuffer_rgb565 (shadow_planes.rgb565)
+#define backbuffer (shadow_plane_index)
+#define backbuffer_rgb565 (shadow_plane_rgb565)
 static Color palette[256];
 static IdtEntry idt[256];
 static KeyEvent key_queue[64];
@@ -608,6 +664,8 @@ static uint32_t demo_center_hover_tick = 0;
 
 /* 3D Box demo: rotating cube, mode 0 = wireframe, mode 1 = solid. */
 static uint8_t box3d_mode = 0;
+static uint8_t box3d_shape = 0;  /* 0 = cube, 1 = donut */
+static uint8_t box3d_color_index = 8; /* 0..7 fixed, 8 default, 9 disco */
 static int box3d_angle = 0;      /* yaw (Y axis) */
 static int box3d_angle_x = 0;    /* pitch (X axis): cube tumbles on XY */
 static uint32_t box3d_last_tick = 0;
@@ -693,6 +751,8 @@ static uint8_t color_red;
 static uint8_t color_yellow;
 static uint8_t color_orange;
 static uint8_t color_pink;
+static uint8_t color_indigo;
+static uint8_t color_violet;
 static uint8_t color_desktop_icon;
 
 static char notepad_text[MAX_TEXT];
@@ -710,9 +770,20 @@ static int debug_history_count = 0;
 static int debug_history_cursor = 0;
 static bool debug_memory_view_open = false;
 static DebugMemoryMode debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
+/* Bitmap-memory resolution, typed in the viewer's Width/Height boxes. */
+static uint32_t debug_memory_visual_width = DEBUG_MEMORY_VISUAL_DEFAULT_W;
+static uint32_t debug_memory_visual_height = DEBUG_MEMORY_VISUAL_DEFAULT_H;
+static int debug_memory_size_focus = -1;   /* -1 none, 0 width, 1 height */
+static char debug_memory_size_text[2][8];
+static int debug_memory_size_len[2];
+/* First digit typed after focusing a box replaces its contents, so a new
+ * size can be typed without backspacing the old one first. */
+static bool debug_memory_size_fresh = false;
 static uint32_t debug_memory_base = 0;
 static uint32_t debug_memory_cursor = 0;
 static int debug_memory_edit_nibble = -1;
+static bool debug_memory_scroll_drag = false;
+static int debug_memory_scroll_drag_offset = 0;
 static DebugEditedRange debug_edited_ranges[DEBUG_EDITED_RANGE_COUNT];
 static int debug_edited_range_count = 0;
 static const char *debug_forced_fault_reason = NULL;
@@ -725,16 +796,17 @@ static uint32_t fps_display = 0;        /* frames in the current window */
 static uint32_t fps_current = 0;       /* final FPS of the last window */
 static uint32_t fps_avg_ticks_x10 = 0;  /* avg frame time, ticks * 10 */
 static bool fps_lagging = false;        /* current frame dropped/lagged */
-static uint32_t fps_frames_total = 0;   /* frame counter for breakpoints */
 
 /* Breakpoints (debugger "breakpoint" command): one bit per AppId, plus
  * bit 15 = "all". When a targeted app renders, the debugger terminal
- * opens itself with a code + opcode trace. */
-static uint16_t debug_bp_mask = 0;
-static bool debug_bp_caught = false;
-static uint32_t debug_bp_frame_base = 0;   /* frame count when resumed */
+ * opens itself with a code + opcode trace. debug_bp_caught is the
+ * one-catch-per-frame latch: it stops the debugger's own overlay
+ * repaints from re-triggering the same frame, and a real desktop input
+ * clears it so the next frame (a click, a key, a new app action) can
+ * catch again. */
+static uint32_t debug_bp_mask = 0;
+static bool debug_bp_caught = false;        /* this frame already caught */
 static uint32_t debug_bp_catch_count = 0;   /* catches since armed */
-static uint32_t debug_bp_last_catch_tick = 0; /* rate limit: 1 catch per frame */
 static bool debug_bp_armed = false;         /* armed AND resumed */
 
 static uint8_t paint_canvas[PAINT_CANVAS_W * PAINT_CANVAS_H];
@@ -763,11 +835,15 @@ static char guess_input[8];
 static int guess_input_len = 0;
 static int guess_target = 0;
 static char guess_message[64] = "Guess a number from 1 to 100.";
+static bool guess_input_focused = false;
 
 static uint8_t mines_value[MINES_SIZE][MINES_SIZE];
 static bool mines_revealed[MINES_SIZE][MINES_SIZE];
 static bool mines_flagged[MINES_SIZE][MINES_SIZE];
 static bool mines_lost = false;
+static int mines_hover_x = -1;
+static int mines_hover_y = -1;
+static uint32_t mines_hover_tick = 0;
 static bool mines_won = false;
 
 static SettingsState settings_applied = {
@@ -794,6 +870,141 @@ static int task_manager_selected_process = 0;
 static bool task_manager_confirm_kill = false;
 static int task_manager_kill_target = -1;
 static uint32_t gpu_palette_scroll = 0;
+
+/*
+ * Stress Test app (debug builds only).
+ *
+ * The state lives here rather than in the app's own files for the same
+ * reason the task manager's does: the shared input routes (mouse.c,
+ * keyboard_routing.c, state_update.c) and the redraw gate run outside the
+ * app folder and have to see it.  The app is compiled into the kernel in
+ * release builds too - it is simply never offered by the start menu and
+ * open_window() refuses it - so the enum and the arrays stay one shape in
+ * both configurations.
+ */
+#define STRESS_WINDOW_W          616
+#define STRESS_WINDOW_H          372
+/* Event rows kept in the log; the two status rows above them (countdown and
+ * mode/intensity) make the visible log 16 lines in total. */
+#define STRESS_EVENT_LINES        14
+#define STRESS_LOG_LEN            64
+/* Real working set reserved from the free RAM map and touched while
+ * Memory/GPU mode runs.  The target is most of RAM (capped far above a 16
+ * MB machine), because the load has to be real: the old 16 MB ceiling was
+ * clamped to whatever one free span happened to be, which is why the RAM
+ * gauge barely moved.  The tiny fallback keeps the app usable on a machine
+ * with almost no free RAM. */
+#define STRESS_POOL_TARGET_BYTES   (192u * 1024u * 1024u)
+#define STRESS_POOL_FALLBACK_BYTES 65536u
+/* New RAM Memory/GPU modes may commit per frame. Without this cap a high
+ * Intensity asked for the whole reserved pool in one call, so the Task
+ * Manager RAM gauge jumped from 8.68 MB to 200 MB in a single frame
+ * instead of ramping. At 60 fps this bounds the fill to about 3.8 MB/s. */
+#define STRESS_POOL_TOUCH_BYTES_PER_FRAME (64u * 1024u)
+#define STRESS_POOL_SPANS          8
+#define STRESS_GPU_MAX_PIXELS      6000000u
+#define STRESS_MAX_INTENSITY       65536u
+#define STRESS_MAX_INTERVAL_MS     120000u
+/* Live power is measured in percent of ONE full frame of work: 100% is a
+ * saturated frame, 2000% is twenty frames' worth packed into the current
+ * one.  Every Intensity, including the maximum, ramps toward the cap one
+ * trigger at a time. */
+#define STRESS_POWER_MAX           2000u
+#define STRESS_CPU_SLICE_MS        15u
+#define STRESS_CPU_SLICE_MAX_MS    400u
+#define STRESS_MEM_BYTES_AT_100    (4u * 1024u * 1024u)
+#define STRESS_GPU_WORDS_AT_100    262144u
+#define STRESS_DISK_MAX_UNITS      64u
+/* A firmware INT 13h read runs with interrupts masked for the whole USB
+ * transaction, so the USB path gets a much smaller per-frame budget than
+ * polled ATA PIO: the desktop must still paint and accept Stop. */
+#define STRESS_DISK_BIOS_MAX_UNITS 8u
+#define STRESS_MAX_INTERVAL_FRAMES 7200u
+/* Disk stress reads one 32 KiB chunk per work unit.  The transport is
+ * polled ATA PIO, ATAPI, or firmware INT 13h for a USB boot stick. */
+#define STRESS_DISK_CHUNK_BYTES    (32u * 1024u)
+#define STRESS_DISK_ATAPI_BLOCKS   16u
+#define STRESS_DISK_PATA_SECTORS   64u
+#define STRESS_DISK_PATA_LAST_LBA  8192u
+#define STRESS_DISK_FULL_BPS       (4u * 1024u * 1024u)
+
+/* Client-relative geometry shared by the renderer and its hit tests. */
+#define STRESS_ROW_WARN1          28
+#define STRESS_ROW_WARN2          40
+#define STRESS_ROW_SELECT         58
+#define STRESS_ROW_RADIO          72
+#define STRESS_ROW_BUTTONS       140
+#define STRESS_ROW_LOG           172
+#define STRESS_BOX_X             182
+#define STRESS_BOX_Y_INTENSITY    88
+#define STRESS_BOX_Y_INTERVAL    112
+#define STRESS_BOX_W             100
+#define STRESS_BOX_H              18
+#define STRESS_LOG_H             168
+#define STRESS_RADIO_X_CPU        22
+#define STRESS_RADIO_X_MEMORY     82
+#define STRESS_RADIO_X_GPU       150
+#define STRESS_RADIO_X_DISK      212
+#define STRESS_TRIGGER_X          22
+#define STRESS_STOP_X            150
+#define STRESS_BUTTON_W          110
+#define STRESS_BUTTON_H           24
+
+static bool stress_test_running = false;
+static uint8_t stress_test_mode = 0;   /* 0 CPU, 1 Memory, 2 GPU, 3 Disk */
+static uint32_t stress_intensity = 4096u;
+/* The box selects how hard the ramp grows.  The live load starts at idle
+ * and climbs one trigger step at a time; the step itself grows with the
+ * load, so the ramp accelerates instead of adding a flat percentage. */
+static uint32_t stress_power = 0u;
+static uint32_t stress_frames_since_trigger = 0u;
+static uint32_t stress_interval_ms = 1000u;
+static char stress_intensity_text[8] = "4096";
+static int stress_intensity_len = 4;
+static char stress_interval_text[8] = "1000";
+static int stress_interval_len = 4;
+static int stress_field_focus = -1;    /* -1 none, 0 intensity, 1 interval */
+static bool stress_field_fresh = false;
+static uint32_t stress_last_trigger_tick = 0;
+static uint32_t stress_trigger_count = 0;
+static char stress_log[STRESS_EVENT_LINES][STRESS_LOG_LEN];
+static int stress_log_count = 0;
+static volatile uint32_t stress_cpu_sink = 0;
+/* Real working set shared by Memory and GPU modes.  It lives in the free
+ * RAM between the DOOM zone and the desktop shadow plane, plus the free RAM
+ * above the WAD module, so it is real allocated memory rather than a number
+ * invented by the gauge. */
+typedef struct {
+    uint32_t base;
+    uint32_t bytes;
+    uint32_t touched;
+} StressRegion;
+
+static StressRegion stress_regions[STRESS_POOL_SPANS];
+static int stress_region_count = 0;
+static uint32_t stress_pool_bytes = 0;
+static uint32_t stress_pool_touched = 0;
+static uint8_t stress_pool_fallback[STRESS_POOL_FALLBACK_BYTES];
+static uint32_t stress_memory_offset = 0;
+static uint32_t stress_gpu_budget = 0;
+/* Budget the last frame was given, kept after the renderer spends it: the
+ * Task Manager reads it, so it must not be zeroed by painting. */
+static uint32_t stress_gpu_budget_target = 0;
+/* Disk stress: a real 32 KiB read buffer and the device the read succeeded
+ * on.  Both ATA (hard disk) and ATAPI (CD-ROM) boot media are supported. */
+static uint8_t stress_disk_buffer[STRESS_DISK_CHUNK_BYTES];
+static uint32_t stress_disk_lba = 0;
+static uint32_t stress_disk_bytes_read = 0;
+static uint32_t stress_disk_interval_bytes = 0;
+static uint32_t stress_disk_sample_bytes = 0;
+static uint32_t stress_disk_sample_tick = 0;
+static uint32_t stress_disk_measured_percent = 0;
+static uint16_t stress_disk_io_base = 0;
+static uint8_t stress_disk_devsel = 0;
+static uint32_t stress_disk_last_lba = 0;
+static bool stress_disk_ready = false;
+static bool stress_disk_is_atapi = false;
+static bool stress_disk_probe_done = false;
 static uint8_t cpu_usage_history[64];
 static uint8_t gpu_usage_history[64];
 static uint8_t ram_usage_history[64];
@@ -813,6 +1024,18 @@ static bool cpu_has_cpuid = false;
 static bool cpu_has_tsc = false;
 static bool boot_drive_valid = false;
 static uint8_t boot_drive_number = 0;
+/* How the machine booted, independent of the image type that was flashed:
+ * EDD 3.0's device-path interface type can say "USB" for a disk, ISO or
+ * floppy image alike, and the xHCI scan sets the same flag when it finds the
+ * firmware's bulk-endpoint boot slot.  The boot check flushes the trace
+ * before a last-resort input recovery resets this controller. */
+static bool boot_medium_is_usb = false;
+static bool boot_medium_type_known = false;
+static bool boot_medium_on_xhci = false;
+/* Raw Multiboot boot_device value, kept only for the debug boot-menu
+ * status line (it tells us which byte the firmware/GRUB actually set). */
+static uint32_t boot_device_raw = 0;
+static bool boot_device_raw_valid = false;
 
 /* WAD multiboot module: GRUB loads the game data into RAM via BIOS, so
  * the kernel reads it straight from memory on ANY boot media (USB stick,
@@ -828,6 +1051,91 @@ static uint16_t boot_drive_cylinders = 0;
 static uint8_t boot_drive_heads = 0;
 static uint8_t boot_drive_sectors = 0;
 static uint32_t boot_drive_storage_bytes = 0;
+
+/*
+ * Shadow-plane allocator.
+ *
+ * Free RAM layout (non-embedded build):
+ *   __bss_end ... loader handoff block ... 64 KiB guard ... DOOM zone ...
+ *   shadow planes ... WAD module / top of RAM
+ *
+ * The plane is placed at the TOP of usable RAM and grows downward, so a
+ * bigger desktop takes memory away from the DOOM zone rather than pushing
+ * into the WAD module.  The floor is the same address the DOOM zone starts
+ * from (loader info + one guard block); the ceiling is the lower of total
+ * RAM and the WAD module base.  Once DOOM has carved its zone, a desktop
+ * resize may not move the plane below the zone's end - the request is
+ * clamped instead (see update_canvas_for_framebuffer).
+ */
+static uint32_t shadow_plane_ceiling(void) {
+    uint32_t ceiling = ram_total_bytes;
+
+    if (doom_wad_module_addr != 0 && doom_wad_module_bytes != 0 &&
+        doom_wad_module_addr < ceiling) {
+        ceiling = doom_wad_module_addr;
+    }
+    return ceiling;
+}
+
+static uint32_t shadow_plane_floor(void) {
+    return (uint32_t)HALOXOS_LOADER_INFO_ADDR + 0x10000u;
+}
+
+/* Largest canvas (in pixels) the current RAM layout can hold: two bytes
+ * per pixel, between the loader guard and the WAD/DOOM ceiling. */
+static uint32_t shadow_plane_max_pixels(void) {
+    uint32_t floor = shadow_plane_floor();
+    uint32_t ceiling = shadow_plane_ceiling();
+    uint32_t zone_limit = doom_zone_limit();
+
+    if (zone_limit != 0 && zone_limit < ceiling) {
+        ceiling = zone_limit;
+    }
+    if (ceiling <= floor) {
+        return 0;
+    }
+    return (ceiling - floor) / 2u;
+}
+
+static bool shadow_plane_reserve(uint32_t width, uint32_t height) {
+    uint32_t required;
+    uint32_t floor;
+    uint32_t ceiling;
+    uint32_t base;
+    uint32_t zone_limit;
+
+    if (width == 0 || height == 0) {
+        return false;
+    }
+    required = width * height * 2u;
+    required = (required + 15u) & ~15u;
+    if (required <= shadow_plane_capacity && shadow_plane_base != 0) {
+        return true;
+    }
+
+    floor = shadow_plane_floor();
+    ceiling = shadow_plane_ceiling();
+    zone_limit = doom_zone_limit();
+    if (zone_limit != 0 && zone_limit < ceiling) {
+        ceiling = zone_limit;
+    }
+    if (ceiling <= floor || required > ceiling - floor) {
+        return false;
+    }
+    base = (ceiling - required) & ~15u;
+    if (base < floor) {
+        return false;
+    }
+
+    shadow_plane_base = base;
+    shadow_plane_capacity = required;
+    shadow_plane_index = (uint8_t *)(uintptr_t)base;
+    shadow_plane_rgb565 = (uint16_t *)(uintptr_t)base;
+    serial_trace_hex_value("INFO", "shadow plane base", base);
+    serial_trace_uint_value("INFO", "shadow plane bytes", required);
+    return true;
+}
+
 static bool desktop_icon_persistence_enabled = false;
 static DesktopIconPosition desktop_icons[DESKTOP_ICON_COUNT];
 static bool desktop_icon_visible[DESKTOP_ICON_COUNT];
@@ -898,6 +1206,7 @@ static uint32_t last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_terminal_blink = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_snake_tick = 0xFFFFFFFFu;
 static uint32_t last_desktop_redraw_demos_tick = 0xFFFFFFFFu;
+static uint32_t last_desktop_redraw_stress_phase = 0xFFFFFFFFu;
 static uint32_t last_performance_sample_phase = 0xFFFFFFFFu;
 static bool task_manager_gpu_scroll_drag = false;
 static int task_manager_gpu_scroll_drag_offset = 0;
@@ -936,9 +1245,11 @@ static bool desktop_auto_grid = true;
  * desktop already looked like a graph-paper sheet). Auto-Grid keeps
  * snapping icon drags whether or not the overlay is up, because
  * DESKTOP_GRID_CELL - the snap step in pixels - is what locks an icon to
- * the 4x4 grid. */
+ * the grid. One 16x16 cell: the old 4px lattice was so dense that it read
+ * as a texture instead of a grid, and snapping to it barely constrained a
+ * drag either. */
 static bool desktop_grid_overlay_on = false;
-#define DESKTOP_GRID_CELL 4
+#define DESKTOP_GRID_CELL 16
 /* True while a window's own controls are being drawn AND that window is
  * the topmost one under the pointer. draw_button / draw_interactive_row
  * read it so the buttons of a window that is covered by another window
@@ -950,11 +1261,8 @@ static bool desktop_undo_visible[DESKTOP_ICON_COUNT];
 static int desktop_undo_x[DESKTOP_ICON_COUNT];
 static int desktop_undo_y[DESKTOP_ICON_COUNT];
 static char desktop_undo_names[DESKTOP_ICON_COUNT][DESKTOP_ICON_NAME_MAX + 1];
-/* How many open apps the taskbar row shows before the overflow arrows
- * appear. Five buttons (58 + slot * 88, 84 wide) end at x = 494, which
- * still leaves the arrows at clock_widget_x() - 32 = 512 and the clock box
- * at 544 clear. */
-#define TASKBAR_APP_SLOTS 5
+/* Taskbar app-row geometry is shared by rendering, hit-testing and
+ * scrolling; see the TaskbarLayout helpers in window_manager.c. */
 
 static int taskbar_scroll = 0;
 static bool taskbar_menu_open = false;
@@ -981,6 +1289,10 @@ static int desktop_icon_menu_hover_row = -1;
 static uint32_t desktop_icon_menu_hover_tick = 0;
 
 extern void irq0_stub(void);
+extern void irq1_stub(void);
+extern void irq9_stub(void);
+extern void irq10_stub(void);
+extern void irq11_stub(void);
 extern void irq12_stub(void);
 extern void irq_default_stub(void);
 extern void isr_default_stub(void);
@@ -1031,21 +1343,34 @@ static bool cursor_over_clickable(void);
 static void draw_hover_fade_rect(int x, int y, int w, int h, uint8_t base, uint8_t dark, uint32_t hover_tick);
 static void hover_widget_reset(void);
 static void hover_widget_add(int x, int y, int w, int h);
-static bool hover_widget_hit(int x, int y);
+static int hover_widget_index_at(int x, int y);
 static void desktop_fit_to_canvas(void);
 static bool vga_probe_present(void);
 static bool vga_set_graphics_mode(uint16_t width, uint16_t height, uint16_t bpp);
 static void vga_save_and_enter_text_mode(void);
 static bool vga_native_text_mode_active(void);
 static void present(void);
+static void present_rect(int x, int y, int w, int h);
 static void fill_rect(int x, int y, int w, int h, uint8_t color);
 static void draw_text(int x, int y, const char *text, uint8_t fg, uint8_t bg, bool transparent);
 static void graphics_reset_window_clip(void);
 static void draw_char(int x, int y, char ch, uint8_t fg, uint8_t bg, bool transparent);
+static void render_app_window(AppId app);
+/* Stress Test app (apps/stress): defined after these shared routes. */
+static void stress_app_reset(void);
+static void stress_stop(void);
+static void update_stress_test(void);
+static void render_stress(const Window *window);
+static void stress_handle_mouse(void);
+static void stress_handle_key(KeyEvent event);
+static void render_cursor(void);
+static void cursor_invalidate_capture(void);
+static void render_debug_overlay(void);
 
 /* New demo/game apps: defined in files included after their first use
  * (window_manager.c / keyboard_routing.c run before the game logic). */
 static void box3d_handle_key(KeyEvent event);
+static void coin_run_reset(void);
 
 /* DOOM app (apps/DOOM/port/doom_engine.c amalgamation): renderer and
  * frame pump are defined in files included after their first use. */
@@ -1111,27 +1436,64 @@ static bool update_canvas_for_framebuffer(void) {
         new_height = height > OS_MAX_CANVAS_HEIGHT ? OS_MAX_CANVAS_HEIGHT : height;
     }
 
+    /*
+     * Carve (or grow) the shadow plane for this canvas before anything
+     * touches it.  If the machine cannot hold the requested desktop - a
+     * 6 MB box asked for 1024x768, or DOOM already owns the RAM below the
+     * plane - shrink the canvas until it fits rather than failing the
+     * mode switch.  The requested mode still stays the output mode, so the
+     * smaller canvas is centred 1:1 inside it (the existing letterbox
+     * path), which is the same graceful degradation the OS_MAX_CANVAS cap
+     * always provided.
+     */
+    {
+        uint32_t max_pixels = shadow_plane_max_pixels();
+
+        /* The base 640x480 canvas needs 614,400 bytes of shadow plane.
+         * A 6 MB machine has only ~327 KB above the loader guard, so the
+         * old loop - which refused to go below OS_BASE_* - could not
+         * reserve anything and the desktop wrote through a NULL plane.
+         * Shrink below the base when that is what fits, down to a floor
+         * that still leaves a usable desktop. */
+        while (max_pixels != 0 &&
+               (uint32_t)new_width * (uint32_t)new_height > max_pixels &&
+               (new_width > 320 || new_height > 240)) {
+            if (new_width > 320) new_width -= 16;
+            if (new_height > 240) new_height -= 12;
+        }
+        if (!shadow_plane_reserve((uint32_t)new_width, (uint32_t)new_height)) {
+            /* Keep whatever is already allocated; a failed resize must not
+             * leave the compositor with a NULL plane. */
+            new_width = canvas_width;
+            new_height = canvas_height;
+            if (!shadow_plane_reserve((uint32_t)new_width, (uint32_t)new_height)) {
+                return false;
+            }
+        }
+    }
+
     changed = new_width != canvas_width || new_height != canvas_height;
     canvas_width = new_width;
     canvas_height = new_height;
 
     if (changed) {
-        /* Blank both planes (they overlay one buffer, so one pass covers
-         * the union - only the canvas the new mode actually shows, since
-         * every writer strides rows by the new canvas width) and ask the
-         * frame loop for a full repaint: a pointer-only frame would
-         * restore background saved for the old geometry, and the saved
-         * cursor box belongs to the old canvas size as well.
+        /* Blank both planes (they overlay one buffer, so a 32-bit pass over
+         * two bytes per pixel covers the union - only the canvas the new
+         * mode actually shows, since every writer strides rows by the new
+         * canvas width) and ask the frame loop for a full repaint: a
+         * pointer-only frame would restore background saved for the old
+         * geometry, and the saved cursor box belongs to the old canvas
+         * size as well.
          *
          * Written as a loop rather than memset_local(): this runs before
          * runtime.c (where the freestanding string helpers live) is
          * included, and it keeps the mode switch from touching storage the
          * new mode never presents. */
-        for (int y = 0; y < new_height; ++y) {
-            uint8_t *row = &shadow_planes.index[(size_t)y * (size_t)new_width];
-            for (int x = 0; x < new_width; ++x) {
-                row[x] = 0;
-            }
+        uint32_t words = ((uint32_t)new_width * (uint32_t)new_height) / 2u;
+        uint32_t *dst = (uint32_t *)(void *)backbuffer;
+
+        for (uint32_t i = 0; i < words; ++i) {
+            dst[i] = 0;
         }
         /* A smaller canvas can cut windows (and icons) off the desktop: the
          * title bar of a window parked past the new right edge would be
@@ -1169,6 +1531,19 @@ static void set_desktop_size(int width, int height) {
 }
 
 /*
+ * Shared real disk I/O counter for Task Manager.  Every backend adds the
+ * bytes it actually transferred: ATA/ATAPI PIO and the firmware INT 13h
+ * path.  It is 64-bit so a long stress run does not wrap at 4 GiB; the MB
+ * display shifts rather than divides because the freestanding kernel does
+ * not link libgcc.
+ */
+static uint64_t disk_io_total_bytes = 0;
+
+static void disk_io_add_bytes(uint32_t bytes) {
+    disk_io_total_bytes += (uint64_t)bytes;
+}
+
+/*
  * These are all locations which kept from source code path:
  */
 
@@ -1182,6 +1557,14 @@ static void set_desktop_size(int width, int height) {
 #include "../../driver/video/vga.c"
 #include "../../driver/video/vbe.c"
 #include "../../driver/video/video_modes.c"
+/* bootlog.c needs the real-mode bridge declarations (rm_layout and the
+ * RM_L_* register-field enumerators) from vbe.c above, plus the serial
+ * RAM mirror from serial.c and the ATA sector helpers from ata.c. */
+#include "../debug/bootlog.c"
+/* Firmware INT 13h disk transport.  A USB stick is invisible to the ATA
+ * driver, but the firmware booted from it through this same bridge; Stress
+ * Test's disk mode uses it for the boot stick on real hardware. */
+#include "../../driver/etc/bios_disk.c"
 #include "interrupts.c"
 #include "exceptions.c"
 #include "../../driver/video/graphics.c"
@@ -1194,8 +1577,22 @@ static void set_desktop_size(int width, int height) {
 #include "../../modes/states/graphical/desktop/ui/redraw.c"
 #include "performance.c"
 #include "../../driver/input/keyboard_mouse.c"
+#include "../../driver/input/xhci_hid.c"
+#include "../../driver/input/input_boot_check.c"
 #include "../../modes/states/graphical/desktop/apps/terminal/model.c"
 #include "../../modes/states/graphical/desktop/apps/snake/logic.c"
+/* Coin Run! is split into modules under its own src/ tree. */
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/state.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/levels/levels.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/audio/sound.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/gameplay/player.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/gameplay/objects.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/debug/debug.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/input/input.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/ui/palette.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/ui/hud.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/ui/screens.c"
+#include "../../modes/states/graphical/desktop/apps/coin_game/src/ui/render.c"
 #include "../../modes/states/graphical/desktop/apps/guess_number/logic.c"
 #include "../../modes/states/graphical/desktop/apps/mines/logic.c"
 #include "../../modes/states/graphical/desktop/ui/window_manager.c"
@@ -1223,6 +1620,9 @@ static void set_desktop_size(int width, int height) {
 #include "../../modes/states/graphical/desktop/apps/power/power.c"
 #include "../../modes/states/graphical/desktop/apps/settings/render.c"
 #include "../../modes/states/graphical/desktop/apps/task_manager/render.c"
+#include "../../modes/states/graphical/desktop/apps/stress/stress.c"
+#include "../../modes/states/graphical/desktop/apps/stress/handling.c"
+#include "../../modes/states/graphical/desktop/apps/stress/render.c"
 #include "../../modes/states/graphical/desktop/apps/app_dispatch.c"
 #include "../../modes/states/graphical/desktop/ui/shell.c"
 #include "../debug/render.c"
@@ -1249,6 +1649,14 @@ static void set_desktop_size(int width, int height) {
 #include "../../modes/states/graphical/desktop/ui/mouse.c"
 #include "state_update.c"
 #include "init.c"
+
+/* 60 Hz DOOM rendering is only attempted on a machine that can afford to
+ * draw the 320x200 scene roughly twice per 35 Hz tic.  A TSC-less 486 (or
+ * a slow Pentium) keeps the original single-render 35 Hz loop, so the
+ * interpolation cannot make an already CPU-bound machine slower. */
+static bool doom_can_interpolate_frames(void) {
+    return timer_irq_verified && cpu_has_tsc && cpu_speed_mhz >= 200u;
+}
 
 /* DOOM engine amalgamation: included LAST. Its headers #define
  * KEY_ENTER/KEY_TAB/etc. as DOOM key codes (doomdef.h), which would

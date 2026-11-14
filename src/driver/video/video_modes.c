@@ -171,7 +171,9 @@ static void update_present_maps(void) {
         bool index_live = (fb.bpp == 8);
         if (index_live != present_index_plane_live) {
             present_index_plane_live = index_live;
-            memset_local(backbuffer, 0, sizeof(backbuffer_rgb565));
+            /* Two bytes per canvas pixel: both planes overlay the same
+             * allocation, so this clears the larger member. */
+            memset_local(backbuffer, 0, (size_t)OS_WIDTH * OS_HEIGHT * 2u);
         }
     }
 
@@ -211,6 +213,13 @@ static bool resolution_column(bool widescreen) {
     return widescreen;
 }
 
+/* The two built-in columns no longer have to be the same length: the wide
+ * column carries the extra 16:9/16:10 sizes, while the standard column keeps
+ * the 4:3/5:4 run.  The selected index is always reduced modulo this count. */
+static int resolution_column_count(bool widescreen) {
+    return widescreen ? VIDEO_MODE_COUNT_WIDE : VIDEO_MODE_COUNT_4_3;
+}
+
 /*
  * Does the widescreen checkbox have anything to switch here?
  *
@@ -229,7 +238,7 @@ static int resolution_entry_count(bool widescreen) {
     if (video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available()) {
         return vbe_size_list_length(column);
     }
-    return VIDEO_MODE_COUNT;
+    return resolution_column_count(column);
 }
 
 static bool resolution_entry_at(bool widescreen, int index, VideoModeOption *out) {
@@ -238,7 +247,7 @@ static bool resolution_entry_at(bool widescreen, int index, VideoModeOption *out
     if (video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available()) {
         return vbe_size_list_at(column, index, out);
     }
-    if (index < 0 || index >= VIDEO_MODE_COUNT) {
+    if (index < 0 || index >= resolution_column_count(column)) {
         return false;
     }
     *out = (column ? video_modes_wide : video_modes_4_3)[index];
@@ -280,6 +289,7 @@ static const VideoModeOption *resolution_option_for_settings(const SettingsState
  */
 static void snap_settings_resolution_to_desktop(void) {
     bool wide;
+    bool found = false;
     int index;
 
     if (video_backend == VIDEO_BACKEND_MULTIBOOT && vbe_mode_available()) {
@@ -291,19 +301,25 @@ static void snap_settings_resolution_to_desktop(void) {
             return;
         }
     } else {
-        for (index = 0; index < VIDEO_MODE_COUNT; ++index) {
+        for (index = 0; index < VIDEO_MODE_COUNT_4_3; ++index) {
             if (video_modes_4_3[index].width == fb.width &&
                 video_modes_4_3[index].height == fb.height) {
                 wide = false;
-                break;
-            }
-            if (video_modes_wide[index].width == fb.width &&
-                video_modes_wide[index].height == fb.height) {
-                wide = true;
+                found = true;
                 break;
             }
         }
-        if (index == VIDEO_MODE_COUNT) {
+        if (!found) {
+            for (index = 0; index < VIDEO_MODE_COUNT_WIDE; ++index) {
+                if (video_modes_wide[index].width == fb.width &&
+                    video_modes_wide[index].height == fb.height) {
+                    wide = true;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
             return;
         }
     }
@@ -436,12 +452,25 @@ static void pci_enable_device(uint8_t bus, uint8_t slot, uint8_t function) {
 }
 
 static bool vmware_fifo_sync(void) {
+    uint32_t spins = 0;
+
     if (!vmware_svga.fifo_ready) {
         return false;
     }
 
     vmware_write_reg(SVGA_REG_SYNC, 1);
+    /* Bounded: the device normally clears BUSY within microseconds.
+     * An unbounded spin froze the whole kernel inside the first
+     * graphics frame (login screen) when the FIFO was wedged, with
+     * the last frame still visible on screen and every key ignored.
+     * Bail out, stop using the FIFO, and let the linear framebuffer
+     * keep scanning out instead. */
     while (vmware_read_reg(SVGA_REG_BUSY) != 0) {
+        if (++spins > 200000u) {
+            vmware_svga.fifo_ready = false;
+            serial_trace("WARNING", "VMware SVGA: FIFO busy timeout - falling back to the linear framebuffer");
+            return false;
+        }
     }
     return true;
 }
@@ -454,6 +483,8 @@ static bool vmware_fifo_write_words(const uint32_t *words, uint32_t count) {
         return false;
     }
 
+    {
+    uint32_t waits = 0;
     for (;;) {
         uint32_t min = fifo[SVGA_FIFO_MIN];
         uint32_t max = fifo[SVGA_FIFO_MAX];
@@ -479,20 +510,62 @@ static bool vmware_fifo_write_words(const uint32_t *words, uint32_t count) {
             return true;
         }
 
+        {
+            static bool dbg_stall;
+            if (!dbg_stall) {
+                dbg_stall = true;
+                serial_trace_hex_value("DBG", "SVGA fifo stall next", next);
+                serial_trace_hex_value("DBG", "SVGA fifo stall stop", stop);
+                serial_trace_hex_value("DBG", "SVGA fifo stall min", min);
+                serial_trace_hex_value("DBG", "SVGA fifo stall max", max);
+            }
+        }
         if (!vmware_fifo_sync()) {
             return false;
         }
+        if (++waits > 2000000u) {
+            vmware_svga.fifo_ready = false;
+            serial_trace("WARNING", "VMware SVGA: FIFO never freed space - falling back to the linear framebuffer");
+            return false;
+        }
+    }
     }
 }
 
-static void vmware_update_screen(void) {
-    const uint32_t command[5] = {SVGA_CMD_UPDATE, 0, 0, fb.width, fb.height};
+/*
+ * Ask the SVGA host to refresh one rectangle.  The command takes screen
+ * coordinates, so a cursor-sized or DOOM-window-sized present no longer
+ * has to tell the host the whole 640x480 surface changed.  The FIFO path
+ * is the same as the full-screen update; only the rectangle differs.
+ */
+static void vmware_update_rect(int x, int y, int w, int h) {
+    uint32_t command[5];
 
-    if (!vmware_fifo_write_words(command, 5)) {
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)fb.width) { w = (int)fb.width - x; }
+    if (y + h > (int)fb.height) { h = (int)fb.height - y; }
+    if (w <= 0 || h <= 0) {
         return;
     }
 
+    command[0] = SVGA_CMD_UPDATE;
+    command[1] = (uint32_t)x;
+    command[2] = (uint32_t)y;
+    command[3] = (uint32_t)w;
+    command[4] = (uint32_t)h;
+    if (!vmware_fifo_write_words(command, 5)) {
+        serial_trace("DBG", "SVGA update: fifo refused");
+        return;
+    }
     vmware_fifo_sync();
+}
+
+static void vmware_update_screen(void) {
+    vmware_update_rect(0, 0, (int)fb.width, (int)fb.height);
 }
 
 static bool init_vmware_svga_backend(void) {
@@ -939,10 +1012,17 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
             return false;
         }
 
-        (void)width;
-        (void)height;
+        /*
+         * No VBE list on this bootloader framebuffer: the output itself cannot
+         * move, but the desktop can still be re-sized inside it.  Only a
+         * request that fits the output is a real presentation; a larger one
+         * would be clamped back to the output by update_canvas_for_framebuffer
+         * while the settings row claimed otherwise.
+         */
         (void)bpp;
-        if (fb.address != NULL && fb.width >= OS_BASE_WIDTH && fb.height >= OS_BASE_HEIGHT) {
+        if (fb.address != NULL &&
+            width <= fb.width && height <= fb.height &&
+            fb.width >= OS_BASE_WIDTH && fb.height >= OS_BASE_HEIGHT) {
             remember_usable_mode();
             return true;
         }
@@ -983,9 +1063,9 @@ static bool set_framebuffer_mode_raw(uint16_t width, uint16_t height, uint16_t b
      * or a pitch too small for a row - still fails.
      *
      * The base-canvas floor specifically must NOT be part of that judgement:
-     * 192x144 / 320x240 / 480x360 are the low-resolution half of the mode
-     * table, the canvas stays at 640x480 for them and the present maps sample
-     * it down, which is exactly how the pre-canvas build presented them.
+     * a smaller mode (a firmware that booted below 480p, not a list entry any
+     * more) keeps the 640x480 canvas and the present maps sample it down,
+     * which is exactly how the pre-canvas build presented those modes.
      * Judging them unusable made the resolution arrows skip the bottom of
      * every column.
      */
@@ -1020,6 +1100,31 @@ static bool set_output_mode(const SettingsState *state) {
 static void enter_boot_text_mode(void) {
     boot_text_mode = true;
     if (video_backend == VIDEO_BACKEND_BGA) {
+        /*
+         * QEMU's std VGA (Bochs VBE): keep the linear framebuffer and draw
+         * the boot menu as emulated text into it, exactly like a
+         * bootloader-framebuffer machine does.
+         *
+         * Disabling DISPI to drop back to the legacy VGA text mode is not a
+         * usable path on current QEMU builds: the text buffer at 0xB8000 is
+         * written correctly (the whole menu is there), but the scanout keeps
+         * fetching from the linear framebuffer, so the display stays black.
+         * That is why the DOS-style boot menu was invisible on QEMU only,
+         * while real hardware and the other hypervisors showed it.
+         *
+         * A BGA boot that started in text mode (a 4bpp build whose GRUB
+         * gfxpayload is "text") has no live linear framebuffer to draw into,
+         * so that case keeps the native VGA text path - pressing 1
+         * programs a real DISPI graphics mode from there.
+         */
+        if ((bga_read(VBE_DISPI_INDEX_ENABLE) & VBE_DISPI_ENABLED) != 0) {
+            if (fb.bpp == 8) {
+                /* Indexed output: the menu's palette indices need the OS
+                 * palette in the DAC to land on the intended colours. */
+                program_vga_palette();
+            }
+            return;
+        }
         bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
         vga_enter_text_mode();
     } else if (video_backend == VIDEO_BACKEND_VMWARE_SVGA) {

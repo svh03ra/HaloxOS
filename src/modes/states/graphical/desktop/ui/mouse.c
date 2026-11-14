@@ -8,7 +8,19 @@ static void handle_desktop_mouse(void) {
     bool clicked = mouse.left && !mouse.prev_left;
 
     if (debug_overlay_open) {
+        /* The bitmap memory viewer is the one debugger screen that owns
+         * the pointer: route clicks/drags to its scrollbar and leave the
+         * desktop underneath alone. */
+        if (debug_memory_view_open) {
+            debug_memory_handle_mouse();
+        }
         return;
+    }
+
+    /* A real click opens the next breakpoint frame; the debugger's own
+     * blink repaints never clear the one-catch latch. */
+    if (clicked || (mouse.right && !mouse.prev_right) || (mouse.middle && !mouse.prev_middle)) {
+        debug_bp_note_input();
     }
 
     /* DOOM has an explicit mouse-capture gesture.  Middle-click always
@@ -47,96 +59,67 @@ static void handle_desktop_mouse(void) {
     }
 
     {
-        /* The clock's clickable zone comes from the widget geometry the
-         * taskbar draws with, so the two can never drift apart. */
-        int clock_x = clock_widget_x();
-        int total_open = 0;
-        for (int i = 0; i < APP_COUNT; ++i) {
-            if (windows[i].open) ++total_open;
-        }
-        int open_test = count_open_test_windows();
-        if (open_test > 0) ++total_open;
-        if (total_open > TASKBAR_APP_SLOTS) {
-            int arrow_x = clock_x - 4 - 28;
-            bool can_left = false;
-            for (int i = taskbar_scroll - 1; i >= 0; --i) {
-                if (windows[i].open) { can_left = true; break; }
-            }
-            if (!can_left && taskbar_scroll > APP_COUNT) can_left = true;
-            bool can_right = false;
-            int scan = taskbar_scroll;
-            int slot = 0;
-            for (; slot < TASKBAR_APP_SLOTS && scan < APP_COUNT; ++scan) {
-                if (!windows[scan].open) continue;
-                ++slot;
-            }
-            if (slot < TASKBAR_APP_SLOTS && open_test > 0) {
-                ++slot;
-                ++scan;
-            }
-            for (int i = scan; i < APP_COUNT; ++i) {
-                if (windows[i].open) { can_right = true; break; }
-            }
-            if (!can_right && scan <= APP_COUNT && open_test > 0) can_right = true;
-            if (button_clicked(arrow_x, OS_HEIGHT - 24, 12, 18) && can_left) {
+        /* One layout snapshot drives the arrows and the app buttons, so a
+         * click can never land on a rectangle the renderer did not draw. */
+        TaskbarLayout layout = taskbar_layout();
+
+        if (layout.arrows) {
+            int arrow_x = taskbar_arrow_x();
+            if (button_clicked(arrow_x, OS_HEIGHT - 24, 12, 18) &&
+                taskbar_can_scroll_left()) {
                 --taskbar_scroll;
                 while (taskbar_scroll > 0 && !windows[taskbar_scroll].open) --taskbar_scroll;
                 return;
             }
-            if (button_clicked(arrow_x + 16, OS_HEIGHT - 24, 12, 18) && can_right) {
+            if (button_clicked(arrow_x + 16, OS_HEIGHT - 24, 12, 18) &&
+                taskbar_can_scroll_right()) {
                 ++taskbar_scroll;
                 while (taskbar_scroll < APP_COUNT && !windows[taskbar_scroll].open) ++taskbar_scroll;
                 return;
             }
         }
-    }
-    {
-        int idx = taskbar_scroll;
-        int slot = 0;
-        for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
-            if (!windows[idx].open) continue;
-            if (button_clicked(58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
-                set_active_window((AppId)idx);
-                return;
-            }
-            ++slot;
-        }
-        if (slot < TASKBAR_APP_SLOTS && idx >= APP_COUNT && count_open_test_windows() > 0) {
-            if (button_clicked(58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
+
+        for (int slot = 0; slot < layout.count; ++slot) {
+            int idx = taskbar_slot_app(&layout, slot);
+            int x;
+            int w;
+
+            if (idx == TASKBAR_SLOT_NONE) continue;
+            x = taskbar_app_button_x(slot, layout.count);
+            w = taskbar_app_button_w(slot, layout.count);
+            if (!button_clicked(x, OS_HEIGHT - 24, w, 18)) continue;
+            if (idx == TASKBAR_SLOT_TEST) {
                 for (int i = test_window_count - 1; i >= 0; --i) {
                     if (test_windows[i].open) { active_test_window = i; break; }
                 }
-                return;
+            } else {
+                set_active_window((AppId)idx);
             }
+            return;
         }
     }
 
     if (button_right_clicked(0, OS_HEIGHT - TASKBAR_H, OS_WIDTH, TASKBAR_H)) {
+        TaskbarLayout layout = taskbar_layout();
         bool on_button = false;
         if (point_in_rect(mouse.x, mouse.y, 4, OS_HEIGHT - 24, 46, 18)) on_button = true;
         if (!on_button) {
-            int idx = taskbar_scroll;
-            int slot = 0;
-            for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
-                if (!windows[idx].open) continue;
-                if (point_in_rect(mouse.x, mouse.y, 58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
-                    on_button = true; break;
-                }
-                ++slot;
-            }
-            if (!on_button && slot < TASKBAR_APP_SLOTS && idx >= APP_COUNT && count_open_test_windows() > 0) {
-                if (point_in_rect(mouse.x, mouse.y, 58 + slot * 88, OS_HEIGHT - 24, 84, 18)) {
+            for (int slot = 0; slot < layout.count; ++slot) {
+                int idx = taskbar_slot_app(&layout, slot);
+                int x;
+                int w;
+
+                if (idx == TASKBAR_SLOT_NONE) continue;
+                x = taskbar_app_button_x(slot, layout.count);
+                w = taskbar_app_button_w(slot, layout.count);
+                if (point_in_rect(mouse.x, mouse.y, x, OS_HEIGHT - 24, w, 18)) {
                     on_button = true;
+                    break;
                 }
             }
         }
         if (!on_button) {
-            int clock_x = clock_widget_x();
-            int total_open = 0;
-            for (int i = 0; i < APP_COUNT; ++i) {
-                if (windows[i].open) ++total_open;
-            }
-            int right_zone = total_open > TASKBAR_APP_SLOTS ? clock_x - 32 : clock_x;
+            int right_zone = layout.arrows ? taskbar_arrow_x() : clock_widget_x();
             if (mouse.x >= right_zone) on_button = true;
         }
         if (!on_button) {
@@ -221,7 +204,7 @@ static void handle_desktop_mouse(void) {
     if (mouse.left && drag_desktop_icon >= 0 && drag_desktop_icon < DESKTOP_ICON_COUNT) {
         int dx = mouse.x - desktop_icon_press_x;
         int dy = mouse.y - desktop_icon_press_y;
-        /* Snap to the 4x4 grid and keep the icon off every open window
+        /* Snap to the 16x16 grid and keep the icon off every open window
          * (see desktop_icon_drag_to): the icon slides along a window's
          * edge rather than across its face. */
         desktop_icon_drag_to(desktop_icon_drag_start_x[drag_desktop_icon] + dx,
@@ -369,6 +352,10 @@ static void handle_desktop_mouse(void) {
         int hit = desktop_icon_hit_test(mouse.x, mouse.y);
 
         if (clicked && hit >= 0) {
+            /* Raising before the drag starts is what keeps a dragged icon
+             * above its neighbours; the paint order and the click test
+             * both read it, so the grabbed icon stays the visible one. */
+            desktop_icon_raise(hit);
             if (!desktop_icon_multi_selected[hit]) {
                 for (int i = 0; i < DESKTOP_ICON_COUNT; ++i) {
                     desktop_icon_multi_selected[i] = false;
@@ -454,12 +441,14 @@ static void handle_desktop_mouse(void) {
         case APP_PAINT: paint_handle_mouse(); break;
         case APP_EXPLORER: explorer_handle_mouse(); break;
         case APP_MINES: mines_handle_mouse(); break;
+        case APP_GUESS: guess_handle_mouse(); break;
         case APP_GAME_CENTER: game_center_handle_mouse(); break;
         case APP_DEMO_CENTER: demo_center_handle_mouse(); break;
         case APP_FIRECRACKER: firecracker_handle_mouse(); break;
         case APP_POWER: power_handle_mouse(); break;
         case APP_SETTINGS: settings_handle_mouse(); break;
         case APP_TASK_MANAGER: task_manager_handle_mouse(); break;
+        case APP_STRESS_TEST: stress_handle_mouse(); break;
         default: break;
     }
 }

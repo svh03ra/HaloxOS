@@ -4,8 +4,8 @@
 // This repository is licensed under the GNU General Public License.
 
 static void render_game_center(const Window *window) {
-    static const char *games[] = {"Minesweeper", "Snake", "Guess Number", "DOOM"};
-    static const AppId game_apps[] = {APP_MINES, APP_SNAKE, APP_GUESS, APP_DOOM};
+    static const char *games[] = {"Minesweeper", "Snake", "Guess Number", "DOOM", "Coin Run!"};
+    static const AppId game_apps[] = {APP_MINES, APP_SNAKE, APP_GUESS, APP_DOOM, APP_COIN_RUN};
     /* Row count comes from the tables, not a literal: the list and the
      * click rows in handling.c must never disagree. */
     int game_count = (int)(sizeof(game_apps) / sizeof(game_apps[0]));

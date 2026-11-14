@@ -17,12 +17,24 @@
 #define CRASH_TRACE_ENABLED 0
 #endif
 
-#if CRASH_TRACE_ENABLED
 #ifndef CRASH_SYMBOL_MAX
 #define CRASH_SYMBOL_MAX 0
 #endif
 
-#define CRASH_TRACE_MAX     32   /* frames captured per walk */
+/* Frames captured per stack walk. Both profiles walk it: a release build has
+ * no symbol table, but the raw return addresses still say where the fault
+ * came from. */
+#define CRASH_TRACE_MAX     32
+
+#if CRASH_TRACE_ENABLED
+
+/* Horizontal backtrace scrolling.  A tap moves a couple of columns; a
+ * held Ctrl+Left/Right repeats on its own, one column per frame (two once
+ * held longer), instead of waiting for the keyboard's typematic rate -
+ * which is far too slow on real hardware for these long source paths. */
+#define CRASH_SCROLL_TAP_STEP      2
+#define CRASH_SCROLL_REPEAT_DELAY  12   /* frames before a hold repeats */
+#define CRASH_SCROLL_FAST_FRAMES   48   /* frames before it doubles up */
 #endif
 
 /* Defined later in this file / graphics.c; forward declared because the
@@ -30,6 +42,11 @@
 #if CRASH_TRACE_ENABLED
 static void bsod_append_hex32(char *buffer, size_t *len, size_t max_len, uint32_t value);
 static void draw_text_clipped(int x, int y, int max_w, const char *text, uint8_t fg, uint8_t bg, bool transparent);
+/* Native USB keyboard source, defined in xhci_hid.c later in the
+ * amalgamation.  The crash handler polls it beside the 8042 so a
+ * USB-only machine is not left with an unresponsive trace viewer. */
+static void xhci_hid_crash_begin(void);
+static bool xhci_hid_crash_poll(uint8_t *scancode);
 #endif
 static void draw_pixel(int x, int y, uint8_t color);
 
@@ -278,19 +295,13 @@ static int crash_symbol_lookup(uint32_t addr, const char **name,
 /*
  * The call trace: which functions led to the fault.
  *
- * Everything below is debug-build only and exists as one block - the walk,
- * its rendering, its serial dump and its on-screen viewer.  It is guarded as
- * a block because a release build must still COMPILE: these functions need
- * CRASH_TRACE_MAX and the two forward declarations above, both of which live
- * inside the same guard, and the only caller (the crash screen's trace view)
- * is behind it as well.  Without the guard a release build failed here with
- * "CRASH_TRACE_MAX undeclared" and implicit declarations of the crash-screen
- * helpers.  A release build simply shows no call trace.
+ * The walk itself is compiled into both profiles (release builds keep frame
+ * pointers for it and print raw addresses); the symbolised rendering, the
+ * serial dump and the interactive viewer below are debug-build only.
  */
-#if CRASH_TRACE_ENABLED
 
 /*
- * EBP chain walk. Requires -fno-omit-frame-pointer (debug builds add it
+ * EBP chain walk. Requires -fno-omit-frame-pointer (both profiles add it
  * in the Makefile). Every frame is: [ebp] = saved ebp, [ebp+4] = return
  * eip. Stops on obviously invalid frame pointers instead of faulting
  * inside the crash handler.
@@ -321,6 +332,8 @@ static int crash_capture_trace(uint32_t start_ebp, uint32_t start_eip,
     }
     return count;
 }
+
+#if CRASH_TRACE_ENABLED
 
 static void crash_render_trace_lines(int x, int y, const uint32_t *frames,
                                      int count, int skip, int max_rows,
@@ -460,6 +473,8 @@ static void crash_render_trace_view(int x, int y_start, const CpuExceptionFrame 
     int page_calltrace = 0;    /* default: Backtrace */
     int scroll = 0;
     int hscroll = 0;           /* horizontal window into each row */
+    int hold_dir = 0;          /* -1 left, +1 right while the key is held */
+    int hold_frames = 0;       /* PIT frames the key has been held */
     int ctrl_down = 0;
     int extended_next = 0;
     const int header_rows = 2;
@@ -479,6 +494,10 @@ static void crash_render_trace_view(int x, int y_start, const CpuExceptionFrame 
      * this polling loop. Timer IRQ stays alive so hlt wakes and the
      * cursor-less screen keeps scanning for input. */
     outb(0x21, inb(0x21) | 0x02u);
+
+    /* Drop any scancodes the xHCI decoder queued during normal operation;
+     * from here on every poll feeds the trace viewer directly. */
+    xhci_hid_crash_begin();
 
     for (;;) {
         /* Clear the whole trace view region first so switching pages or
@@ -563,70 +582,138 @@ static void crash_render_trace_view(int x, int y_start, const CpuExceptionFrame 
         crash_cube_badge_redraw();
         present();
 
-        /* interactive keyboard loop: poll the PS/2 controller directly
+        /* interactive keyboard loop: poll both native sources directly
          * because the normal IRQ-driven input path is dead at crash time.
-         * Busy-poll without hlt: the exception entered with interrupts
-         * disabled, so hlt would sleep forever and never see keys. */
+         * The xHCI poll runs first: on a USB-only board port 0x64 floats
+         * at 0xFF and would otherwise keep this loop reading a phantom
+         * byte forever without ever reaching the real keyboard. */
         for (;;) {
             uint8_t status;
             uint8_t scancode;
             int was_extended;
 
             /* cube heartbeat: on every PIT frame wrap, redraw the badge
-             * so the animation never stops while polling for keys */            if (crash_cube_tick()) {
+             * so the animation never stops while polling for keys */
+            if (crash_cube_tick()) {
                 crash_cube_badge_redraw();
                 present();
+
+                /* Held Ctrl+Left/Right keeps scrolling without waiting
+                 * for the next keyboard repeat: one character per frame
+                 * after a short delay, two once the hold is long enough.
+                 * The outer loop then repaints the text at the new
+                 * offset.  A tap still moves CRASH_SCROLL_TAP_STEP only. */
+                if (hold_dir != 0 && ctrl_down) {
+                    int limit = max_line_len - visible_chars;
+
+                    if (limit < 0) {
+                        limit = 0;
+                    }
+                    if (++hold_frames >= CRASH_SCROLL_REPEAT_DELAY) {
+                        int before = hscroll;
+                        int step = hold_frames >= CRASH_SCROLL_FAST_FRAMES ? 2 : 1;
+
+                        hscroll += hold_dir * step;
+                        if (hscroll < 0) {
+                            hscroll = 0;
+                        }
+                        if (hscroll > limit) {
+                            hscroll = limit;
+                        }
+                        if (hscroll != before) {
+                            break;
+                        }
+                    }
+                }
             }
 
-            status = inb(0x64);
-            if ((status & 0x01u) == 0) {
-                continue;
+            if (!xhci_hid_crash_poll(&scancode)) {
+                status = inb(0x64);
+                if ((status & 0x01u) == 0 || status == 0xFFu) {
+                    continue;
+                }
+                scancode = inb(0x60);
+                if ((status & 0xC0u) != 0) {
+                    continue; /* parity/timeout: no valid byte behind it */
+                }
             }
-            scancode = inb(0x60);
             if (scancode == 0xE0) {
                 extended_next = 1;
                 continue;
             }
             if (scancode == 0x1D) {          /* Ctrl press */
                 ctrl_down = 1;
+                extended_next = 0;
                 continue;
             }
             if (scancode == 0x9D) {          /* Ctrl release */
                 ctrl_down = 0;
+                hold_dir = 0;
+                extended_next = 0;
                 continue;
             }
             if (scancode & 0x80u) {
+                uint8_t released = (uint8_t)(scancode & 0x7Fu);
+
+                /* An arrow release ends the hold; without it a keyboard
+                 * that lacks break codes would keep scrolling forever. */
+                if (released == 0x4Bu || released == 0x4Du) {
+                    hold_dir = 0;
+                }
                 extended_next = 0;
                 continue;   /* ignore other key releases */
             }
             was_extended = extended_next;
             extended_next = 0;
             if (was_extended && ctrl_down && scancode == 0x4Bu) {
-                /* Ctrl+LEFT: scroll row text toward the start */
-                if (hscroll > 0) {
-                    --hscroll;
+                /* Ctrl+LEFT: scroll row text toward the start.  A repeat
+                 * make code from the keyboard for the key already held
+                 * must not add another tap step or restart the hold. */
+                if (hold_dir != -1) {
+                    hold_dir = -1;
+                    hold_frames = 0;
+                    hscroll -= CRASH_SCROLL_TAP_STEP;
+                    if (hscroll < 0) {
+                        hscroll = 0;
+                    }
                 }
             } else if (was_extended && ctrl_down && scancode == 0x4Du) {
                 /* Ctrl+RIGHT: scroll row text toward the end */
-                if (hscroll < max_line_len - visible_chars) {
-                    ++hscroll;
+                if (hold_dir != 1) {
+                    int limit = max_line_len - visible_chars;
+
+                    if (limit < 0) {
+                        limit = 0;
+                    }
+                    hold_dir = 1;
+                    hold_frames = 0;
+                    hscroll += CRASH_SCROLL_TAP_STEP;
+                    if (hscroll > limit) {
+                        hscroll = limit;
+                    }
                 }
             } else if (scancode == 0x4Bu) {          /* LEFT */
                 page_calltrace = 0;
                 scroll = 0;
                 hscroll = 0;
+                hold_dir = 0;
             } else if (scancode == 0x4Du) {   /* RIGHT */
                 page_calltrace = 1;
                 scroll = 0;
                 hscroll = 0;
+                hold_dir = 0;
             } else if (scancode == 0x48u) {    /* UP */
+                hold_dir = 0;
                 if (scroll > 0) {
                     --scroll;
                 }
             } else if (scancode == 0x50u) {   /* DOWN */
+                hold_dir = 0;
                 if (scroll < count - max_rows) {
                     ++scroll;
                 }
+            } else {
+                hold_dir = 0;
             }
             break;   /* redraw with the new state */
         }
@@ -787,11 +874,170 @@ static void bsod_append_field(char *buffer, size_t *len, size_t max_len,
 }
 
 /*
+ * Word-wrap one paragraph of the crash report.
+ *
+ * The report was originally hand-broken for the 640x480 canvas: the first
+ * warning always put "to your machine." on its own row, and the "Looks
+ * like..." block always broke after "make sure to". On a wider canvas
+ * those breaks leave most of the row empty even though the whole sentence
+ * fits, and on a narrower one a long row runs off the right edge. Wrap by
+ * whole 8px characters instead, using the live canvas width, and return
+ * the y of the row after the last one. Callers add the blank rows between
+ * paragraphs, so a paragraph that grows or shrinks still keeps its gaps.
+ */
+#define BSOD_CHAR_WIDTH  8
+#define BSOD_LINE_HEIGHT 10
+
+static int bsod_draw_wrapped(int x, int y, int right, const char *text,
+                             uint8_t fg, uint8_t bg, bool transparent) {
+    char line[TERM_LINE_LEN];
+    int max_chars = (right - x) / BSOD_CHAR_WIDTH;
+    size_t len = 0;
+
+    if (max_chars < 1) {
+        max_chars = 1;
+    }
+    if (max_chars > (int)sizeof(line) - 1) {
+        max_chars = (int)sizeof(line) - 1;
+    }
+    line[0] = '\0';
+
+    while (*text != '\0') {
+        const char *word;
+        size_t word_len;
+
+        while (*text == ' ') {
+            ++text;
+        }
+        if (*text == '\0') {
+            break;
+        }
+
+        word = text;
+        while (*text != '\0' && *text != ' ') {
+            ++text;
+        }
+        word_len = (size_t)(text - word);
+
+        /* Flush the current row before starting a word that cannot fit
+         * after it. The +1 is the separating space. */
+        if (len > 0 && len + 1 + word_len > (size_t)max_chars) {
+            draw_text(x, y, line, fg, bg, transparent);
+            y += BSOD_LINE_HEIGHT;
+            len = 0;
+            line[0] = '\0';
+        }
+
+        /* A single word wider than the whole row (a URL on a tiny canvas)
+         * is split at the row edge rather than drawn past the screen. */
+        while (word_len > (size_t)max_chars - len) {
+            size_t take = (size_t)max_chars - len;
+
+            if (take > 0) {
+                for (size_t i = 0; i < take; ++i) {
+                    line[len++] = word[i];
+                }
+                line[len] = '\0';
+                word += take;
+                word_len -= take;
+            }
+            draw_text(x, y, line, fg, bg, transparent);
+            y += BSOD_LINE_HEIGHT;
+            len = 0;
+            line[0] = '\0';
+        }
+
+        if (word_len > 0) {
+            if (len > 0) {
+                line[len++] = ' ';
+            }
+            for (size_t i = 0; i < word_len; ++i) {
+                line[len++] = word[i];
+            }
+            line[len] = '\0';
+        }
+    }
+
+    if (len > 0) {
+        draw_text(x, y, line, fg, bg, transparent);
+        y += BSOD_LINE_HEIGHT;
+    }
+
+    return y;
+}
+
+/*
  * Classic BSOD screen: solid blue background, white text. Only drawn when
  * the system crashed while a graphical framebuffer is active; the full
  * register dump always goes to the serial debugger trace regardless.
  */
-static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
+#if !CRASH_TRACE_ENABLED
+/*
+ * Release-build backtrace: no symbol table and no interactive viewer, but
+ * the return-address chain still says where the fault came from. Drawn once
+ * under the memory map with raw addresses; the cube keeps animating over it.
+ */
+static int crash_render_flat_trace(int x, int y, const CpuExceptionFrame *frame) {
+    uint32_t frames[CRASH_TRACE_MAX];
+    char line[TERM_LINE_LEN];
+    char index[8];
+    int count;
+    int rows;
+
+    if (frame == NULL) {
+        return y;
+    }
+    count = crash_capture_trace(frame->ebp, frame->eip, frames);
+    if (count <= 0) {
+        return y;
+    }
+
+    y += 20;
+    draw_text(x, y, "Backtrace:", color_white, color_crash_blue, false);
+    y += 10;
+
+    rows = (OS_HEIGHT - 40 - y) / 10;
+    if (rows > count) {
+        rows = count;
+    }
+
+    for (int i = 0; i < rows; ++i) {
+        size_t len = 0;
+        int n = i;
+        int digits = 0;
+
+        do {
+            index[digits++] = (char)('0' + n % 10);
+            n /= 10;
+        } while (n > 0 && digits < (int)sizeof(index));
+
+        line[len++] = '[';
+        while (digits > 0) {
+            line[len++] = index[--digits];
+        }
+        line[len++] = ']';
+        line[len++] = ' ';
+        line[len] = '\0';
+        bsod_append_field(line, &len, sizeof(line), "0x", frames[i]);
+        draw_text(x, y, line, color_white, color_crash_blue, false);
+        y += 10;
+    }
+
+    serial_trace_uint_value("RENDER", "release backtrace frames", (uint32_t)count);
+    return y;
+}
+#endif /* !CRASH_TRACE_ENABLED */
+
+/*
+ * Draw the crash report onto the canvas. Returns the y below the last row so
+ * the caller can place the interactive trace view under it.
+ *
+ * `include_mmap` is false for the compact retry. The E820 walk is the one
+ * part of the report that dereferences a boot-time pointer, so it is the
+ * first suspect when the full report faulted; skipping it is what lets the
+ * retry finish and still show the status and register dump.
+ */
+static int bsod_paint(const char *name, const CpuExceptionFrame *frame, bool include_mmap) {
     char line[TERM_LINE_LEN];
     size_t len;
     /* Crash screen text is anchored to the logical canvas top-left.
@@ -800,33 +1046,12 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
     int y = 16;
     int text_x = 16;
 
-    if (vga_native_text_mode_active() || fb.address == NULL || fb.width < OS_WIDTH) {
-        serial_trace("ERROR", "RENDER crash screen unavailable: native VGA text mode or no framebuffer");
-        serial_trace_hex_value("ERROR", "RENDER native text mode", vga_native_text_mode_active() ? 1 : 0);
-        serial_trace_hex_value("ERROR", "RENDER framebuffer address", (uint32_t)(uintptr_t)fb.address);
-        serial_trace_hex_value("ERROR", "RENDER framebuffer width", fb.width);
-        return;
-    }
-
-    serial_trace("RENDER", "crash screen render started");
-    serial_trace_concat("RENDER", "exception: ", name);
-    serial_trace_hex_value("RENDER", "framebuffer", (uint32_t)(uintptr_t)fb.address);
-    serial_trace_hex_value("RENDER", "framebuffer size", ((uint32_t)fb.width << 16) | fb.height);
-    serial_trace_hex_value("RENDER", "framebuffer bpp", fb.bpp);
-
-    /* A crash inside an app render leaves the window clip stuck on that
-     * app's client rectangle (app_dispatch.c sets it around each app draw
-     * and only clears it after the call returns, which never happens on a
-     * fault). Reset to the full canvas so the BSOD covers the whole
-     * screen instead of being clipped to the crashed window's face. */
-    graphics_reset_window_clip();
-
     fill_rect(0, 0, OS_WIDTH, OS_HEIGHT, color_crash_blue);
 
-    draw_text(text_x, y, "A problem has been detected!!! HaloxOS has been shut down to prevent damage", color_white, color_crash_blue, false);
-    y += 10;
-    draw_text(text_x, y, "to your machine.", color_white, color_crash_blue, false);
-    y += 20;
+    y = bsod_draw_wrapped(text_x, y, OS_WIDTH - 16,
+                          "A problem has been detected!!! HaloxOS has been shut down to prevent damage to your machine.",
+                          color_white, color_crash_blue, false);
+    y += 10;   /* one blank row before the CODE line */
 
     line[0] = '\0';
     len = 0;
@@ -835,17 +1060,21 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
     draw_text(text_x, y, line, color_white, color_crash_blue, false);
     y += 30;
 
-    /* Keep long diagnostics inside the 640x480 logical canvas instead of
-     * allowing draw_text() to run past the right edge. */
-    draw_text(text_x, y, "Looks like you've got something wrong with the system, please make sure to", color_white, color_crash_blue, false);
-    y += 10;
-    draw_text(text_x, y, "report this issue:", color_white, color_crash_blue, false);
-    y += 10;
-    draw_text(text_x, y, "https://github.com/svh03ra/HaloxOS", color_white, color_crash_blue, false);
-    y += 20;
+    /* Wrap the diagnostics to the live canvas instead of hard-breaking
+     * them at the 640x480 column: wider screens keep the whole sentence
+     * on one row, narrower ones wrap rather than run off the right edge. */
+    y = bsod_draw_wrapped(text_x, y, OS_WIDTH - 16,
+                          "Looks like you've got something wrong with the system, please make sure to report this issue:",
+                          color_white, color_crash_blue, false);
+    y = bsod_draw_wrapped(text_x, y, OS_WIDTH - 16,
+                          "https://github.com/svh03ra/HaloxOS",
+                          color_white, color_crash_blue, false);
+    y += 10;   /* one blank row before the retry hint */
 
-    draw_text(text_x, y, "Please try again after restarting your device if you're tired...", color_white, color_crash_blue, false);
-    y += 40;
+    y = bsod_draw_wrapped(text_x, y, OS_WIDTH - 16,
+                          "Please try again after restarting your device if you're tired...",
+                          color_white, color_crash_blue, false);
+    y += 30;   /* three blank rows before the status line */
 
     line[0] = '\0';
     len = 0;
@@ -856,7 +1085,9 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
     draw_text(text_x, y, line, color_white, color_crash_blue, false);
     y += 20;
 
-    if (debug) {
+    /* The register dump is part of the crash report, not a debug-build
+     * nicety: a release build is exactly what a user reports a crash from. */
+    {
         draw_text(text_x, y, "Machine Info:", color_white, color_crash_blue, false);
         y += 10;
 
@@ -905,7 +1136,7 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
      * Memory Map: raw E820 entry base addresses (low 32 bits) saved from
      * the multiboot header at boot, four hex values per row.
      */
-    if (crash_mmap_addr != 0 && crash_mmap_length != 0) {
+    if (include_mmap && crash_mmap_addr != 0 && crash_mmap_length != 0) {
         uintptr_t cursor = crash_mmap_addr;
         uintptr_t end = crash_mmap_addr + crash_mmap_length;
         int column = 0;
@@ -969,46 +1200,289 @@ static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
         serial_trace_hex_value("ERROR", "RENDER mmap length", crash_mmap_length);
     }
 
+#if !CRASH_TRACE_ENABLED
+    y = crash_render_flat_trace(text_x, y, frame);
+#endif
+
+    (void)text_x;
+    return y;
+}
+
+/*
+ * Last-resort crash report in 80x25 VGA text memory.
+ *
+ * The BSOD depends on a working linear framebuffer. In native text mode, or
+ * when painting the graphical report faults, the machine would otherwise sit
+ * on the last frame - the frozen screen this handler exists to avoid.
+ * 0xB8000 is plain memory, so these writes cannot fault no matter how badly
+ * the video state was left by the crashing code.
+ */
+static void crash_text_put(int row, int col, const char *text, uint8_t attr) {
+    volatile uint16_t *vga = (volatile uint16_t *)(uintptr_t)0xB8000;
+
+    if (row < 0 || row >= VGA_TEXT_ROWS) {
+        return;
+    }
+    for (int i = 0; text[i] != '\0' && col + i < VGA_TEXT_COLS; ++i) {
+        vga[row * VGA_TEXT_COLS + col + i] =
+            (uint16_t)(((uint16_t)attr << 8) | (uint8_t)text[i]);
+    }
+}
+
+static void crash_text_report(const char *name, const CpuExceptionFrame *frame) {
+    char line[80];
+    size_t len;
+    const uint8_t attr = 0x1Fu; /* white on blue */
+    volatile uint16_t *vga = (volatile uint16_t *)(uintptr_t)0xB8000;
+
+    for (int i = 0; i < VGA_TEXT_COLS * VGA_TEXT_ROWS; ++i) {
+        vga[i] = (uint16_t)(((uint16_t)attr << 8) | ' ');
+    }
+
+    crash_text_put(1, 2, "***** HALOXOS CRASH!!! *****", attr);
+    crash_text_put(3, 2, "A fatal CPU exception stopped the system:", attr);
+    crash_text_put(4, 4, name, attr);
+
+    line[0] = '\0';
+    len = 0;
+    bsod_append_field(line, &len, sizeof(line), "STATUS: Error=",
+                      frame != NULL ? frame->error_code : 0);
+    bsod_append_field(line, &len, sizeof(line), " Vector=",
+                      frame != NULL ? frame->vector : 0);
+    crash_text_put(6, 2, line, attr);
+
+    if (frame != NULL) {
+        line[0] = '\0';
+        len = 0;
+        bsod_append_field(line, &len, sizeof(line), "EIP=", frame->eip);
+        bsod_append_field(line, &len, sizeof(line), " CS=", frame->cs);
+        bsod_append_field(line, &len, sizeof(line), " EFLAGS=", frame->eflags);
+        crash_text_put(7, 2, line, attr);
+
+        line[0] = '\0';
+        len = 0;
+        bsod_append_field(line, &len, sizeof(line), "EAX=", frame->eax);
+        bsod_append_field(line, &len, sizeof(line), " EBX=", frame->ebx);
+        bsod_append_field(line, &len, sizeof(line), " ECX=", frame->ecx);
+        bsod_append_field(line, &len, sizeof(line), " EDX=", frame->edx);
+        crash_text_put(8, 2, line, attr);
+
+        line[0] = '\0';
+        len = 0;
+        bsod_append_field(line, &len, sizeof(line), "ESI=", frame->esi);
+        bsod_append_field(line, &len, sizeof(line), " EDI=", frame->edi);
+        bsod_append_field(line, &len, sizeof(line), " EBP=", frame->ebp);
+        bsod_append_field(line, &len, sizeof(line), " ESP=", frame->esp);
+        crash_text_put(9, 2, line, attr);
+    }
+
+    crash_text_put(11, 2, "Looks like you've got something wrong with the system, please make sure to", attr);
+    crash_text_put(12, 2, "report this issue:", attr);
+    crash_text_put(13, 2, "https://github.com/svh03ra/HaloxOS", attr);
+
+    crash_text_put(15, 2, "The graphical crash screen could not be drawn; this is the text fallback.", attr);
+    crash_text_put(16, 2, "The full register and backtrace dump was written to the serial log (COM1)", attr);
+    crash_text_put(17, 2, "and to the boot medium when one is writable.", attr);
+    crash_text_put(19, 2, "Please try again after restarting your device...", attr);
+    crash_text_put(21, 2, "SYSTEM STOP.", attr);
+
+    /* keep the hardware cursor out of the report */
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x20);
+}
+
+/*
+ * Crash-screen paint guard (interrupts.asm).
+ *
+ * crash_guard_call() runs one paint and returns the row it ended at, or -1
+ * when the paint faulted and the exception handler recovered to the guard.
+ * Moves the "did the paint finish?" branch into assembly: a C-level second
+ * return is at the mercy of the optimiser, and getting it wrong is what turns
+ * a fallback screen into an endless fault loop.
+ */
+extern volatile uint8_t crash_guard_active;
+extern int crash_guard_call(int (*paint)(void));
+extern void crash_guard_restore(void) __attribute__((noreturn));
+
+static volatile uint32_t crash_guard_trips = 0;
+static const char *volatile crash_paint_name;
+static const CpuExceptionFrame *volatile crash_paint_frame;
 #if CRASH_TRACE_ENABLED
-    /* Debug builds: full trace detail to the serial log first (more
-     * detail than the screen can show), then the interactive
-     * Backtrace/Calltrace view below the memory map. Never returns -
-     * it owns the crash screen until the machine is reset. y + 10
-     * keeps one blank row between the last map row and the trace
-     * header. The animated cube badge (right side, after the STATUS
-     * line) keeps spinning inside the trace view's poll loop. */
+static volatile int crash_trace_y = 0;
+#endif
+
+static int crash_paint_full(void) {
+    int y = bsod_paint(crash_paint_name, crash_paint_frame, true);
+
+    present();
+    return y;
+}
+
+static int crash_paint_compact(void) {
+    int y = bsod_paint(crash_paint_name, crash_paint_frame, false);
+
+    present();
+    return y;
+}
+
+#if CRASH_TRACE_ENABLED
+static int crash_paint_trace_view(void) {
     crash_cube_last_count = crash_pit_count();
     crash_cube_badge_redraw();
     present();
-    crash_serial_dump_trace(frame);
-    crash_render_trace_view(text_x, y + 10, frame);
-#else
-    /* Release builds: no trace view - animate the cube badge forever
-     * on the frozen screen (PIT clock), redrawing only the badge area
-     * so the crash report itself is never disturbed. */
+    crash_serial_dump_trace(crash_paint_frame);
+    crash_render_trace_view(16, crash_trace_y, crash_paint_frame);
+    return 0;
+}
+#endif
+
+/* Release builds and the fault fallback: keep the cube badge spinning on the
+ * finished report. Only the badge rectangle is touched, so the report around
+ * it is never disturbed. */
+static void crash_cube_animate_forever(void) {
     crash_cube_last_count = crash_pit_count();
+    crash_cube_badge_redraw();
+    present();
     for (;;) {
         if (crash_cube_tick()) {
             crash_cube_badge_redraw();
             present();
         }
     }
-#endif
-
-    present();
-    serial_trace("RENDER", "crash screen presented to framebuffer: SUCCESS");
 }
 
-void cpu_exception_handler(const CpuExceptionFrame *frame) {
+/*
+ * Paint the full crash screen, then animate it.
+ *
+ * Everything that touches the screen runs under the crash guard: a fault in
+ * the paint (bad framebuffer, corrupted graphics state, stale boot pointer)
+ * returns here and the compact report is drawn instead, and a fault in the
+ * interactive trace view falls back to the cube animation. Only when even the
+ * compact report cannot be painted does the VGA text fallback take over. The
+ * boot-log flush runs after the report is on screen, so a slow or dead disk
+ * can no longer hide the crash.
+ */
+static void render_bsod(const char *name, const CpuExceptionFrame *frame) {
+    volatile bool framebuffer_ok =
+        !vga_native_text_mode_active() && fb.address != NULL &&
+        fb.width >= (uint32_t)OS_WIDTH;
+    int y = 16;
+
+    serial_trace("RENDER", "crash screen render started");
+    serial_trace_concat("RENDER", "exception: ", name);
+    serial_trace_hex_value("RENDER", "framebuffer", (uint32_t)(uintptr_t)fb.address);
+    serial_trace_hex_value("RENDER", "framebuffer size", ((uint32_t)fb.width << 16) | fb.height);
+    serial_trace_hex_value("RENDER", "framebuffer bpp", fb.bpp);
+    if (!framebuffer_ok) {
+        serial_trace("ERROR", "RENDER no usable framebuffer: using the VGA text fallback");
+    }
+
+    /* A previous crash's badge background must not survive into this one. */
+    crash_cube_bg_saved = false;
+
+    crash_paint_name = name;
+    crash_paint_frame = frame;
+
+    /* A crash inside an app render leaves the window clip stuck on that app's
+     * client rectangle (app_dispatch.c sets it around each app draw and only
+     * clears it after the call returns, which never happens on a fault). Reset
+     * to the full canvas so the BSOD covers the whole screen. */
+    if (framebuffer_ok) {
+        graphics_reset_window_clip();
+        y = crash_guard_call(crash_paint_full);
+        if (y >= 0) {
+            serial_trace("RENDER", "crash screen presented to framebuffer: SUCCESS");
+        } else {
+            /* The full report faulted while painting. Reset the graphics state
+             * and retry without the memory map: the status and register dump
+             * are what has to come out, and they walk no boot-time pointer. */
+            ++crash_guard_trips;
+            serial_trace("ERROR", "RENDER full crash screen faulted: retrying the compact report");
+            graphics_reset_window_clip();
+            y = crash_guard_call(crash_paint_compact);
+            if (y >= 0) {
+                serial_trace("RENDER", "compact crash screen presented to framebuffer: SUCCESS");
+            } else {
+                ++crash_guard_trips;
+                serial_trace("ERROR", "RENDER compact crash screen faulted: using the VGA text fallback");
+                framebuffer_ok = false;
+            }
+        }
+    }
+
+    if (!framebuffer_ok) {
+        crash_text_report(name, frame);
+        y = OS_HEIGHT;
+    }
+
+    /* The report is visible before any medium I/O: the polled ATA flush can
+     * block behind a missing or dead disk, and that must never be the reason
+     * a crash shows no screen at all. */
+    serial_bootlog_flush(name);
+
+#if CRASH_TRACE_ENABLED
+    if (framebuffer_ok) {
+        /* The interactive view owns the screen. Drawing it (and its badge) is
+         * guarded too: a fault returns -1 and the cube keeps the completed
+         * report alive instead of freezing on a partial redraw. */
+        crash_trace_y = y + 10;
+        if (crash_guard_call(crash_paint_trace_view) < 0) {
+            serial_trace("ERROR", "RENDER trace view faulted: continuing with the cube badge");
+        }
+    }
+#else
+    (void)y;
+#endif
+
+    if (framebuffer_ok) {
+        crash_cube_animate_forever();
+    }
+
+    __asm__ volatile ("cli");
+    for (;;) {
+        __asm__ volatile ("hlt");
+    }
+}
+
+int cpu_exception_handler(const CpuExceptionFrame *frame) {
     static bool crash_handler_active = false;
     const char *reason = debug_forced_fault_reason;
     const char *name = frame != NULL ? cpu_exception_name(frame->vector) : "CPU Exception";
 
-    /* Nested crash (the system crashed INSIDE the crash handler):
-     * never try to re-render the full BSOD - that risks faulting
-     * again and triple-faulting the machine. Keep what is already on
-     * screen and drop into the crash-safe cube animation loop so the
-     * crash screen stays alive forever instead of resetting. */
+    /* The crash screen's paint pass faulted. Abandon the half-painted frame
+     * instead of retrying it blindly: returning through the guard is what
+     * turns a renderer that cannot draw into a fallback screen rather than a
+     * machine stuck on an old or blank frame. */
+    if (crash_guard_active) {
+        crash_guard_active = 0;
+        ++crash_guard_trips;
+        serial_write_string("[ERROR]: Crash screen paint faulted - switching to the fallback renderer\n");
+        if (frame != NULL) {
+            serial_write_string("[ERROR]: paint exception vector=");
+            serial_write_uint(frame->vector);
+            serial_write_string(" EIP=");
+            serial_write_hex32(frame->eip);
+            serial_write_string("\n");
+        }
+        crash_guard_restore();
+    }
+
+    /* #BP and #OF are architectural traps, not fatal machine faults: log the
+     * event and return to the instruction after the trap. isr_common_stub
+     * iretds with the original CPU frame when this returns non-zero. */
+    if (frame != NULL && (frame->vector == 3 || frame->vector == 4)) {
+        serial_write_string("[WARN]: resumable trap vector=");
+        serial_write_uint(frame->vector);
+        serial_write_string(" EIP=");
+        serial_write_hex32(frame->eip);
+        serial_write_string(" - continuing\n");
+        debug_forced_fault_reason = NULL;
+        return 1;
+    }
+
+    /* Nested crash outside a guarded paint. Never redraw here: redrawing on a
+     * broken framebuffer is exactly what turns one fault into an endless
+     * exception loop. Keep the last complete frame on screen and stop. */
     if (crash_handler_active) {
         serial_write_string("[ERROR]: Nested crash inside the crash handler - keeping screen alive\n");
         if (frame != NULL) {
@@ -1019,22 +1493,21 @@ void cpu_exception_handler(const CpuExceptionFrame *frame) {
             serial_write_string("\n");
         }
         __asm__ volatile ("cli");
-        /* reset the animation clock base so the badge keeps ticking */
-        crash_cube_last_count = crash_pit_count();
         for (;;) {
-            if (crash_cube_tick()) {
-                crash_cube_badge_redraw();
-                present();
-            }
+            __asm__ volatile ("hlt");
         }
     }
 
     crash_handler_active = true;
     serial_dump_cpu_exception(name, reason, frame);
     debug_forced_fault_reason = NULL;
+    /* render_bsod() paints the report first and flushes the boot log after it:
+     * the polled ATA flush can block behind a dead disk and must never be able
+     * to keep the crash screen from appearing. */
     render_bsod(name, frame);
     __asm__ volatile ("cli");
     for (;;) {
         __asm__ volatile ("hlt");
     }
+    return 0;
 }

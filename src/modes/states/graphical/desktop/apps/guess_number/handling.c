@@ -25,3 +25,19 @@ static void handle_guess_submit(void) {
     guess_input_len = 0;
     guess_input[0] = '\0';
 }
+
+/*
+ * Clicking the guess field gives it the focused look (blue frame + caret).
+ * Keyboard input still goes to the app whenever its window is active, so
+ * this is a visual focus state, not a second keyboard routing path.
+ */
+static void guess_handle_mouse(void) {
+    Window *window = &windows[APP_GUESS];
+
+    if (!window->open || active_window != APP_GUESS ||
+        !mouse.left || mouse.prev_left) {
+        return;
+    }
+    guess_input_focused = point_in_rect(mouse.x, mouse.y,
+                                        window->x + 14, window->y + 76, 80, 18);
+}

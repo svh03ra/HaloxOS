@@ -83,6 +83,83 @@ fixed_t			viewsin;
 
 player_t*		viewplayer;
 
+/*
+ * Hosted 60 Hz camera interpolation.
+ *
+ * The game state still advances at TICRATE (35 Hz).  Between tics the
+ * hosted pump re-renders the same level with the camera advanced toward
+ * the next tic, so 320x200 output can run at the desktop refresh rate
+ * without changing physics, weapon timing or monster AI.  Only the view
+ * position/height/angle are smoothed; objects still move on tic
+ * boundaries, which is exactly how source ports interpolate.
+ */
+static bool	r_interp_valid = false;
+static int	r_interp_alpha = 1000;   /* 0..1000 within the current tic */
+static fixed_t	r_interp_from_x;
+static fixed_t	r_interp_from_y;
+static fixed_t	r_interp_from_z;
+static angle_t	r_interp_from_angle;
+
+void R_ClearInterpolation (void)
+{
+    r_interp_valid = false;
+}
+
+void R_SetInterpolationFrom (fixed_t x, fixed_t y, fixed_t z, angle_t angle)
+{
+    r_interp_from_x = x;
+    r_interp_from_y = y;
+    r_interp_from_z = z;
+    r_interp_from_angle = angle;
+    r_interp_valid = true;
+}
+
+void R_SetInterpolationAlpha (int alpha)
+{
+    if (alpha < 0)
+	alpha = 0;
+    if (alpha > 1000)
+	alpha = 1000;
+    r_interp_alpha = alpha;
+}
+
+/* fixed_t is 16.16; a one-tic step is small.  Snap instead of interpolating
+ * across a teleport or a very large jump, where a sweep would look wrong. */
+static fixed_t R_InterpFixed (fixed_t from, fixed_t to)
+{
+    int32_t delta = (int32_t)(to - from);
+    int32_t whole;
+    int32_t rem;
+
+    if (r_interp_alpha <= 0)
+	return from;
+    if (r_interp_alpha >= 1000)
+	return to;
+    if (delta > 0x01000000 || delta < -0x01000000)
+	return to;
+
+    whole = delta / 1000;
+    rem = delta % 1000;
+    return from + whole * r_interp_alpha + (rem * r_interp_alpha) / 1000;
+}
+
+static angle_t R_InterpAngle (angle_t from, angle_t to)
+{
+    int32_t delta = (int32_t)(to - from);
+    int32_t whole;
+    int32_t rem;
+
+    if (r_interp_alpha <= 0)
+	return from;
+    if (r_interp_alpha >= 1000)
+	return to;
+
+    whole = delta / 1000;
+    rem = delta % 1000;
+    return from + (angle_t)(whole * r_interp_alpha +
+			    (rem * r_interp_alpha) / 1000);
+}
+
 // 0 = high, 1 = low
 int			detailshift;	
 
@@ -834,10 +911,19 @@ void R_SetupFrame (player_t* player)
     viewplayer = player;
     viewx = player->mo->x;
     viewy = player->mo->y;
-    viewangle = player->mo->angle + viewangleoffset;
+    viewangle = player->mo->angle;
     extralight = player->extralight;
 
     viewz = player->viewz;
+
+    if (r_interp_valid && displayplayer >= 0 &&
+	player == &players[displayplayer]) {
+	viewx = R_InterpFixed(r_interp_from_x, viewx);
+	viewy = R_InterpFixed(r_interp_from_y, viewy);
+	viewz = R_InterpFixed(r_interp_from_z, viewz);
+	viewangle = R_InterpAngle(r_interp_from_angle, viewangle);
+    }
+    viewangle += viewangleoffset;
     
     viewsin = finesine[viewangle>>ANGLETOFINESHIFT];
     viewcos = finecosine[viewangle>>ANGLETOFINESHIFT];

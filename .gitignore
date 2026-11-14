@@ -16,13 +16,35 @@ out/
 *.tmp
 *.log
 build_log.txt
+build*.log
+build_*.log
+build-*.log
+bios-serial.log
+**/bios-serial.log
 
 # Tool builds
 build/tools/
 build/isodir/
 
+# Development-only tests and audits
+loader/test_host.c
+tools/closedform_test.py
+tools/asset_audit.py
+tools/bss_audit.sh
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
 # Generated assets
+*.raw
 *.img
+*.vhd
+*.vhdx
+*.vmdk
+*.vdi
+*.qcow
+*.qcow2
 *.map
 *.ppm
 
@@ -36,6 +58,23 @@ src/modes/states/graphical/desktop/apps/DOOM/DOOM1.WAD
 .idea/
 .freebuff/
 .codex/
+.codex/auth.json
+.codex/config.toml
+.claude/
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/agent-memory-local/
+.kimi-code/
+.kimi/
+.kimi-sandbox/
+.kimi-stash-dir/
+.kimi-code/local.toml
+.env
+.env.local
+.dsh-report/
+.artifacts/
+.cloud-attachments/
+/-
 
 # OS / filesystem junk
 *~

@@ -44,6 +44,7 @@ static void init_state(void) {
     last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
     last_desktop_redraw_terminal_blink = 0xFFFFFFFFu;
     last_desktop_redraw_snake_tick = 0xFFFFFFFFu;
+    last_desktop_redraw_stress_phase = 0xFFFFFFFFu;
     last_performance_sample_phase = 0xFFFFFFFFu;
     perf_window_start_cycles = 0;
     perf_busy_cycle_accum = 0;
@@ -57,6 +58,14 @@ static void init_state(void) {
     debug_history_cursor = 0;
     debug_memory_view_open = false;
     debug_memory_mode = DEBUG_MEMORY_MODE_HEX;
+    debug_memory_visual_width = DEBUG_MEMORY_VISUAL_DEFAULT_W;
+    debug_memory_visual_height = DEBUG_MEMORY_VISUAL_DEFAULT_H;
+    debug_memory_size_focus = -1;
+    debug_memory_size_text[0][0] = '\0';
+    debug_memory_size_text[1][0] = '\0';
+    debug_memory_size_len[0] = 0;
+    debug_memory_size_len[1] = 0;
+    debug_memory_size_fresh = false;
     debug_memory_base = 0;
     debug_memory_cursor = 0;
     debug_memory_edit_nibble = -1;
@@ -67,12 +76,11 @@ static void init_state(void) {
     fps_current = 0;
     fps_avg_ticks_x10 = 0;
     fps_lagging = false;
-    fps_frames_total = 0;
     debug_bp_mask = 0;
     debug_bp_caught = false;
-    debug_bp_frame_base = 0;
     debug_bp_catch_count = 0;
     debug_bp_armed = false;
+    debug_memory_scroll_drag = false;
     debug_log_scroll_x = 0;
     cmd_term.wrap_chars = 51;
     terminal_add_line(&cmd_term, "Welcome to HaloxOS Terminal:");
@@ -87,6 +95,7 @@ static void init_state(void) {
     snake_spawn_food();
     reset_guess();
     mines_place();
+    stress_app_reset();
 }
 
 /*
@@ -98,7 +107,7 @@ static void init_state(void) {
  * span at an address GENERATED per build and shared through
  * ram_requirement.h (the loader compiles the same header), so both sides
  * always agree: 64 KiB-aligned span end + one 64 KiB guard without the
- * embedded WAD (≈5.5 MB → boots a 6 MB machine); 0x1500000 with it,
+ * embedded WAD (≈4.4 MB → boots a 5 MB machine); 0x1500000 with it,
  * matching the LOADER_INFO_SPAN address compiled into the loader. */
 /* Generated boot-chain addresses (see the Makefile's ram_requirement rule). */
 #include "ram_requirement.h"
@@ -121,7 +130,67 @@ typedef struct {
     uint32_t dctx_size;
     uint32_t kernel_entry;
     uint32_t loader_flags;
+    uint32_t trace_addr;
+    uint32_t trace_len;
 } LoaderInfoBlock;
+
+/*
+ * The Multiboot boot_device field is the authoritative source: bits
+ * 24-31 carry the BIOS drive number (the low bits are partition data,
+ * 0xFFFFFF on GRUB). If a loader leaves that byte invalid, the boot menu
+ * also passes the GRUB root device as `halox.boot=(hdN,...)`, which is
+ * enough to recover the number: GRUB's hd0 is BIOS 0x80, hd1 is 0x81,
+ * and so on. This keeps the on-medium boot log on the drive that
+ * actually booted instead of an internal disk with another copy of the
+ * template.
+ */
+static uint8_t bootlog_drive_from_cmdline(const MultibootInfo *mbi) {
+    const char *cmdline;
+    const char *token = NULL;
+
+    if (mbi == NULL || (mbi->flags & (1u << 2)) == 0 || mbi->cmdline == 0) {
+        return 0xFF;
+    }
+    cmdline = (const char *)(uintptr_t)mbi->cmdline;
+    for (uint32_t i = 0; i < 512u && cmdline[i] != '\0'; ++i) {
+        static const char key[] = "halox.boot=";
+        uint32_t j = 0;
+        while (key[j] != '\0' && cmdline[i + j] == key[j]) {
+            ++j;
+        }
+        if (key[j] == '\0') {
+            token = cmdline + i + j;
+            break;
+        }
+    }
+    if (token == NULL) {
+        return 0xFF;
+    }
+    if (*token == '(') {
+        ++token;
+    }
+    if (token[0] == 'h' && token[1] == 'd') {
+        uint32_t number = 0;
+        for (const char *p = token + 2; *p >= '0' && *p <= '9'; ++p) {
+            number = number * 10u + (uint32_t)(*p - '0');
+            if (number >= 0x80u) {
+                return 0xFF;
+            }
+        }
+        return (uint8_t)(0x80u + number);
+    }
+    if (token[0] == 'f' && token[1] == 'd') {
+        uint32_t number = 0;
+        for (const char *p = token + 2; *p >= '0' && *p <= '9'; ++p) {
+            number = number * 10u + (uint32_t)(*p - '0');
+            if (number >= 4u) {
+                return 0xFF;
+            }
+        }
+        return (uint8_t)number;
+    }
+    return 0xFF;
+}
 
 static void trace_loader_info(void) {
     const volatile LoaderInfoBlock *info = (const volatile LoaderInfoBlock *)LOADER_INFO_ADDR;
@@ -150,15 +219,65 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     uint32_t fps_frame_tick = timer_ticks;
 
     serial_init();
+    /* Loader trace prefix first, so the boot-log RAM mirror (and the
+     * flushed bios-serial.log) starts with the loader's [LDR] lines the
+     * same way the QEMU serial capture does. The loader buffers its own
+     * COM1 output and hands the range over through the info block. */
+    {
+        const volatile LoaderInfoBlock *info =
+            (const volatile LoaderInfoBlock *)LOADER_INFO_ADDR;
+        if (info->magic == LOADER_INFO_MAGIC && info->trace_len > 0 &&
+            info->trace_addr != 0 && info->trace_len <= 65536u) {
+            serial_log_load_prefix((const volatile char *)(uintptr_t)info->trace_addr,
+                                   info->trace_len);
+        }
+    }
     serial_trace("INFO", "initialize kernel");
     trace_loader_info();
     serial_trace_hex_value("INFO", "kernel multiboot magic", magic);
     serial_trace_hex_value("INFO", "kernel entry address", (uint32_t)(uintptr_t)&kernel_main);
     boot_drive_valid = false;
     boot_drive_number = 0;
+    boot_medium_is_usb = false;
+    boot_medium_type_known = false;
+    boot_medium_on_xhci = false;
     if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & (1u << 1)) != 0) {
-        boot_drive_valid = true;
-        boot_drive_number = (uint8_t)(mbi->boot_device & 0xFFu);
+        uint32_t raw = mbi->boot_device;
+        uint8_t drive = (uint8_t)((raw >> 24) & 0xFFu);
+
+        boot_device_raw = raw;
+        boot_device_raw_valid = true;
+        serial_trace_hex_value("INFO", "multiboot boot_device raw", raw);
+        /* Multiboot 0.6.96: bits 24-31 are the BIOS drive number, bits
+         * 16-23 the partition, bits 0-15 the sub-partition.  GRUB fills
+         * the low bits with 0xFFFFFF, so masking the LOW byte (the old
+         * code) yields 0xFF - "no boot drive" - on every GRUB boot and
+         * sent the log to whichever disk was probed first. */
+        if (drive == 0x00u && (raw & 0xFFu) >= 0x80u) {
+            /* Loader that puts the number in the low byte instead. */
+            drive = (uint8_t)(raw & 0xFFu);
+        }
+        /* A 64 MiB USB image always boots as a hard disk (0x80..).  A
+         * high byte of 0x00 is ambiguous: some UEFI-CSM stacks report
+         * it for a USB stick, but drive 0 is a floppy and the log writer
+         * cannot reach the FAT partition through it.  Leave that case
+         * invalid so the GRUB-root cmdline fallback below maps hd0 to
+         * 0x80 instead of silently disabling the log. */
+        if (drive >= 0x80u && drive <= 0xFEu) {
+            boot_drive_valid = true;
+            boot_drive_number = drive;
+            serial_trace_hex_value("INFO", "boot drive from multiboot", drive);
+        } else {
+            serial_trace_hex_value("INFO", "boot drive from multiboot unusable", drive);
+        }
+    }
+    if (!boot_drive_valid) {
+        uint8_t cmdline_drive = bootlog_drive_from_cmdline(mbi);
+        if (cmdline_drive != 0xFFu) {
+            boot_drive_valid = true;
+            boot_drive_number = cmdline_drive;
+            serial_trace_hex_value("INFO", "boot drive from GRUB root", boot_drive_number);
+        }
     }
     detect_boot_drive_info(mbi);
     serial_trace_disk_details();
@@ -192,29 +311,84 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
         crash_mmap_length = mbi->mmap_length;
     }
 
+    /* Persist the trace so far BEFORE the video BIOS runs: a machine
+     * that hangs in the mode set would otherwise leave the on-medium
+     * log at zero bytes even though the kernel had booted this far. */
+    serial_bootlog_early_sync(mbi);
+
     init_framebuffer(magic, mbi);
+    /* The video path has installed the real-mode bridge by now, so the
+     * firmware can be asked what kind of bus the boot drive is on. */
+    detect_boot_medium_type(mbi);
     serial_trace_video_mode("initialize graphics");
+    serial_bootlog_mark_graphics_ready();
+    serial_bootlog_checkpoint("graphics initialized");
     video_mode_switch_available = detect_video_mode_switch();
     if (!video_mode_switch_available) {
         serial_trace_concat("WARNING", "video mode switch unavailable on ", video_backend_name());
     }
     init_interrupts();
     serial_trace("INFO", "initialize interrupts");
+    /* Arm the ACPI power button before the first interactive state, so
+     * the physical button is a graceful shutdown request on the boot
+     * menu, the login screen and the desktop alike. */
+    acpi_power_button_init();
     init_state();
     enter_boot_text_mode();
     draw_everything();
     present();
+    serial_bootlog_checkpoint("first frame presented");
+    init_keyboard_controller();
     init_mouse();
+    /* Native xHCI HID keyboard: start whenever the 8042 path is not
+     * usable.  "INT 16h present" is not proof of usable input: on a
+     * CSM/SeaBIOS machine the service exists but its USB stack stops
+     * being serviced once the OS owns IRQ0, so polling returns nothing.
+     * Normal init only adopts an already-configured endpoint; the boot
+     * check's last-resort recovery takes over when it finds none. */
+#if HALOXOS_FORCE_XHCI_HID
+    xhci_hid_init();
+    /* The bring-up knob forces the native keyboard path, so the boot
+     * check must exercise it too, even with a working 8042. */
+    boot_input_check(true);
+#else
+    if (!ps2_keyboard_usable()) {
+        xhci_hid_init();
+        /* No 8042 keyboard: the native xHCI path is the only keyboard
+         * source, so a missing endpoint has to stop the boot. */
+        boot_input_check(true);
+    } else {
+        /* The PS/2/SMM keyboard works, but the mouse may still be a USB HID
+         * device the firmware never exposed through IRQ12 (the common CSM
+         * case).  Mouse-only mode adopts just an MPS-4 boot-mouse endpoint,
+         * so the keyboard endpoint is never touched and the 8042/INT 16h
+         * paths remain active. */
+        xhci_mouse_init();
+        boot_input_check(false);
+    }
+#endif
     __asm__ volatile ("sti");
+    serial_bootlog_checkpoint("interrupts and mouse ready");
     /* Dev-mode self-test with interrupts live (matches the DOOM app
      * environment): raw ATA probes + the port read of the WAD lump
      * directory, so read failures surface at boot on COM1 instead of
      * deep inside the engine boot. */
     doom_wad_selftest();
+    serial_bootlog_checkpoint("hardware self-test complete");
     init_cpu_monitoring();
     serial_trace("INFO", cpu_has_cpuid ? "CPU CPUID available" : "CPU CPUID unavailable");
     serial_trace("INFO", cpu_has_tsc ? "CPU TSC available" : "CPU TSC unavailable");
+    /* IRQ0 liveness probe before anything blocks on timer_ticks.  A dead
+     * PIT/PIC path used to hang the boot in calibrate_cpu_speed(); now it
+     * is recorded as a boot-log stage and the desktop continues without
+     * the frame clock. */
+    if (timer_probe_boot_irq()) {
+        serial_bootlog_checkpoint("timer IRQ0 verified");
+    } else {
+        serial_bootlog_checkpoint("timer IRQ0 missing");
+    }
     calibrate_cpu_speed();
+    serial_bootlog_checkpoint("CPU speed calibrated");
     serial_trace_uint_value("INFO", "CPU speed MHz", cpu_speed_mhz);
     if (cpu_has_tsc) {
         perf_window_start_cycles = (uint32_t)rdtsc_read();
@@ -223,9 +397,11 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
     }
     last_performance_sample_phase = timer_ticks / PERF_UPDATE_TICKS;
     last_input_tick = timer_ticks;
+    serial_bootlog_checkpoint("entering main loop");
 
     for (;;) {
         uint32_t frame_tick = timer_ticks;
+        bool doom_only_frame = false;
 
         uint32_t perf_phase = timer_ticks / PERF_UPDATE_TICKS;
         if (cpu_has_tsc) {
@@ -234,13 +410,21 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
         poll_input();
         update_state();
         if (system_state != STATE_DESKTOP || desktop_should_redraw()) {
-            bool cursor_only = system_state == STATE_DESKTOP && desktop_cursor_only_redraw();
+            bool doom_only = system_state == STATE_DESKTOP && desktop_doom_only_redraw();
+            bool cursor_only = system_state == STATE_DESKTOP && !doom_only &&
+                               desktop_cursor_only_redraw();
+
+            doom_only_frame = doom_only;
             if (cursor_only) {
                 /* Only the pointer moved: put back the saved background,
                  * redraw the pointer and scan out those two small boxes.
                  * On a slow machine this is the difference between a
                  * pointer that glides and one that steps. */
                 desktop_cursor_only_frame();
+            } else if (doom_only) {
+                /* The game produced a new frame and nothing else changed:
+                 * repaint the DOOM window only, not the whole desktop. */
+                desktop_doom_only_frame();
             } else {
                 /* draw_hover_fade_rect sets ui_hover_fade_active while a
                  * button fade is mid-animation; clear it here so the flag
@@ -253,12 +437,12 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
                 present();
             }
             if (system_state == STATE_DESKTOP) {
-                /* A pointer-only frame does not repaint the clock box, so
-                 * it must not claim the clock's second - see the note on
-                 * mark_desktop_redrawn(). */
-                mark_desktop_redrawn(!cursor_only);
+                /* A pointer-only or DOOM-only frame does not repaint the
+                 * clock box, so it must not claim the clock's second - see
+                 * the note on mark_desktop_redrawn(). */
+                mark_desktop_redrawn(!cursor_only && !doom_only);
             }
-        } else if (system_state == STATE_DESKTOP && !fps_overlay_on && desktop_clock_only_redraw()) {
+        } else if (system_state == STATE_DESKTOP && desktop_clock_only_redraw()) {
             /* Nothing changed but the clock's second: repaint the clock
              * box and scan out just its rectangle plus the pointer's,
              * instead of recompositing the whole desktop every second. */
@@ -281,7 +465,6 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
          * TIMER_HZ=60) so the overlay updates fast without flicker.
          * fps_current is FPS * 10 for the XXX.X display. A frame that
          * took 1.5x the rolling average marks fps_lagging for blink. */
-        ++fps_frames_total;
         ++fps_window_frames;
         {
             uint32_t frame_delta = timer_ticks - fps_frame_tick;
@@ -302,22 +485,55 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
             fps_current = elapsed > 0 ? (fps_window_frames * TIMER_HZ * 10u) / elapsed : 0;
             fps_window_tick = timer_ticks;
             fps_window_frames = 0;
+            /* The overlay is a measurement tool; mirror its windows to the
+             * trace so a frame-rate drop can be read back without a
+             * screenshot. Only while visible, so a normal boot stays quiet. */
+            if (fps_overlay_on) {
+                serial_trace_uint_value("PERF", "fps x10", fps_current);
+            }
         }
 
         /* FPS overlay redraws on its own when visible, even on an
-         * otherwise idle desktop. */
+         * otherwise idle desktop.  Only the box is repainted and scanned
+         * out: a ten-times-a-second full desktop recomposite is far more
+         * work than the two digits it updates, and on a large framebuffer
+         * it was the dominant cost while the overlay was visible. */
         if (system_state == STATE_DESKTOP && fps_overlay_on &&
             desktop_should_redraw() == false) {
             static uint32_t fps_last_redraw_tick = 0;
 
             if (timer_ticks - fps_last_redraw_tick >= 6u) {
+                int fps_x;
+                int fps_y;
+                int fps_w;
+                int fps_h;
+
                 fps_last_redraw_tick = timer_ticks;
-                draw_everything();
-                present();
-                mark_desktop_redrawn(true);
+                render_fps_overlay();
+                debug_fps_overlay_rect(&fps_x, &fps_y, &fps_w, &fps_h);
+                present_rect(fps_x, fps_y, fps_w, fps_h);
             }
         }
 
+        /* Debug boot log: stream new trace sectors onto the boot medium
+         * as they accumulate, so an accidental power cut loses at most
+         * the last auto-save window instead of the whole boot. Runs in
+         * the boot menu, login screen and desktop alike, but not while
+         * DOOM is live: the idle iterations between engine frames were
+         * still doing INT 13h/ATA writes, and a single slow sync shows up
+         * as the exact 60 -> 54 -> 43 frame drop this path is meant to
+         * avoid. The next idle frame after the game pauses or closes
+         * catches up. */
+        {
+            bool doom_live = system_state == STATE_DESKTOP &&
+                             windows[APP_DOOM].open &&
+                             active_window == APP_DOOM &&
+                             doom_pointer_locked();
+
+            if (!doom_only_frame && !doom_live) {
+                serial_bootlog_autosave_tick();
+            }
+        }
         if (system_state == STATE_SHUTDOWN) {
             draw_everything();
             present();
@@ -332,10 +548,25 @@ void kernel_main(uint32_t magic, const MultibootInfo *mbi) {
             }
         }
 
-        while (timer_ticks == frame_tick) {
-            cpu_halt_once();
-            if (shutdown_pending) {
-                break;
+        if (timer_irq_verified) {
+            while (timer_ticks == frame_tick) {
+                cpu_halt_once();
+                if (shutdown_pending) {
+                    break;
+                }
+            }
+        } else {
+            /* No frame clock: never HLT, or this loop would sleep
+             * forever.  Port 0x80 writes pace the degraded desktop and
+             * keep keyboard/mouse IRQs responsive. */
+            for (uint32_t spins = 0;
+                 spins < TIMER_FALLBACK_FRAME_WAIT && timer_ticks == frame_tick;
+                 ++spins) {
+                io_wait();
+                __asm__ volatile ("pause");
+                if (shutdown_pending) {
+                    break;
+                }
             }
         }
     }

@@ -104,6 +104,8 @@ static void doom_prepare_new_run(void) {
     doom_hosted_jmp_out = 0;
     doom_frame_rendered = false;
     doom_last_display_gametic = -1;
+    doom_nonblocking_tics = 0;
+    R_ClearInterpolation();
 }
 
 int doom_frame_did_render(void) {
@@ -451,6 +453,12 @@ void doom_wad_selftest(void) {
 int doom_frame(void) {
     int gametic_before;
     bool display_due;
+    bool interpolate;
+    fixed_t prev_x = 0;
+    fixed_t prev_y = 0;
+    fixed_t prev_z = 0;
+    angle_t prev_angle = 0;
+    bool have_prev = false;
 
     doom_hosted_jmp_out = 0;
     doom_frame_rendered = false;
@@ -459,15 +467,58 @@ int doom_frame(void) {
         return 1;
     }
 
+    /* Interpolation is only for an active in-level view.  Menus, the
+     * automap, the intermission and the title run at the original tic
+     * cadence; forcing extra frames there would animate nothing and only
+     * cost time on a slow machine. */
+    interpolate = doom_can_interpolate_frames() &&
+                  gamestate == GS_LEVEL && gametic != 0 &&
+                  !automapactive && !menuactive && !paused &&
+                  displayplayer >= 0 && players[displayplayer].mo != NULL;
+
+    /* Always non-blocking.  Gating this on interpolation made the title
+     * screen (and every menu) wait inside TryRunTics for the next 35 Hz
+     * tic, which stopped the whole desktop loop for that long: the FPS
+     * overlay read 36.9 on the title instead of 60, and key handling in
+     * the menus ran at tic cadence.  Returning immediately lets the
+     * desktop keep its 60 Hz frame clock; without interpolation the
+     * renderer still draws only on tic frames. */
+    doom_nonblocking_tics = 1;
+
+    if (interpolate) {
+        player_t *p = &players[displayplayer];
+
+        prev_x = p->mo->x;
+        prev_y = p->mo->y;
+        prev_z = p->viewz;
+        prev_angle = p->mo->angle;
+        have_prev = true;
+    } else {
+        R_ClearInterpolation();
+    }
+
     /* frame syncronous IO operations (feeds queued events) */
     I_StartFrame();
 
-    /* process one or more tics (NetUpdate runs inside TryRunTics) */
+    /* process zero or more tics (NetUpdate runs inside TryRunTics); the
+     * non-blocking mode makes this return at once when no tic is due. */
     gametic_before = gametic;
     doom_in_frame = true;
     TryRunTics();
     doom_in_frame = false;
     display_due = gametic != gametic_before;
+
+    if (interpolate) {
+        if (have_prev && gametic - gametic_before == 1) {
+            /* One tic ran: blend from the state before it to the state
+             * after it.  A catch-up of two or more tics snaps instead, so
+             * a paused/behind window cannot sweep across the map. */
+            R_SetInterpolationFrom(prev_x, prev_y, prev_z, prev_angle);
+        } else if (gametic - gametic_before > 1) {
+            R_ClearInterpolation();
+        }
+        R_SetInterpolationAlpha(I_GetFrameAlpha());
+    }
 
     /* The original non-hosted loop advances the attract sequence as part of
      * its engine loop. Our hosted frame pump replaces D_DoomLoop, so mirror
@@ -483,11 +534,10 @@ int doom_frame(void) {
         return 1;
     }
 
-    /* The desktop runs at 60 Hz while the original game state runs at
-     * TICRATE (35 Hz).  Re-rendering an identical 320x200 scene on every
-     * desktop frame burned most of the time on weak emulators.  Draw only
-     * when a tic or attract-state transition produced new pixels. */
-    if (!display_due && doom_last_display_gametic == gametic) {
+    /* Without interpolation, draw only when a tic or attract-state
+     * transition produced new pixels.  In-level interpolation deliberately
+     * draws every desktop frame so the camera can move between tics. */
+    if (!interpolate && !display_due && doom_last_display_gametic == gametic) {
         doom_trace_level_watcher();
         return 0;
     }
@@ -647,6 +697,19 @@ int doom_boot(void) {
     doom_quit_requested = 0;
     doom_hosted_jmp_out = 0;
     doom_pending_head = doom_pending_tail = 0;
+
+    /* Carve the engine's low/malloc/alloca arenas from the DOOM zone
+     * before V_Init starts using them.  This is what keeps those ~608 KB
+     * out of the kernel image, so a 6 MB machine can hold a full 640x480
+     * shadow plane.  If the machine cannot host the zone at all, fail
+     * here with the same clear message I_ZoneBase used to produce. */
+    if (!doom_pools_init()) {
+        I_Error("Not enough RAM for DOOM\n(need 10 MB, machine has less)");
+        serial_trace_concat("ERROR", "DOOM boot failed: ", doom_get_error_text());
+        doom_run_state = DOOM_STATE_ERROR;
+        doom_hosted_jmp_out = 0;
+        return doom_run_state;
+    }
 
     doom_boot_active = true;
     doom_startup_sequence();

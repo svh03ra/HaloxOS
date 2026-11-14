@@ -23,87 +23,114 @@ static void render_taskbar_clock(void) {
 }
 
 static void render_taskbar(void) {
-    int total_open = 0;
-    int idx;
+    TaskbarLayout layout;
 
     fill_rect(0, OS_HEIGHT - TASKBAR_H, OS_WIDTH, TASKBAR_H, color_gray_dark);
     draw_rect(0, OS_HEIGHT - TASKBAR_H, OS_WIDTH, TASKBAR_H, color_black);
     draw_button(4, OS_HEIGHT - 24, 46, 18, "START", color_green, color_black, color_black);
 
-    for (int i = 0; i < APP_COUNT; ++i) {
-        if (windows[i].open) ++total_open;
-    }
-    int open_test = count_open_test_windows();
-    if (open_test > 0) ++total_open;
+    layout = taskbar_layout();
 
-    idx = taskbar_scroll;
-    int slot = 0;
-    for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
-        if (!windows[idx].open) continue;
-        const char *title = app_titles[idx];
-        char label[13];
-        int title_len = (int)strlen_local(title);
-        if (title_len > 9) {
-            memcpy_local(label, title, 6);
-            memcpy_local(label + 6, "...", 4);
-            title = label;
+    for (int slot = 0; slot < layout.count; ++slot) {
+        int idx = taskbar_slot_app(&layout, slot);
+        int x = taskbar_app_button_x(slot, layout.count);
+        int w = taskbar_app_button_w(slot, layout.count);
+
+        if (idx == TASKBAR_SLOT_TEST) {
+            char test_label[16];
+            size_t nlen = 0;
+            memcpy_local(test_label, "Test (", 7);
+            nlen = 6;
+            append_uint(test_label, &nlen, sizeof(test_label), (uint32_t)layout.open_test);
+            test_label[nlen] = ')';
+            test_label[nlen + 1] = '\0';
+            draw_button(x, OS_HEIGHT - 24, w, 18, test_label,
+                        color_gray_light, color_black, color_black);
+        } else if (idx >= 0) {
+            const char *title = app_titles[idx];
+            char label[16];
+            int max_chars = (w - 8) / 8;
+            int title_len;
+
+            if (max_chars < 4) max_chars = 4;
+            title_len = (int)strlen_local(title);
+            if (title_len > max_chars) {
+                int keep = max_chars - 3;
+                if (keep > (int)sizeof(label) - 4) {
+                    keep = (int)sizeof(label) - 4;
+                }
+                memcpy_local(label, title, keep);
+                memcpy_local(label + keep, "...", 4);
+                title = label;
+            }
+            draw_button(x, OS_HEIGHT - 24, w, 18, title,
+                        active_window == idx ? color_blue : color_gray_light, color_black,
+                        active_window == idx ? color_white : color_black);
         }
-        draw_button(58 + slot * 88, OS_HEIGHT - 24, 84, 18, title,
-                    active_window == idx ? color_blue : color_gray_light, color_black,
-                    active_window == idx ? color_white : color_black);
-        ++slot;
-    }
-    if (open_test > 0 && idx >= APP_COUNT && slot < TASKBAR_APP_SLOTS) {
-        char test_label[16];
-        size_t nlen = 0;
-        memcpy_local(test_label, "Test (", 7);
-        nlen = 6;
-        append_uint(test_label, &nlen, sizeof(test_label), (uint32_t)open_test);
-        test_label[nlen] = ')';
-        test_label[nlen + 1] = '\0';
-        draw_button(58 + slot * 88, OS_HEIGHT - 24, 84, 18, test_label,
-                    color_gray_light, color_black, color_black);
-        ++slot;
-        ++idx;
     }
 
-    int clock_x = clock_widget_x();
-
-    if (total_open > TASKBAR_APP_SLOTS) {
-        int arrow_x = clock_x - 4 - 28;
-        bool can_left = false;
-        for (int i = taskbar_scroll - 1; i >= 0; --i) {
-            if (windows[i].open) { can_left = true; break; }
-        }
-        bool can_right = false;
-        for (int i = idx; i < APP_COUNT; ++i) {
-            if (windows[i].open) { can_right = true; break; }
-        }
-        draw_button(arrow_x, OS_HEIGHT - 24, 12, 18, "<", can_left ? color_gray_light : color_gray, color_black, color_black);
-        draw_button(arrow_x + 16, OS_HEIGHT - 24, 12, 18, ">", can_right ? color_gray_light : color_gray, color_black, color_black);
+    if (layout.arrows) {
+        int arrow_x = taskbar_arrow_x();
+        bool can_left = taskbar_can_scroll_left();
+        bool can_right = taskbar_can_scroll_right();
+        draw_button(arrow_x, OS_HEIGHT - 24, 12, 18, "<",
+                    can_left ? color_gray_light : color_gray, color_black, color_black);
+        draw_button(arrow_x + 16, OS_HEIGHT - 24, 12, 18, ">",
+                    can_right ? color_gray_light : color_gray, color_black, color_black);
     }
 
     render_taskbar_clock();
 }
 
+/*
+ * Start menu geometry.
+ *
+ * Debug builds put a "TEST ONLY:" block above the Tools rows.  It shifts
+ * every existing row down by the same amount and grows the menu, so the
+ * list does not cover the START button it opens from.  Release builds keep
+ * the original 180x232 menu byte for byte.
+ */
+#define START_MENU_W       180
+#define START_MENU_BASE_H  232
+#if HALOXOS_CONFIG_DEBUG
+#define START_MENU_TEST_SHIFT 34
+#else
+#define START_MENU_TEST_SHIFT 0
+#endif
+#define START_MENU_H (START_MENU_BASE_H + START_MENU_TEST_SHIFT)
+#define START_MENU_TEST_ROW 12
+
+static int start_menu_y(void) {
+    return OS_HEIGHT - TASKBAR_H - START_MENU_H;
+}
+
 static int start_menu_item_y(int menu_y, int row) {
+    int shift = START_MENU_TEST_SHIFT;
+
     switch (row) {
-        case 0: return menu_y + 22;
-        case 1: return menu_y + 38;
-        case 2: return menu_y + 54;
-        case 3: return menu_y + 70;
-        case 4: return menu_y + 86;
-        case 6: return menu_y + 120;
-        case 7: return menu_y + 136;
-        case 9: return menu_y + 174;
-        case 10: return menu_y + 190;
-        case 11: return menu_y + 206;
+#if HALOXOS_CONFIG_DEBUG
+        case START_MENU_TEST_ROW: return menu_y + 22;
+#else
+        /* Kept out of every hit test in release builds: this is below the
+         * desktop, so no pointer coordinate can ever land on it. */
+        case START_MENU_TEST_ROW: return -10000;
+#endif
+        case 0: return menu_y + 22 + shift;
+        case 1: return menu_y + 38 + shift;
+        case 2: return menu_y + 54 + shift;
+        case 3: return menu_y + 70 + shift;
+        case 4: return menu_y + 86 + shift;
+        case 6: return menu_y + 120 + shift;
+        case 7: return menu_y + 136 + shift;
+        case 9: return menu_y + 174 + shift;
+        case 10: return menu_y + 190 + shift;
+        case 11: return menu_y + 206 + shift;
         default: return -1;
     }
 }
 
 static int start_menu_hit_row(int menu_x, int menu_y, int px, int py) {
-    static const int rows[] = {0, 1, 2, 3, 4, 6, 7, 9, 10, 11};
+    static const int rows[] = {START_MENU_TEST_ROW, 0, 1, 2, 3, 4, 6, 7, 9, 10, 11};
     for (int i = 0; i < (int)(sizeof(rows) / sizeof(rows[0])); ++i) {
         int row_y = start_menu_item_y(menu_y, rows[i]);
         if (point_in_rect(px, py, menu_x + 4, row_y, 172, 15)) {
@@ -145,9 +172,10 @@ static void render_start_menu(void) {
         return;
     }
     int x = 0;
-    int y = OS_HEIGHT - TASKBAR_H - 232;
+    int y = start_menu_y();
+    int shift = START_MENU_TEST_SHIFT;
     int hover_row = -1;
-    if (point_in_rect(mouse.x, mouse.y, x, y, 180, 232)) {
+    if (point_in_rect(mouse.x, mouse.y, x, y, START_MENU_W, START_MENU_H)) {
         hover_row = start_menu_hit_row(x, y, mouse.x, mouse.y);
     }
     if (hover_row != start_menu_hover_row) {
@@ -155,18 +183,24 @@ static void render_start_menu(void) {
         start_menu_hover_tick = timer_ticks;
     }
 
-    fill_rect(x, y, 180, 232, color_gray_light);
-    draw_rect(x, y, 180, 232, color_black);
-    draw_text(x + 8, y + 8, "Tools:", color_blue_dark, color_gray_light, true);
+    fill_rect(x, y, START_MENU_W, START_MENU_H, color_gray_light);
+    draw_rect(x, y, START_MENU_W, START_MENU_H, color_black);
+#if HALOXOS_CONFIG_DEBUG
+    /* Debug builds only: the stress tool is the very first entry in the
+     * start menu, clearly marked so it cannot be mistaken for a normal app. */
+    draw_text(x + 8, y + 8, "TEST ONLY:", color_red, color_gray_light, true);
+    draw_start_menu_item(x, y, START_MENU_TEST_ROW, "Stress Test", color_black);
+#endif
+    draw_text(x + 8, y + 8 + shift, "Tools:", color_blue_dark, color_gray_light, true);
     draw_start_menu_item(x, y, 0, "Notepad", color_black);
     draw_start_menu_item(x, y, 1, "Command Prompt", color_black);
     draw_start_menu_item(x, y, 2, "Paint", color_black);
     draw_start_menu_item(x, y, 3, "Explorer", color_black);
     draw_start_menu_item(x, y, 4, "Task Manager", color_black);
-    draw_text(x + 8, y + 106, "Games:", color_blue_dark, color_gray_light, true);
+    draw_text(x + 8, y + 106 + shift, "Games:", color_blue_dark, color_gray_light, true);
     draw_start_menu_item(x, y, 6, "Game Center", color_black);
     draw_start_menu_item(x, y, 7, "Demo Center", color_black);
-    draw_text(x + 8, y + 160, "Options:", color_blue_dark, color_gray_light, true);
+    draw_text(x + 8, y + 160 + shift, "Options:", color_blue_dark, color_gray_light, true);
     draw_start_menu_item(x, y, 9, "Power Options", color_black);
     draw_start_menu_item(x, y, 10, "Settings", color_black);
     draw_start_menu_item(x, y, 11, "x Close", color_red);
@@ -214,8 +248,17 @@ static void render_context_menu(void) {
         int cb_y = item_y + 3;
         int cb_s = 10;
         draw_rect(cb_x, cb_y, cb_s, cb_s, color_black);
+        fill_rect(cb_x + 1, cb_y + 1, cb_s - 2, cb_s - 2, color_white);
         if (desktop_auto_grid) {
-            fill_rect(cb_x + 2, cb_y + 2, cb_s - 4, cb_s - 4, color_black);
+            /* A real blue tick, not just a filled black square: the old
+             * one-pixel fill was easy to read as "unchecked" against the
+             * grey menu row, which made the Auto-Grid toggle look dead. */
+            for (int tick = 0; tick < 3; ++tick) {
+                draw_pixel(cb_x + 2 + tick, cb_y + 4 + tick, color_blue);
+            }
+            for (int tick = 0; tick < 5; ++tick) {
+                draw_pixel(cb_x + 4 + tick, cb_y + 6 - tick, color_blue);
+            }
         }
         draw_text(x + 24, item_y + 4, "Auto Grid", color_black, color_gray_light, true);
     }

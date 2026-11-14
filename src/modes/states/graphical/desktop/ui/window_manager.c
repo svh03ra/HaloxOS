@@ -16,6 +16,8 @@ static int app_window_width(AppId app) {
         case APP_EXPLORER: return 336;
         case APP_CMD: return 420;
         case APP_DOOM: return 336;   /* client 320x240: DOOM's 320x200 at the exact DOS 4:3 */
+        case APP_COIN_RUN: return 322;   /* client exactly 320 wide: the playfield fills it */
+        case APP_STRESS_TEST: return STRESS_WINDOW_W;
         default: return 300;
     }
 }
@@ -25,7 +27,7 @@ static int app_window_height(AppId app) {
         case APP_SETTINGS: return 260;
         case APP_TASK_MANAGER: return 360;
         case APP_POWER: return 160;
-        case APP_GAME_CENTER: return 272;   /* 98px header + 4 rows x 34 + 36 margin */
+        case APP_GAME_CENTER: return 306;   /* 98px header + 5 rows x 34 + 38 margin */
         case APP_DEMO_CENTER: return 230;
         case APP_3D_BOX: return 280;
         case APP_FIRECRACKER: return 260;
@@ -33,31 +35,218 @@ static int app_window_height(AppId app) {
         case APP_PAINT: return 290;
         case APP_EXPLORER: return 220;
         case APP_DOOM: return 272;   /* 24 + 240 + 8: client = 320x240 */
+        case APP_COIN_RUN: return 220;   /* 19px chrome + 200px playfield + 1px border */
+        case APP_STRESS_TEST: return STRESS_WINDOW_H;
         default: return 200;
     }
+}
+
+/*
+ * Taskbar app-row geometry.
+ *
+ * The renderer, the click router and the scroll logic all used to repeat
+ * "58 + slot * 88, 84 wide, five slots". That made the row a fixed island
+ * on a wider desktop and let the three copies drift apart. Everything now
+ * goes through the helpers below: the row starts at TASKBAR_APP_LEFT, ends
+ * just before the overflow-arrow zone, and the button width is whatever is
+ * left after the inter-button gaps. At the 640x480 base resolution the
+ * numbers work out to the original five 84-pixel buttons.
+ */
+#define TASKBAR_APP_LEFT          58
+#define TASKBAR_APP_GAP            4
+#define TASKBAR_APP_MIN_W         84
+#define TASKBAR_APP_COMPACT_SLOTS  5
+#define TASKBAR_APP_RIGHT_PAD     18   /* gap between the row and the arrow zone */
+#define TASKBAR_ARROW_RIGHT_PAD    4   /* gap between the arrows and the clock */
+#define TASKBAR_ARROW_BUTTON_W    12
+#define TASKBAR_ARROW_SPACING      4
+#define TASKBAR_ARROW_BLOCK_W     (TASKBAR_ARROW_BUTTON_W * 2 + TASKBAR_ARROW_SPACING)
+#define TASKBAR_SLOT_TEST        (-1)
+#define TASKBAR_SLOT_NONE        (-2)
+
+typedef struct {
+    int start;       /* first app index scanned for this row */
+    int count;       /* buttons actually visible, including Test */
+    int capacity;    /* buttons that fit at TASKBAR_APP_MIN_W */
+    int total_open;  /* open app buttons plus the Test button */
+    int open_test;   /* live test windows, if any */
+    bool arrows;     /* overflow arrows needed */
+} TaskbarLayout;
+
+static int taskbar_arrow_x(void) {
+    return clock_widget_x() - TASKBAR_ARROW_RIGHT_PAD - TASKBAR_ARROW_BLOCK_W;
+}
+
+static int taskbar_app_area_right(void) {
+    return taskbar_arrow_x() - TASKBAR_APP_RIGHT_PAD;
+}
+
+static int taskbar_app_area_width(void) {
+    int width = taskbar_app_area_right() - TASKBAR_APP_LEFT;
+    return width > 0 ? width : 0;
+}
+
+/* The base 640x480 desktop keeps its original compact row: five 84-pixel
+ * buttons with the old gap before the clock. Wider canvases use the full
+ * row so the buttons grow with the desktop instead of leaving a hole. */
+static bool taskbar_compact_layout(void) {
+    return OS_WIDTH <= OS_BASE_WIDTH;
+}
+
+static int taskbar_app_capacity(void) {
+    int width;
+    int capacity = 0;
+
+    if (taskbar_compact_layout()) {
+        return TASKBAR_APP_COMPACT_SLOTS;
+    }
+    width = taskbar_app_area_width();
+    while (capacity < APP_COUNT + 1) {
+        int need = (capacity + 1) * TASKBAR_APP_MIN_W + capacity * TASKBAR_APP_GAP;
+        if (need > width) break;
+        ++capacity;
+    }
+    return capacity > 0 ? capacity : 1;
+}
+
+static int taskbar_total_open(void) {
+    int total = 0;
+    for (int i = 0; i < APP_COUNT; ++i) {
+        if (windows[i].open) ++total;
+    }
+    if (count_open_test_windows() > 0) ++total;
+    return total;
+}
+
+static TaskbarLayout taskbar_layout(void) {
+    TaskbarLayout layout;
+
+    layout.open_test = count_open_test_windows();
+    layout.total_open = 0;
+    for (int i = 0; i < APP_COUNT; ++i) {
+        if (windows[i].open) ++layout.total_open;
+    }
+    if (layout.open_test > 0) ++layout.total_open;
+    layout.capacity = taskbar_app_capacity();
+    /* When every open app fits, always start at the first app: a wider
+     * canvas (or a closed app) must not leave the row scrolled past apps
+     * that could now be shown. */
+    layout.start = layout.total_open <= layout.capacity ? 0 : taskbar_scroll;
+    if (layout.start < 0) layout.start = 0;
+    if (layout.start > APP_COUNT) layout.start = APP_COUNT;
+    layout.count = 0;
+    for (int i = layout.start; i < APP_COUNT && layout.count < layout.capacity; ++i) {
+        if (windows[i].open) ++layout.count;
+    }
+    if (layout.count < layout.capacity && layout.open_test > 0) ++layout.count;
+    layout.arrows = layout.total_open > layout.capacity;
+    return layout;
+}
+
+/* Slot -> app index, or TASKBAR_SLOT_TEST for the trailing Test button.
+ * Keeping this mapping in one place is what lets the renderer and the
+ * click router agree even when the scroll position or capacity changes. */
+static int taskbar_slot_app(const TaskbarLayout *layout, int slot) {
+    int seen = 0;
+
+    if (slot < 0 || slot >= layout->count) {
+        return TASKBAR_SLOT_NONE;
+    }
+    for (int i = layout->start; i < APP_COUNT; ++i) {
+        if (!windows[i].open) continue;
+        if (seen == slot) return i;
+        ++seen;
+    }
+    if (seen == slot && layout->open_test > 0) {
+        return TASKBAR_SLOT_TEST;
+    }
+    return TASKBAR_SLOT_NONE;
+}
+
+static int taskbar_app_button_w(int slot, int count) {
+    int width;
+    int gaps;
+    int base;
+    int extra;
+
+    if (count <= 0) {
+        return 0;
+    }
+    if (taskbar_compact_layout()) {
+        (void)slot;
+        return TASKBAR_APP_MIN_W;
+    }
+    width = taskbar_app_area_width();
+    gaps = TASKBAR_APP_GAP * (count - 1);
+    base = (width - gaps) / count;
+    extra = (width - gaps) % count;
+    if (base < TASKBAR_APP_MIN_W) {
+        base = TASKBAR_APP_MIN_W;
+    }
+    return base + (slot < extra ? 1 : 0);
+}
+
+static int taskbar_app_button_x(int slot, int count) {
+    int x = TASKBAR_APP_LEFT;
+
+    for (int i = 0; i < slot; ++i) {
+        x += taskbar_app_button_w(i, count) + TASKBAR_APP_GAP;
+    }
+    return x;
+}
+
+static bool taskbar_can_scroll_left(void) {
+    for (int i = 0; i < taskbar_scroll && i < APP_COUNT; ++i) {
+        if (windows[i].open) return true;
+    }
+    return false;
+}
+
+static bool taskbar_can_scroll_right(void) {
+    TaskbarLayout layout = taskbar_layout();
+    int last = layout.start - 1;
+    int seen = 0;
+
+    for (int i = layout.start; i < APP_COUNT && seen < layout.capacity; ++i) {
+        if (!windows[i].open) continue;
+        last = i;
+        ++seen;
+    }
+    if (seen < layout.capacity && layout.open_test > 0) {
+        return false;   /* the Test button is already the last visible slot */
+    }
+    for (int i = last + 1; i < APP_COUNT; ++i) {
+        if (windows[i].open) return true;
+    }
+    if (layout.open_test > 0 && seen >= layout.capacity) {
+        return true;    /* Test is still waiting beyond the visible row */
+    }
+    return false;
 }
 
 /*
  * Keep the button of the app that was just opened or switched to on the
  * taskbar.
  *
- * The row shows TASKBAR_APP_SLOTS buttons starting at taskbar_scroll, so an
- * app activated from the Start menu, by a keyboard shortcut or by another
- * app's own logic can fall outside that window - leaving a running app with
- * no visible button and no obvious sign of which app you are in.
+ * The row shows taskbar_app_capacity() buttons starting at taskbar_scroll,
+ * so an app activated from the Start menu, by a keyboard shortcut or by
+ * another app's own logic can fall outside that window - leaving a running
+ * app with no visible button and no obvious sign of which app you are in.
  *
  * When that happens the window slides BACK so the active app takes the last
  * slot. Sliding it forward instead (taskbar_scroll = app) would be a one-line
  * fix, but with a late app - 3D Box, Demo Center, DOOM - it would leave the
- * row showing that single button and four empty slots while five other apps
- * are still open. Sliding back keeps every visible slot filled.
+ * row showing that single button and the rest of the slots empty while the
+ * other open apps are still hidden. Sliding back keeps every visible slot
+ * filled.
  *
  * Scrolling with the overflow arrows does NOT re-reveal: you can scroll away
  * from the active app and stay there until you activate something again.
  */
 static void taskbar_reveal_app(int app) {
-    int idx = taskbar_scroll;
-    int slot = 0;
+    int capacity = taskbar_app_capacity();
+    int idx;
+    int slot;
     int start;
     int filled;
 
@@ -65,8 +254,15 @@ static void taskbar_reveal_app(int app) {
         return;
     }
 
+    /* Everything fits: no scroll position can hide anything. */
+    if (taskbar_total_open() <= capacity) {
+        taskbar_scroll = 0;
+        return;
+    }
+
     /* Already inside the visible window? Leave the scroll alone. */
-    for (; slot < TASKBAR_APP_SLOTS && idx < APP_COUNT; ++idx) {
+    idx = taskbar_scroll;
+    for (slot = 0; slot < capacity && idx < APP_COUNT; ++idx) {
         if (!windows[idx].open) continue;
         if (idx == app) {
             return;
@@ -76,7 +272,7 @@ static void taskbar_reveal_app(int app) {
 
     start = app;
     filled = 0;
-    for (int i = app; i >= 0 && filled < TASKBAR_APP_SLOTS; --i) {
+    for (int i = app; i >= 0 && filled < capacity; --i) {
         if (!windows[i].open) continue;
         start = i;
         ++filled;
@@ -86,11 +282,24 @@ static void taskbar_reveal_app(int app) {
 
 static void open_window(AppId app) {
     Window *window = &windows[app];
+#if !HALOXOS_CONFIG_DEBUG
+    /* Debug-build-only tool: it stays compiled in release builds so the
+     * enum and arrays are one shape, but no route may open it. */
+    if (app == APP_STRESS_TEST) {
+        return;
+    }
+#endif
     menu_open = false;
     context_menu_open = false;
     desktop_icon_menu_open = false;
     start_app_menu_open = false;
     task_manager_confirm_kill = false;
+    /* DOOM needs the free RAM that a Memory/GPU stress pool reserves, and a
+     * running stress load would also starve the game.  Stop cleanly before
+     * the engine allocates its zone. */
+    if (app == APP_DOOM && stress_test_running) {
+        stress_stop();
+    }
     if (app == APP_POWER) {
         power_menu_open = true;
         active_window = -1;
@@ -119,6 +328,8 @@ static void open_window(AppId app) {
 
     if (app == APP_SNAKE) {
         reset_snake();
+    } else if (app == APP_COIN_RUN) {
+        coin_run_reset();
     } else if (app == APP_GUESS) {
         reset_guess();
     } else if (app == APP_MINES) {
@@ -139,8 +350,12 @@ static void open_window(AppId app) {
         task_manager_selected_process = 0;
         task_manager_confirm_kill = false;
         task_manager_kill_target = -1;
+    } else if (app == APP_STRESS_TEST) {
+        stress_app_reset();
     } else if (app == APP_3D_BOX) {
         box3d_mode = 0;
+        box3d_shape = 0;
+        box3d_color_index = 8;
         box3d_angle = 0;
         box3d_angle_x = 0;
         box3d_last_tick = timer_ticks;
@@ -162,6 +377,7 @@ static void open_window(AppId app) {
 
 static void set_active_window(AppId app) {
     active_window = app;
+    guess_input_focused = false;
     taskbar_reveal_app((int)app);
     menu_open = false;
     context_menu_open = false;
@@ -185,6 +401,11 @@ static void close_window(AppId app) {
     }
     if (windows[app].open) {
         serial_trace_concat("INFO", "Application Closed - ", app_titles[app]);
+    }
+    if (app == APP_STRESS_TEST) {
+        /* Closing the window must not leave the trigger loading the machine
+         * with no visible Stop control. */
+        stress_stop();
     }
     if (app == APP_DOOM) {
         /* Shut the engine down so reopening re-probes the WAD. */
@@ -221,6 +442,7 @@ static void open_desktop(void) {
     context_menu_open = false;
     cpu_halted_overlay = false;
     shutdown_pending = false;
+    stress_stop();
     active_window = -1;
     task_manager_gpu_scroll_drag = false;
     /* A fresh desktop session starts with the snap-grid overlay hidden:
@@ -232,4 +454,5 @@ static void open_desktop(void) {
     last_desktop_redraw_perf_phase = 0xFFFFFFFFu;
     last_desktop_redraw_terminal_blink = 0xFFFFFFFFu;
     last_desktop_redraw_snake_tick = 0xFFFFFFFFu;
+    last_desktop_redraw_stress_phase = 0xFFFFFFFFu;
 }

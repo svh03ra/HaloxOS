@@ -48,6 +48,9 @@ static void apply_settings(void) {
                            settings_applied.widescreen != next.widescreen;
 
     if (video_changed) {
+        /* A real Memory/GPU working set lives just below the shadow plane;
+         * release it before the canvas asks for a different amount of RAM. */
+        stress_stop();
         /* Ask for the new desktop size BEFORE the switch: the mode setter
          * re-derives the canvas from the mode it actually programs, and on a
          * backend that cannot set modes at all (the bootloader framebuffer)
@@ -141,13 +144,9 @@ static const char *resolution_name_wide(uint8_t index) {
  * same check:
  *
  *   1. A backend that can program a mode (BGA, VMware SVGA, VGA) can present
- *      ANY size its device accepts. An entry below the 640x480 base canvas is
- *      a real low-resolution output there: the desktop keeps its 640x480
- *      canvas (the UI is laid out for it) and the present step samples that
- *      canvas down into the smaller mode - the way every pre-canvas build
- *      showed 320x240 and friends. Those entries are applicable, so the
- *      arrows must be able to reach them; only a size past the output cap or
- *      past what the device itself accepts is dead.
+ *      ANY size its device accepts. The list itself now starts at 480p (see
+ *      the mode table), so this mostly guards a size past the output cap or
+ *      past what the device itself accepts: those are the dead entries.
  *
  *   2. On a fixed framebuffer there is no runtime mode set at all: the mode
  *      the bootloader set IS the display, the desktop fills it natively at
@@ -184,6 +183,16 @@ static bool resolution_option_supported(const SettingsState *base, uint8_t index
          * entry the card does have works.
          */
         return vbe_size_supported(option->width, option->height, candidate.palette_mode);
+    }
+
+    if (video_backend == VIDEO_BACKEND_MULTIBOOT && !vbe_mode_available()) {
+        /*
+         * A bootloader framebuffer with no video BIOS list has no runtime mode
+         * set: the output is fixed, and the only thing Apply can do is re-size
+         * the desktop inside it.  Entries that fit are selectable; a larger
+         * one is not, because it would be clamped back to the output.
+         */
+        return option->width <= fb.width && option->height <= fb.height;
     }
 
     if (!video_mode_switch_available) {
@@ -266,10 +275,10 @@ static void resolution_step(int direction) {
 
 /*
  * The widescreen checkbox flips the column, so the same index now names a
- * different size - and the wide column's 256x144 / 426x240 are below the base
- * canvas. Snap to the closest entry in the new column that is usable, so the
- * checkbox can never leave the selection pointing at something Apply cannot
- * switch to.
+ * different size - and this machine may not be able to show that size (a
+ * fixed framebuffer, or a depth the card has no mode for). Snap to the
+ * closest entry in the new column that is usable, so the checkbox can never
+ * leave the selection pointing at something Apply cannot switch to.
  */
 static void resolution_snap_to_supported(void) {
     int count = resolution_entry_count(settings_pending.widescreen);

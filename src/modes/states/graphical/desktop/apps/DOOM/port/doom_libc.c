@@ -279,14 +279,22 @@ int doom_sprintf(char *dest, const char *fmt, ...) {
  * lumpinfo growth, i_net tables) are small and long-lived; a bump
  * arena with per-allocation size headers is plenty (the zone itself
  * is allocated separately at boot). 256 KB covers W_Init's growth
- * chain for any IWAD up to ~12000 lumps. */
-#define DOOM_MALLOC_ARENA (256 * 1024)
-static uint8_t doom_malloc_pool[DOOM_MALLOC_ARENA] __attribute__((aligned(16)));
+ * chain for any IWAD up to ~12000 lumps.  The arena itself is carved
+ * from the DOOM zone by doom_pools_init(); this file only owns the
+ * allocator bookkeeping. */
+static uint8_t *doom_malloc_pool = NULL;
+static size_t doom_malloc_pool_bytes = 0;
 static size_t doom_malloc_used = 0;
 
 typedef struct {
     size_t size; /* payload bytes, 16-byte aligned */
 } doom_alloc_hdr_t;
+
+void doom_malloc_set_pool(void *pool, size_t bytes) {
+    doom_malloc_pool = (uint8_t *)pool;
+    doom_malloc_pool_bytes = bytes;
+    doom_malloc_used = 0;
+}
 
 void *doom_malloc(size_t size) {
     if (size == 0) {
@@ -294,10 +302,11 @@ void *doom_malloc(size_t size) {
     }
     size = (size + 15u) & ~(size_t)15u;
     size_t need = sizeof(doom_alloc_hdr_t) + size;
-    if (doom_malloc_used + need > DOOM_MALLOC_ARENA) {
+    if (doom_malloc_pool == NULL || doom_malloc_used + need > doom_malloc_pool_bytes) {
         /* engine treats this like a fatal error */
         extern void doom_fatal(const char *message);
         doom_fatal("doom_malloc: arena exhausted");
+        return NULL;
     }
     doom_alloc_hdr_t *hdr = (doom_alloc_hdr_t *)&doom_malloc_pool[doom_malloc_used];
     hdr->size = size;

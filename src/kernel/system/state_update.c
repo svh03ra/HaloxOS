@@ -23,6 +23,9 @@ static void update_state(void) {
             serial_trace("WARNING", "ACPI unavailable at halt");
         }
         serial_trace("INFO", "CPU halting (cli + hlt loop)");
+        /* The trace survives the halt: flush the boot log before the
+         * interrupts go off for good. */
+        serial_bootlog_flush("halt");
         __asm__ volatile("cli");
         for (;;) {
             __asm__ volatile("hlt");
@@ -40,6 +43,15 @@ static void update_state(void) {
         }
         if (debug_overlay_open) {
             debug_handle_key(event);
+            continue;
+        }
+        /* Stress Test stop shortcut: the trigger keeps loading the machine
+         * while the desktop is in the background, so this has to work no
+         * matter which window is active.  Shift is reserved for the Task
+         * Manager shortcut below. */
+        if (system_state == STATE_DESKTOP && stress_test_running &&
+            keyboard_ctrl && !keyboard_shift && event.code == KEY_ESC) {
+            stress_stop();
             continue;
         }
         if (system_state == STATE_DESKTOP && keyboard_ctrl && keyboard_shift && event.code == KEY_ESC) {
@@ -61,6 +73,9 @@ static void update_state(void) {
                 handle_login_keys(event);
                 break;
             case STATE_DESKTOP:
+                /* A real key press opens the next breakpoint frame. Keys
+                 * consumed by the debugger overlay never reach here. */
+                debug_bp_note_input();
                 if (event.code == KEY_F4 && keyboard_alt && active_window >= 0 && active_window < APP_COUNT) {
                     close_window((AppId)active_window);
                 } else if (event.code == KEY_ESC && active_window == -1) {
@@ -77,7 +92,9 @@ static void update_state(void) {
 
     if (system_state == STATE_DESKTOP) {
         handle_desktop_mouse();
+        update_stress_test();
         update_snake();
+        update_coin_run();
         update_demos();
         update_doom();
 

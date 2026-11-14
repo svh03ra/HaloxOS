@@ -9,6 +9,8 @@ static void mines_place(void) {
     memset_local(mines_flagged, 0, sizeof(mines_flagged));
     mines_lost = false;
     mines_won = false;
+    mines_hover_x = -1;
+    mines_hover_y = -1;
 
     int placed = 0;
     while (placed < MINES_COUNT) {

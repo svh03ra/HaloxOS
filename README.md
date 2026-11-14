@@ -6,12 +6,12 @@ _100% **REAL** OS, Built from **SCRATCH**, Made with **AI**:_
 _<sup>(Graphical Demonstration included)</sup>_
 
 ## ❓ What's that?
-My AI-powered hobby OS aims to be **fully implemented**, stability compatible with ancient machines which I've ever made in Codex.
-
+My AI-powered hobby OS aims to be **fully implemented**, stability compatible with ancient machines!
 I’ve been handling things carefully and delicately for progress... So what’s going to be build lads?
 
 This was included as part of the Kernel Compression feature, powered by [Zstandard (ZSTD)](https://github.com/facebook/zstd) technology.
-_In the V1.1 development version that we're working on it_: please check the [ZSTD license](https://github.com/facebook/zstd/blob/dev/LICENSE) which I used.
+
+_For Version 1.1_: please check the [ZSTD license](https://github.com/facebook/zstd/blob/dev/LICENSE) which I used.
 
 
 ## 🧭 Source Layout
@@ -39,10 +39,10 @@ Build-time defaults live in `src/config/config.h`, including debug mode, default
 Let’s take a look at some requirements you may need for _pinchy salt_!
 
 **Minimum Requirements:**
-- **CPU:** `Intel i386(?)` or Fewer
-- **RAM:** `6 MB` _(Required to boot from the GRUB bootloader)_
+- **CPU:** `Intel 486` or Fewer
+- **RAM:** `5 MB` _(Required to boot from the GRUB bootloader)_
 - **VRAM:** `2 MB` or Fewer
-- **Run as Boot:** `CDROM` _(ISO)_ Only, not the disk.
+- **Run as Boot:** Check the image type commands below to find out why.
 - **Architecture:** `32-Bit` _(x86)_ Only, x64 can run as well.
 
 **If you have fewer specifications, you can run it at the same time!**
@@ -77,6 +77,7 @@ First of all, you need to understand what you will do in order to follow the ins
 - pkg-config
 - libpng-dev
 - qemu-system-x86 (i386)
+- qemu-utils (qemu-img, for the converted disk targets)
 ```
 
 - **If you want to get a latest build from the development progress, you need to compile yourself.**
@@ -90,6 +91,9 @@ First of all, you need to understand what you will do in order to follow the ins
 - Required for `make` command to compile the full build for CD-ROM build _(default opinion)_.
 - Required for `make disk` command to compile the full build for Hard Disk build.
 - Required for `make floppy` command to compile the full build for Floppy Disk build.
+- Required for `make usb` command to compile the full build for USB build to run a physical USB stick.
+
+_This build outputs the generated image files to the `build/out` folder ready to be served._
 
 **- Quick Targets:**
 - For using `make run` command to test via QEMU to ensure everything is OK.
@@ -97,7 +101,17 @@ First of all, you need to understand what you will do in order to follow the ins
 
 _Remember to remind this, make sure the `HALOXOS_CONFIG_DEBUG` variable is enabled in `src/config.config.h` before running it to be ready!_
 _At the starts from graphical desktop mode, but you just do to open the debugger terminal as press **Ctrl+Shift+Enter** to use._
+- For use the `make run-iso`, `make run-disk`, `make run-floppy` and `make run-usb` commands to boot straight into a single media (CD-ROM, Hard Disk, Floppy Disk and USB stick).
 - To use `make clean` command to remove build artifacts for quick recovery.
+
+**- Native Disk Images for Other Hypervisors:**
+- `make disk vmware` converts the raw disk image to **VMware VMDK** _(VMware Workstation/Player, ESXi)_.
+- `make disk qemu` converts it to **QEMU QCOW2** _(QEMU/KVM, Proxmox)_.
+- `make disk hyper-v` converts it to **Hyper-V VHD** _(Hyper-V Gen 1, Virtual PC)_.
+- `make disk virtualbox` converts it to **VirtualBox VDI**.
+- Short spellings work too: `vmw`/`vmdk`, `qcow`/`qcow2`/`qem`, `hv`/`hyperv`/`vhd`, `vb`/`vbox`/`vdi` _(for example `make disk vb`)_.
+
+_The conversion uses `qemu-img`..._
 
 ## ⚖️ License:
 This repository is licensed under the GNU General Public License. You can view the full license here: [License Available](https://github.com/svh03ra/HaloxOS/blob/main/LICENSE)

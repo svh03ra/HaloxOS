@@ -158,6 +158,11 @@ R_AddPointToBox
 // Called by G_Drawer.
 void R_RenderPlayerView (player_t *player);
 
+// Hosted 60 Hz camera interpolation (see r_main.c).
+void R_SetInterpolationFrom (fixed_t x, fixed_t y, fixed_t z, angle_t angle);
+void R_SetInterpolationAlpha (int alpha);
+void R_ClearInterpolation (void);
+
 // Called by startup code.
 void R_Init (void);
 

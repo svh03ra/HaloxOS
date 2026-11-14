@@ -152,6 +152,33 @@ static bool ata_wait_drq(uint16_t status_port) {
     return false;
 }
 
+/* Data-phase waits need a much longer budget than command dispatch: a
+ * CD-ROM may spend tens of milliseconds moving between logical blocks
+ * (and a real drive much longer).  Status 0xD0 observed at a 100k-poll
+ * timeout was a still-busy device, not an error. */
+static bool ata_wait_ready_slow(uint16_t status_port) {
+    for (int i = 0; i < 2000000; ++i) {
+        uint8_t status = inb(status_port);
+        if ((status & 0x80u) == 0) {
+            return (status & 0x01u) == 0;
+        }
+    }
+    return false;
+}
+
+static bool ata_wait_drq_slow(uint16_t status_port) {
+    for (int i = 0; i < 2000000; ++i) {
+        uint8_t status = inb(status_port);
+        if ((status & 0x01u) != 0) {
+            return false;
+        }
+        if ((status & 0x08u) != 0 && (status & 0x80u) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* LBA28 READ SECTORS.  A single command can transfer several adjacent
  * sectors, which removes repeated device-select and command-poll overhead
  * from WAD and asset streaming.  It remains strictly PIO (no DMA setup or
@@ -200,6 +227,7 @@ static bool ata_pio_read_sectors_dev(uint16_t io_base, uint8_t devsel_head, uint
                 break;
             }
             if (sector + 1u == sectors) {
+                disk_io_add_bytes((uint32_t)sectors * 512u);
                 return true;
             }
         }
@@ -210,6 +238,44 @@ static bool ata_pio_read_sectors_dev(uint16_t io_base, uint8_t devsel_head, uint
 static bool ata_pio_read_sector_dev(uint16_t io_base, uint8_t devsel_head, uint32_t lba,
                                     uint8_t *buffer) {
     return ata_pio_read_sectors_dev(io_base, devsel_head, lba, buffer, 1);
+}
+
+/* IDENTIFY DEVICE words 60-61: total addressable LBA28 sectors.  Stress
+ * Test uses this so a real ATA disk is read across its actual capacity
+ * instead of the old fixed 4 MiB window.  Returns false for ATAPI/absent
+ * drives, leaving the caller's fallback in place. */
+static bool ata_pata_capacity_dev(uint16_t io_base, uint8_t devsel_head,
+                                  uint32_t *sectors) {
+    const uint16_t status_port = io_base + 7;
+    uint16_t low = 0;
+    uint16_t high = 0;
+
+    ata_detect_devices();
+    if (ata_kind(io_base, devsel_head & 0xF0u) != ATA_DEV_PATA) {
+        return false;
+    }
+    ata_select_dev(io_base, devsel_head);
+    if (!ata_wait_ready(status_port)) {
+        return false;
+    }
+    outb(io_base + 2, 0);
+    outb(io_base + 3, 0);
+    outb(io_base + 4, 0);
+    outb(io_base + 5, 0);
+    outb(status_port, 0xEC);
+    if (!ata_wait_drq(status_port)) {
+        return false;
+    }
+    for (int i = 0; i < 256; ++i) {
+        uint16_t word = inw(io_base);
+        if (i == 60) {
+            low = word;
+        } else if (i == 61) {
+            high = word;
+        }
+    }
+    *sectors = (uint32_t)low | ((uint32_t)high << 16);
+    return *sectors != 0u;
 }
 
 /* Primary master read: used by the desktop layout stamp and other
@@ -243,7 +309,14 @@ static bool ata_pio_write_sector(uint32_t lba, const uint8_t *buffer) {
     }
 
     outb(status_port, 0xE7);
-    return ata_wait_ready(status_port);
+    {
+        bool ok = ata_wait_ready(status_port);
+
+        if (ok) {
+            disk_io_add_bytes(512u);
+        }
+        return ok;
+    }
 }
 
 /* ---- ATAPI packet layer (CD-ROM) ------------------------------------
@@ -282,18 +355,38 @@ static bool ata_packet_io(uint16_t io_base, uint8_t devsel_head,
         return ata_wait_ready(status_port);
     }
 
-    if (!ata_wait_drq(status_port)) {
-        return false;                                  /* data ready */
+    /* ATAPI PIO transfers are block oriented: DRQ is raised again for each
+     * logical block, and a host that reads past the current block gets
+     * stale bytes and leaves the drive with unread data.  Wait for DRQ in
+     * 512-byte steps so both a CD-ROM and a real ATAPI drive are safe; the
+     * previous one-shot wait only worked for single-block commands. */
+    uint32_t done = 0;
+    while (done < data_bytes) {
+        uint32_t chunk = data_bytes - done;
+
+        if (chunk > 512u) {
+            chunk = 512u;
+        }
+        if (!ata_wait_drq_slow(status_port)) {
+            return false;                              /* block data ready */
+        }
+        for (uint32_t i = 0; i < chunk / 2u; ++i) {
+            uint16_t word = inw(io_base);
+            data[done + i * 2u + 0] = (uint8_t)(word & 0xFFu);
+            data[done + i * 2u + 1] = (uint8_t)(word >> 8);
+        }
+        done += chunk;
     }
 
-    uint32_t words = data_bytes / 2;
-    for (uint32_t i = 0; i < words; ++i) {
-        uint16_t word = inw(io_base);
-        data[i * 2 + 0] = (uint8_t)(word & 0xFFu);
-        data[i * 2 + 1] = (uint8_t)(word >> 8);
-    }
+    /* Do not let the next PACKET command race the completion of this one. */
+    {
+        bool ok = ata_wait_ready_slow(status_port);
 
-    return true;
+        if (ok) {
+            disk_io_add_bytes(data_bytes);
+        }
+        return ok;
+    }
 }
 
 /* READ CAPACITY: last logical block address + block size. */

@@ -10,26 +10,26 @@ static void render_app_window(AppId app) {
     }
 
     /* Debugger breakpoint: AUTO-CONTINUE mode. Once armed (after
-     * 'continue'), every rendered frame that touches a targeted app
-     * appends a live trace to the debugger terminal - at most one
-     * catch per timer frame. The system never pauses. Frame numbers
-     * count from the FIRST catch (frame #1), not from when the
-     * breakpoint was typed: each catch's frame number is relative to
-     * the previous one, so the log reads #1, #2, #3... as new catches
-     * fire. */
-    if (debug_bp_armed && debug_bp_mask != 0 &&
-        (debug_bp_mask & 0x8000u || (debug_bp_mask & (uint16_t)(1u << app)) != 0) &&
-        debug_bp_last_catch_tick != timer_ticks) {
-        if (debug_bp_frame_base == 0) {
-            debug_bp_frame_base = fps_frames_total - 1; /* first catch = #1 */
-        }
-        debug_bp_catch(app, fps_frames_total - debug_bp_frame_base);
+     * 'continue'), the next rendered frame that touches a targeted app
+     * appends a live trace to the debugger terminal. debug_bp_caught is
+     * a one-catch-per-frame latch: the debugger's own blink repaints
+     * must not re-catch the frame that already opened the overlay. A
+     * real desktop input (key or mouse click) clears the latch, so the
+     * next frame - for example the frame produced by clicking a
+     * Minesweeper cell - catches once and logs the next frame number. */
+    if (debug_bp_armed && !debug_bp_caught && !debug_overlay_open &&
+        debug_bp_mask != 0 &&
+        (debug_bp_mask & 0x80000000u || (debug_bp_mask & (uint32_t)(1u << app)) != 0)) {
+        debug_bp_catch(app);
     }
 
     /* Only the topmost window under the pointer reacts to it: this window's
      * buttons, rows and close box must not light the hand cursor or show a
      * pressed fill "through" the window that is painted above them. */
     ui_window_interactive = desktop_window_owns_pointer(window);
+    if ((int)app == active_window) {
+        draw_window_drop_shadow(window);
+    }
     draw_window_chrome(window);
 
     /* Clip every app's drawing to this window's client area so scenes
@@ -52,6 +52,8 @@ static void render_app_window(AppId app) {
         case APP_3D_BOX: render_3d_box(window); break;
         case APP_FIRECRACKER: render_firecracker(window); break;
         case APP_DOOM: render_doom(window); break;
+        case APP_COIN_RUN: render_coin_run(window); break;
+        case APP_STRESS_TEST: render_stress(window); break;
     }
 
     clear_window_clip();

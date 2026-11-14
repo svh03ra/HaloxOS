@@ -34,21 +34,65 @@ jobs:
             python3 \
             pkg-config \
             libpng-dev \
+            qemu-utils \
             qemu-system-x86
 
       - name: Build CD-ROM
         run: make -j4
 
-      - name: Build Disk
-        run: make disk -j4
+      # Brand aliases from the Makefile: vmware -> vmdk, qemu -> qcow2,
+      # hyper-v -> vhd, virtualbox -> vdi. Each depends on `disk`.
+      - name: Build disk and hypervisor images
+        run: make -j4 disk vmware qemu hyper-v virtualbox
 
+      - name: Build USB image
+        run: make -j4 usb
+
+      # Last on purpose: the floppy target rebuilds the kernel with the
+      # embedded WAD disabled so it fits 1.44 MB, and nothing after it
+      # should pick that kernel up.
       - name: Build Floppy
-        run: make floppy -j4
+        run: make -j4 floppy
 
-      - name: Verify Build
+      - name: Verify build output
         run: |
-          test -s build/HaloxOS-LiveCD_1.1.iso
-          test -s build/HaloxOS-Disk_1.1.img
-          test -s build/HaloxOS-Floppy_1.1.img
-          echo "All builds are ready:"
-          ls -lh build/HaloxOS-LiveCD_1.1.iso build/HaloxOS-Disk_1.1.img build/HaloxOS-Floppy_1.1.img
+          status=0
+          for f in \
+            build/out/HaloxOS-LiveCD_1.1.iso \
+            build/out/HaloxOS-Disk_1.1.img \
+            build/out/HaloxOS-Disk_1.1.vmdk \
+            build/out/HaloxOS-Disk_1.1.qcow2 \
+            build/out/HaloxOS-Disk_1.1.vhd \
+            build/out/HaloxOS-Disk_1.1.vdi \
+            build/out/HaloxOS-USB_1.1.img \
+            build/out/HaloxOS-Floppy_1.1.img; do
+            if [ -s "$f" ]; then
+              ls -lh "$f"
+            else
+              echo "::error::Missing build output: $f"
+              status=1
+            fi
+          done
+          [ "$status" -eq 0 ] || exit 1
+          echo "All images are ready in build/out/"
+
+      - name: Verify USB image
+        run: |
+          img=build/out/HaloxOS-USB_1.1.img
+          ls -lh "$img"
+          sig=$(dd if="$img" bs=1 skip=510 count=2 status=none | od -An -tx1 | tr -d ' \n')
+          echo "MBR signature: $sig"
+          [ "$sig" = "55aa" ] || { echo "::error::$img has no 0x55AA boot signature"; exit 1; }
+          parted -s "$img" unit s print
+          parted -s "$img" unit s print | grep -q "fat32" \
+            || { echo "::error::$img has no FAT32 partition"; exit 1; }
+          parted -s "$img" unit s print | grep -q "boot" \
+            || { echo "::error::$img partition is not marked bootable"; exit 1; }
+          mdir -i "$img@@1048576" ::/boot
+          mdir -i "$img@@1048576" ::/boot/loader.elf >/dev/null \
+            || { echo "::error::loader.elf missing from the USB image"; exit 1; }
+          mdir -i "$img@@1048576" ::/boot/kernel.bin.zst >/dev/null \
+            || { echo "::error::kernel.bin.zst missing from the USB image"; exit 1; }
+          mdir -i "$img@@1048576" ::/boot/grub/grub.cfg >/dev/null \
+            || { echo "::error::grub.cfg missing from the USB image"; exit 1; }
+          echo "USB image is bootable: MBR signature, bootable FAT32 partition and boot payload verified"
